@@ -301,23 +301,20 @@ def register(app: typer.Typer) -> None:
                 if (ask_tool := agent.tools.get("ask_user")) is not None and hasattr(ask_tool, "set_broker"):
                     ask_tool.set_broker(question_broker)
 
-                # 渠道入站通过 spine：获准消息提交为 USER 轮次。/stop 和 /restart 是控制命令
-                # （总线排空器的职责），在此拦截而不提交为轮次，否则智能体会回复命令文本。cid 与
-                # 通道键（conversation 或 channel:chat_id）一致，也是总线路径 _handle_stop 使用的会话键。
-                from dataclasses import replace
-
+                # 渠道入站通过 transport-neutral control adapter 复用 Scheduler 状态、取消和
+                # INJECT 语义。/restart 仍是 Gateway 进程本地命令，不进入共享控制层。
+                from pico.channels.control import GatewayControlAdapter, GatewayControlOperation
                 from pico.spine import Text
-                from pico.spine.turn import BusyPolicy
+
+                gateway_control = GatewayControlAdapter(
+                    gw_scheduler,
+                    question_broker,
+                    cancel_related=agent.subagents.cancel_by_session,
+                )
 
                 async def _inbound_dispatch(req) -> None:
                     cmd = req.text.strip().lower()
-                    cid = req.conversation or f"{req.source.channel}:{req.source.chat_id}"
-                    if cmd == "/stop":
-                        stopped = gw_scheduler.cancel_conversation(cid)
-                        stopped += await agent.subagents.cancel_by_session(cid)
-                        content = f"Stopped {stopped} task(s)." if stopped else "No active task to stop."
-                        await gw_hub.dispatch(Text(content=content, source=req.source))
-                    elif cmd == "/restart":
+                    if cmd == "/restart":
                         await gw_hub.dispatch(Text(content="Restarting...", source=req.source))
 
                         async def _do_restart() -> None:
@@ -328,16 +325,33 @@ def register(app: typer.Typer) -> None:
                             os.execv(sys.executable, [sys.executable] + sys.argv)
 
                         asyncio.create_task(_do_restart())
-                    elif question_broker.pending_req(cid) is not None:
-                        # 当前会话阻塞在 ask_user 问题上；把答案路由到代理器以解决等待中的工具，
-                        # 而不是启动或注入新轮次。
-                        question_broker.reply(cid, req.text)
-                    elif gw_scheduler.has_inflight(cid):
-                        # 当前会话已有轮次在运行；以 BusyPolicy.INJECT 提交，使循环在下一次迭代合并该消息，
-                        # 而不是排队新轮次。
-                        gw_scheduler.submit(replace(req, busy=BusyPolicy.INJECT))
                     else:
-                        gw_scheduler.submit(req)  # 发出后不等待，也不读回
+                        result = await gateway_control.dispatch(req)
+                        content = None
+                        if result.operation is GatewayControlOperation.STATUS:
+                            status = result.status
+                            if status is not None and status.is_idle:
+                                content = "Idle."
+                            elif status is not None:
+                                running = status.running_turn_id or "none"
+                                queued = ", ".join(status.queued_turn_ids) or "none"
+                                pending_inject = "yes" if status.has_pending_inject else "no"
+                                content = (
+                                    "Active scheduler work.\n"
+                                    f"Running Turn: {running}\n"
+                                    f"Queued Turns: {queued}\n"
+                                    f"Pending INJECT: {pending_inject}"
+                                )
+                        elif result.operation is GatewayControlOperation.STOP:
+                            stopped = result.stopped_count or 0
+                            content = f"Stopped {stopped} task(s)." if stopped else "No active task to stop."
+                        elif result.operation is GatewayControlOperation.INJECT:
+                            content = (
+                                f"Late instruction accepted for running Turn {result.correlated_turn_id}. "
+                                "It will be merged if possible; otherwise it may run as a new Turn."
+                            )
+                        if content is not None:
+                            await gw_hub.dispatch(Text(content=content, source=req.source))
 
                 for _ch in channels.channels.values():
                     _ch.intake.set_submit(_inbound_dispatch)
