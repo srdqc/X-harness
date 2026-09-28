@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from pico.agent.spine_runner import AgentTurnRunner
-from pico.spine.delivery import Capabilities, DeliveryHub
+from pico.spine.delivery import Capabilities, DeliveryHub, DeliveryResult
 from pico.spine.events import (
     Deliverable,
     TurnEnded,
@@ -37,8 +38,12 @@ class HostTurnObservation:
     outcome: TurnOutcome | None
     events: tuple[TurnEvent, ...]
     runtime_state: TurnTerminalState
-    delivery_state: DeliveryOutcome
+    delivery_state: DeliveryOutcome | None
     failure_category: str | None
+    conversation_id: str
+    turn_id: str
+    terminal_event: TurnEnded | TurnFailed
+    delivery_results: tuple[DeliveryResult, ...]
 
 
 class RuntimeTrialHost:
@@ -50,6 +55,7 @@ class RuntimeTrialHost:
         user_concurrency: int = 1,
         system_concurrency: int = 1,
         delivery_retries: int = 0,
+        turn_id_factory: Callable[[], str] | None = None,
     ) -> None:
         self.assembly = assembly
         self.outlet = outlet
@@ -57,14 +63,17 @@ class RuntimeTrialHost:
         self.hub = DeliveryHub(
             send_max_retries=delivery_retries,
             on_delivery_failure=self._delivery_failed,
+            on_delivery_result=self._delivery_result,
         )
         self.hub.register(outlet)
         self._events: list[TurnEvent] = []
         self._delivery_failures = 0
+        self._delivery_results: list[DeliveryResult] = []
         self.scheduler = Scheduler(
             self.runner,
             OriginPools(user=user_concurrency, system=system_concurrency),
             self._sink,
+            turn_id_factory=turn_id_factory,
         )
         self._closed = False
 
@@ -81,6 +90,7 @@ class RuntimeTrialHost:
         user_concurrency: int = 1,
         system_concurrency: int = 1,
         delivery_retries: int = 0,
+        turn_id_factory: Callable[[], str] | None = None,
     ) -> RuntimeTrialHost:
         from pico.cli._runtime_assembly import assemble_runtime
 
@@ -101,10 +111,14 @@ class RuntimeTrialHost:
             user_concurrency=user_concurrency,
             system_concurrency=system_concurrency,
             delivery_retries=delivery_retries,
+            turn_id_factory=turn_id_factory,
         )
 
     async def _delivery_failed(self, _notice) -> None:
         self._delivery_failures += 1
+
+    async def _delivery_result(self, result: DeliveryResult) -> None:
+        self._delivery_results.append(result)
 
     async def _sink(self, event: TurnEvent) -> None:
         self._events.append(event)
@@ -116,27 +130,30 @@ class RuntimeTrialHost:
 
     async def run(self, request: TurnRequest) -> HostTurnObservation:
         start = len(self._events)
-        delivered_start = len(self.outlet.events)
-        failures_start = self._delivery_failures
+        delivery_start = len(self._delivery_results)
         outcome = await self.scheduler.submit(request).result()
         await self.hub.wait_idle(request.source.channel)
         events = tuple(self._events[start:])
-        terminal = _runtime_state(events, outcome)
+        terminal_event = next(
+            (event for event in reversed(events) if isinstance(event, (TurnEnded, TurnFailed))),
+            None,
+        )
+        if terminal_event is None or terminal_event.turn_id is None or terminal_event.conversation_id is None:
+            raise RuntimeError("RuntimeTrialHost requires correlated terminal evidence")
+        runtime_state = _runtime_state(events, outcome)
         failure_category = _failure_category(events)
-        if request.source.channel != self.outlet.name:
-            delivery = DeliveryOutcome.NO_OUTLET
-        elif self._delivery_failures > failures_start:
-            delivery = DeliveryOutcome.DROPPED
-        elif len(self.outlet.events) > delivered_start:
-            delivery = DeliveryOutcome.DELIVERED
-        else:
-            delivery = DeliveryOutcome.DROPPED
+        delivery_results = tuple(self._delivery_results[delivery_start:])
+        delivery = _delivery_state(delivery_results)
         return HostTurnObservation(
             outcome=outcome,
             events=events,
-            runtime_state=terminal,
+            runtime_state=runtime_state,
             delivery_state=delivery,
             failure_category=failure_category,
+            conversation_id=terminal_event.conversation_id,
+            turn_id=terminal_event.turn_id,
+            terminal_event=terminal_event,
+            delivery_results=delivery_results,
         )
 
     async def close(self) -> None:
@@ -179,3 +196,14 @@ def _failure_category(
     if failure.error.startswith(prefix):
         return failure.error.removeprefix(prefix)
     return "runtime_error"
+
+
+def _delivery_state(results: tuple[DeliveryResult, ...]) -> DeliveryOutcome | None:
+    if not results:
+        return None
+    outcomes = {DeliveryOutcome(result.outcome) for result in results}
+    if DeliveryOutcome.DROPPED in outcomes:
+        return DeliveryOutcome.DROPPED
+    if DeliveryOutcome.NO_OUTLET in outcomes:
+        return DeliveryOutcome.NO_OUTLET
+    return DeliveryOutcome.DELIVERED

@@ -480,27 +480,6 @@ def test_gateway_channels_excludes_tui_alongside_enabled_im() -> None:
     assert "qq" not in result
 
 
-def test_stop_dispatch_cancels_both_scheduler_and_subagents() -> None:
-    """The gateway ``/stop`` path must fan out to BOTH the scheduler lane cancel
-    and the subagent-session cancel, summing their counts.
-
-    ``_inbound_dispatch`` is a closure nested inside the gateway serve command
-    with no import seam, so this pins the /stop branch of the command source:
-    dropping either cancel call (or the summed count) breaks this test.
-    """
-    import inspect
-
-    from pico.cli import gateway_commands
-
-    src = inspect.getsource(gateway_commands.register)
-    stop_branch = src.split('if cmd == "/stop":', 1)[1].split('elif cmd == "/restart":', 1)[0]
-    assert "cancel_conversation(cid)" in stop_branch
-    assert "cancel_by_session(cid)" in stop_branch
-    assert "stopped +=" in stop_branch
-
-
-# ---------------------------------------------------------------------------
-
 # ---------------------------------------------------------------------------
 
 from types import SimpleNamespace

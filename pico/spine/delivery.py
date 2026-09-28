@@ -34,6 +34,7 @@ from pico.spine.events import (
 from pico.tracing import semconv, trace
 
 DeliveryFailureSink = Callable[[Notice], Awaitable[None]]
+DeliveryResultSink = Callable[["DeliveryResult"], Awaitable[None]]
 
 
 class TerminalDeliveryError(RuntimeError):
@@ -43,6 +44,19 @@ class TerminalDeliveryError(RuntimeError):
     dropped，不执行指数退避；权限拒绝、无效目标等不可重试原因适合走此路径。异常本身不
     发送用户通知，失败 Notice 由 Hub 的带外 failure sink 负责，避免再次进入故障 Outlet。
     """
+
+
+@dataclass(frozen=True)
+class DeliveryResult:
+    """Immutable terminal-delivery evidence, separate from Turn outcome."""
+
+    conversation_id: str | None
+    turn_id: str | None
+    channel: str
+    event: str
+    outcome: str
+    attempts: int
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -152,11 +166,13 @@ class DeliveryHub:
         send_max_retries: int = _SEND_MAX_RETRIES,
         *,
         on_delivery_failure: DeliveryFailureSink | None = None,
+        on_delivery_result: DeliveryResultSink | None = None,
     ) -> None:
         self._send_max_retries = send_max_retries
         # 有意采用带外通知，不再经过 dispatch：刚耗尽重试的 channel 正是需要承载
         # 报告的 channel，重新 dispatch 会再次经过故障 Outlet 并形成循环。
         self._on_delivery_failure = on_delivery_failure
+        self._on_delivery_result = on_delivery_result
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
         self._outlets: dict[str, Outlet] = {}
@@ -237,6 +253,12 @@ class DeliveryHub:
             logger.warning("no outlet for channel {!r}; dropping {}", channel, type(out).__name__)
             if _is_terminal_deliverable(out):
                 self._deliver_span(out, channel, semconv.CHANNEL_NO_OUTLET, attempts=0)
+                await self._report_delivery_result(
+                    out,
+                    channel,
+                    semconv.CHANNEL_NO_OUTLET,
+                    attempts=0,
+                )
             return
         if isinstance(out, StreamDelta):
             # 记住该 stream 所属 channel，使之后由无来源 lifecycle event 驱动的
@@ -313,6 +335,7 @@ class DeliveryHub:
                 channel=channel,
                 event=type(out).__name__,
                 conversation_id=conversation_id,
+                turn_id=out.turn_id,
                 outcome=outcome,
                 attempts=attempts,
                 error=error,
@@ -331,8 +354,35 @@ class DeliveryHub:
             return
         with trace.attach(item.trace_id, item.parent_span_id):
             self._deliver_span(item.out, outlet.name, outcome, attempts=attempts, error=error)
+        await self._report_delivery_result(item.out, outlet.name, outcome, attempts=attempts, error=error)
         if outcome == semconv.CHANNEL_DROPPED:
             await self._report_delivery_failure(item.out, outlet.name, error)
+
+    async def _report_delivery_result(
+        self,
+        out: Deliverable,
+        channel: str,
+        outcome: str,
+        *,
+        attempts: int,
+        error: str | None = None,
+    ) -> None:
+        if self._on_delivery_result is None:
+            return
+        chat_id = getattr(out.source, "chat_id", None) if out.source is not None else None
+        result = DeliveryResult(
+            conversation_id=out.conversation_id or (f"{channel}:{chat_id}" if chat_id else None),
+            turn_id=out.turn_id,
+            channel=channel,
+            event=type(out).__name__,
+            outcome=outcome,
+            attempts=attempts,
+            error=error,
+        )
+        try:
+            await self._on_delivery_result(result)
+        except Exception:
+            logger.exception("delivery-result sink raised: channel={!r}", channel)
 
     async def _report_delivery_failure(self, out: Deliverable, channel: str, error: str | None) -> None:
         if self._on_delivery_failure is None:
@@ -342,6 +392,7 @@ class DeliveryHub:
             source=out.source,
             detail=f"{channel}:{type(out).__name__}:{error or 'unknown'}",
             conversation_id=out.conversation_id,
+            turn_id=out.turn_id,
         )
         try:
             await self._on_delivery_failure(notice)

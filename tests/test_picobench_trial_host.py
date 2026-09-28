@@ -675,10 +675,10 @@ async def test_runtime_trial_host_classifies_provider_failure_and_missing_delive
 
     assert provider_failure.runtime_state.value == "provider_failed"
     assert provider_failure.failure_category == "auth"
-    assert provider_failure.delivery_state.value == "dropped"
+    assert provider_failure.delivery_state is None
     assert silent.runtime_state.value == "completed"
     assert silent.failure_category is None
-    assert silent.delivery_state.value == "dropped"
+    assert silent.delivery_state is None
 
 
 @pytest.mark.asyncio

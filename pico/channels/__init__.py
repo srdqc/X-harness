@@ -16,6 +16,11 @@ from pico.channels.contract import (
     SupportsLogin,
     SupportsStreaming,
 )
+from pico.channels.control import (
+    GatewayControlAdapter,
+    GatewayControlOperation,
+    GatewayControlResult,
+)
 from pico.channels.manager import ChannelManager
 
 # 公共接口即适配器实现的契约类型。校验辅助函数
@@ -26,6 +31,9 @@ __all__ = [
     "ChannelBase",
     "ChannelManager",
     "ChannelSpec",
+    "GatewayControlAdapter",
+    "GatewayControlOperation",
+    "GatewayControlResult",
     "SupportsLogin",
     "SupportsStreaming",
 ]

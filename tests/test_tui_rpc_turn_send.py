@@ -22,8 +22,9 @@ from pico.tui_rpc.methods.turn import register_turn_methods, turn_send
 
 
 class FakeHandle:
-    def __init__(self) -> None:
+    def __init__(self, turn_id: str) -> None:
         self.cancelled = False
+        self.turn_id = turn_id
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -39,12 +40,14 @@ class FakeScheduler:
         self.submitted: list = []
         self._raises = raises
         self._busy = busy
+        self._next_turn = 0
 
     def submit(self, req):
         if self._raises is not None:
             raise self._raises
         self.submitted.append(req)
-        return FakeHandle()
+        self._next_turn += 1
+        return FakeHandle(f"runtime-turn-{self._next_turn:04d}")
 
     def has_pending_or_running(self, conversation_id: str) -> bool:
         return self._busy
@@ -106,6 +109,7 @@ async def test_turn_send_happy_path_returns_turn_id_and_accepted() -> None:
     assert set(result) == {"turn_id", "accepted"}
     assert result["accepted"] is True
     assert isinstance(result["turn_id"], str) and len(result["turn_id"]) >= 16
+    assert result["turn_id"] == "runtime-turn-0001"
 
     assert len(scheduler.submitted) == 1
     assert scheduler.submitted[0].conversation == "tui:default"

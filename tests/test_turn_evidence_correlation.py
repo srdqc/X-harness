@@ -158,6 +158,30 @@ async def test_a_completed_turn_chains_spine_session_and_leaf_spans(trace_dir):
     assert by["spine.turn"]["status"]["code"] == "OK"
 
 
+async def test_runtime_turn_id_correlates_lifecycle_and_trace(trace_dir):
+    events: list = []
+
+    async def sink(event) -> None:
+        events.append(event)
+
+    lane = Lane(
+        runner=ScriptedRunner(),
+        pools=OriginPools(user=1, system=1),
+        sink=sink,
+        conversation_id="t:c",
+        turn_id_factory=lambda: "turn-traced",
+    )
+    await lane.submit(_req())
+
+    lifecycle_ids = [
+        event.turn_id
+        for event in events
+        if type(event).__name__ in {"TurnStarted", "TurnEnded", "TurnFailed"}
+    ]
+    assert lifecycle_ids == ["turn-traced", "turn-traced"]
+    assert _spine(trace_dir)["attributes"]["spine.turn_id"] == "turn-traced"
+
+
 async def test_a_tool_failure_is_a_completion_with_its_own_outcome(trace_dir):
     await _run_one(ScriptedRunner(tool_failures=1), [])
     attrs = _spine(trace_dir)["attributes"]
