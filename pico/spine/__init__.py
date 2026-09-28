@@ -28,12 +28,13 @@ from pico.spine.events import (
 )
 from pico.spine.message import ChatType, Media, Source
 from pico.spine.runner import Emit, TurnOutcome, TurnRunner
-from pico.spine.scheduler import OriginPools, Scheduler, TurnHandle
+from pico.spine.scheduler import ConversationStatus, OriginPools, Scheduler, TurnHandle
 from pico.spine.turn import BusyPolicy, Origin, TurnRequest
 
 __all__ = [
     "BusyPolicy",
     "ChatType",
+    "ConversationStatus",
     "Deliverable",
     "Emit",
     "Media",

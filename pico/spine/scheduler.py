@@ -64,6 +64,28 @@ class _TurnIdentity:
     turn_id: str
 
 
+@dataclass(frozen=True)
+class ConversationStatus:
+    """Immutable projection of work currently owned by one Scheduler Lane."""
+
+    conversation_id: str
+    running_turn_id: str | None
+    queued_turn_ids: tuple[str, ...]
+    has_pending_inject: bool
+
+    @property
+    def has_scheduled_work(self) -> bool:
+        """Whether the Lane currently owns running, queued, or mailboxed work."""
+
+        return self.running_turn_id is not None or bool(self.queued_turn_ids) or self.has_pending_inject
+
+    @property
+    def is_idle(self) -> bool:
+        """Whether the Scheduler currently owns no work for this conversation."""
+
+        return not self.has_scheduled_work
+
+
 class OriginPools:
     """按 Origin 提供彼此独立的 USER 与 Runtime 并发闸门。
 
@@ -232,6 +254,16 @@ class Lane:
         的 inject 由 `_run_turn` 链式管理，不再重复计入 mailbox。
         """
         return self._running_fut is not None or bool(self._pending) or bool(self._inject_mailbox)
+
+    def _status_snapshot(self) -> ConversationStatus:
+        """Copy the Lane's Scheduler-owned state into an immutable value object."""
+
+        return ConversationStatus(
+            conversation_id=self._conversation_id,
+            running_turn_id=(self._running_identity.turn_id if self._running_identity is not None else None),
+            queued_turn_ids=tuple(identity.turn_id for _req, _fut, identity in self._pending),
+            has_pending_inject=bool(self._inject_mailbox),
+        )
 
     def drain_pending(self) -> int:
         """取消并完成所有尚未运行的排队 Turn 与 mailbox inject，返回条目数。
@@ -536,6 +568,23 @@ class Scheduler:
         """
         lane = self._lanes.get(conversation_id)
         return lane is not None and lane.has_pending_or_running()
+
+    def conversation_status(self, conversation_id: str) -> ConversationStatus:
+        """Return an immutable snapshot of Scheduler-owned work for a conversation.
+
+        A conversation without a Lane (including one already reaped) is represented
+        by an idle snapshot. Completed Turns are not retained as terminal history.
+        """
+
+        lane = self._lanes.get(conversation_id)
+        if lane is None:
+            return ConversationStatus(
+                conversation_id=conversation_id,
+                running_turn_id=None,
+                queued_turn_ids=(),
+                has_pending_inject=False,
+            )
+        return lane._status_snapshot()
 
     async def _reap_loop(self) -> None:
         # 与 lane worker 一样自行终止：有 lane 可回收时运行，无 lane 时退出；
