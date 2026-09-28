@@ -16,7 +16,7 @@ from loguru import logger
 from pico.agent.spine_runner import AgentTurnRunner
 from pico.channels.outlet import ChannelOutletAdapter
 from pico.spine import OriginPools, Scheduler
-from pico.spine.delivery import DeliveryHub
+from pico.spine.delivery import DeliveryHub, DeliveryResultSink
 from pico.spine.events import Text, TurnEnded, TurnFailed, TurnStarted
 from pico.spine.message import Source
 from pico.spine.teardown import teardown_spine
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from pico.spine.events import TurnEvent
     from pico.spine.runner import Drain, Emit, TurnOutcome
     from pico.spine.turn import TurnRequest
+
+TerminalEventSink = Callable[[TurnEnded | TurnFailed], Awaitable[None]]
 
 _TURN_FAILED_REPLY = "Sorry, I encountered an error."
 
@@ -79,6 +81,7 @@ def _make_gateway_sink(
     hub: DeliveryHub,
     agent_loop: AgentLoop,
     sources: dict[str, Source],
+    on_terminal_event: TerminalEventSink | None = None,
 ) -> Callable[[TurnEvent], Awaitable[None]]:
     """Adapt the hub into the gateway's EventSink, restoring the two lifecycle
     side effects the bus drainer's ``_dispatch`` had (which the plain hub sink
@@ -94,7 +97,14 @@ def _make_gateway_sink(
         if isinstance(event, (TurnEnded, TurnFailed)):
             source = sources.pop(event.conversation_id, None)
             if isinstance(event, TurnFailed) and not event.cancelled and source is not None:
-                await hub.dispatch(Text(content=_TURN_FAILED_REPLY, source=source))
+                await hub.dispatch(
+                    Text(
+                        content=_TURN_FAILED_REPLY,
+                        source=source,
+                        conversation_id=event.conversation_id,
+                        turn_id=event.turn_id,
+                    )
+                )
             if isinstance(event, TurnEnded) and event.tool_failures:
                 logger.warning(
                     "gateway turn completed with failed tools: conversation={} "
@@ -105,6 +115,15 @@ def _make_gateway_sink(
                     event.explicit_reply,
                 )
             agent_loop._notify_turn_complete()
+            if on_terminal_event is not None:
+                try:
+                    await on_terminal_event(event)
+                except Exception:
+                    logger.exception(
+                        "gateway terminal-event sink raised: conversation={} turn={}",
+                        event.conversation_id,
+                        event.turn_id,
+                    )
             return
         await hub.dispatch(event)
 
@@ -118,6 +137,9 @@ def build_gateway(
     user_pool: int = 4,
     system_pool: int = 2,
     send_max_retries: int = 3,
+    turn_id_factory: Callable[[], str] | None = None,
+    on_terminal_event: TerminalEventSink | None = None,
+    on_delivery_result: DeliveryResultSink | None = None,
 ) -> tuple[Scheduler, DeliveryHub, dict[str, str], dict[str, Source], Callable[[], Awaitable[None]]]:
     """Wire the gateway's spine pieces: a hub with a ChannelOutletAdapter per
     channel (so a reply reaches its target channel), and a Scheduler whose runner
@@ -135,7 +157,10 @@ def build_gateway(
     Register every channel the gateway may deliver to: a reply whose source
     channel has no registered outlet is dropped by the hub (a warning, not an
     error)."""
-    hub = DeliveryHub(send_max_retries=send_max_retries)
+    hub = DeliveryHub(
+        send_max_retries=send_max_retries,
+        on_delivery_result=on_delivery_result,
+    )
     for channel in channels.values():
         hub.register(ChannelOutletAdapter(channel))
     readback_texts: dict[str, str] = {}
@@ -145,7 +170,8 @@ def build_gateway(
     scheduler = Scheduler(
         GatewayTurnRunner(agent_loop, readback_texts, sources),
         OriginPools(user=user_pool, system=system_pool),
-        _make_gateway_sink(hub, agent_loop, sources),
+        _make_gateway_sink(hub, agent_loop, sources, on_terminal_event),
+        turn_id_factory=turn_id_factory,
     )
 
     async def teardown() -> None:

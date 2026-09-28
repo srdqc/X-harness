@@ -106,6 +106,7 @@ class ToolEvent:
     duration_ms: float | None = None
     source: Source | None = None
     conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ class Text:
     source: Source | None = None
     reply_to: str | None = None
     conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,7 @@ class MediaOut:
     media: tuple[Media, ...]
     source: Source | None = None
     conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,7 @@ class StreamDelta:
     stream_id: str | None = None
     source: Source | None = None
     conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,7 @@ class Reasoning:
     content: str
     source: Source | None = None
     conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +149,7 @@ class Notice:
     source: Source | None = None
     detail: str | None = None
     conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 RunnerEvent = ToolEvent | Text | MediaOut | StreamDelta | Reasoning | Notice

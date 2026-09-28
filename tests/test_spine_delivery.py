@@ -699,7 +699,7 @@ def _delivery_spans(trace_dir):
 async def test_a_delivered_text_records_a_channel_span(hub, trace_dir):
     outlet = FakeOutlet("tg")
     hub.register(outlet)
-    await hub.dispatch(Text(content="hi", source=_src("tg"), conversation_id="tg:c"))
+    await hub.dispatch(Text(content="hi", source=_src("tg"), conversation_id="tg:c", turn_id="turn-1"))
     await hub.wait_idle("tg")
     await _settle(lambda: len(_delivery_spans(trace_dir)) == 1)
     span = _delivery_spans(trace_dir)[0]
@@ -707,6 +707,7 @@ async def test_a_delivered_text_records_a_channel_span(hub, trace_dir):
     assert span["attributes"]["channel.name"] == "tg"
     assert span["attributes"]["channel.event"] == "Text"
     assert span["attributes"]["channel.conversation_id"] == "tg:c"
+    assert span["attributes"]["spine.turn_id"] == "turn-1"
     assert span["attributes"]["channel.outcome"] == "delivered"
     assert span["attributes"]["channel.retries"] == 0
     assert span["status"]["code"] == "OK"

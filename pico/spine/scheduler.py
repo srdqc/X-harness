@@ -355,7 +355,7 @@ class Lane:
         # 与 submit 清除动作之间的原子性。
         self._idle_since = time.monotonic()
 
-    def _make_emit(self, req: TurnRequest) -> Emit:
+    def _make_emit(self, req: TurnRequest, turn_id: str) -> Emit:
         async def emit(event: RunnerEvent) -> None:
             if not isinstance(event, _RUNNER_EVENT_TYPES):
                 raise TypeError(f"a runner may not emit lifecycle events; got {type(event).__name__}")
@@ -365,6 +365,10 @@ class Lane:
                 event = replace(event, source=req.source)
             if event.conversation_id is None:
                 event = replace(event, conversation_id=self._conversation_id)
+            # Runtime owns Turn identity. Runner events always inherit the
+            # actual executing Turn rather than trusting caller metadata.
+            if event.turn_id != turn_id:
+                event = replace(event, turn_id=turn_id)
             await self._sink(event)
 
         return emit
@@ -407,7 +411,7 @@ class Lane:
                     await self._sink(TurnStarted(conversation_id=self._conversation_id, turn_id=turn_id))
                     started = True
                     run_start = time.monotonic()
-                    outcome = await self._runner.run(req, self._make_emit(req), drain)
+                    outcome = await self._runner.run(req, self._make_emit(req, turn_id), drain)
             except asyncio.CancelledError:
                 turn_span.set(semconv.spine_turn_cancelled(started=started))
                 if started:  # 只与 TurnStarted 配对；启动前取消不发出事件
