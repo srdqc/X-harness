@@ -36,3 +36,10 @@ benchmarks/clawbench/results/
 benchmarks/pinchbench/benchmark.log
 benchmarks/pinchbench/results/
 benchmarks/evolver/subject/
+面试文档/
+# Local AI-assisted development files
+AGENTS.md
+docs/spec/
+
+# Interview / personal development notes
+docs/interview/
