@@ -5,9 +5,10 @@ import os
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
-from fcntl import LOCK_EX, LOCK_NB, LOCK_UN, flock
 from pathlib import Path
 from typing import Any, Iterator
+
+from pico.utils.portable_lock import LockTimeoutError, file_lock
 
 from .canonical import canonical_bytes, canonical_json, to_primitive
 from .records import (
@@ -46,17 +47,13 @@ class ArtifactStore:
     def exclusive_run_lock(self) -> Iterator[None]:
         self.root.mkdir(parents=True, exist_ok=True)
         lock_path = self.root / ".run.lock"
-        with lock_path.open("a+b") as lock:
-            try:
-                flock(lock.fileno(), LOCK_EX | LOCK_NB)
-            except BlockingIOError as exc:
-                raise ArtifactError(
-                    f"experiment already has an active writer: {self.ref.experiment_id}",
-                ) from exc
-            try:
+        try:
+            with file_lock(lock_path, blocking=False):
                 yield
-            finally:
-                flock(lock.fileno(), LOCK_UN)
+        except LockTimeoutError as exc:
+            raise ArtifactError(
+                f"experiment already has an active writer: {self.ref.experiment_id}",
+            ) from exc
 
     def freeze_manifest(self, manifest: dict[str, Any]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -195,25 +192,21 @@ class ArtifactStore:
             "key": artifact_dict(key),
             "block_attempt": block_attempt,
         }
-        with lock_path.open("a+b") as lock:
-            flock(lock.fileno(), LOCK_EX)
-            try:
-                if claim_path.exists():
-                    existing = self.read_json(claim_path)
-                    if canonical_bytes(existing) != canonical_bytes(claim):
-                        raise ArtifactError(
-                            f"comparison block retry claim does not match the experiment plan: {claim_path}",
-                        )
-                    return True
-                claimed = self._count_comparison_block_retry_claims(
-                    plan_digest=plan_digest,
-                )
-                if maximum_claims is not None and claimed >= maximum_claims:
-                    return False
-                self.append_immutable(claim_path, claim)
+        with file_lock(lock_path):
+            if claim_path.exists():
+                existing = self.read_json(claim_path)
+                if canonical_bytes(existing) != canonical_bytes(claim):
+                    raise ArtifactError(
+                        f"comparison block retry claim does not match the experiment plan: {claim_path}",
+                    )
                 return True
-            finally:
-                flock(lock.fileno(), LOCK_UN)
+            claimed = self._count_comparison_block_retry_claims(
+                plan_digest=plan_digest,
+            )
+            if maximum_claims is not None and claimed >= maximum_claims:
+                return False
+            self.append_immutable(claim_path, claim)
+            return True
 
     def pair_path(self, key: PairKey) -> Path:
         return (
@@ -318,6 +311,8 @@ class ArtifactStore:
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
+        if os.name == "nt":
+            return
         directory_fd = os.open(path, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
