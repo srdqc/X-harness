@@ -60,11 +60,13 @@ class ToolPhase(StrEnum):
 class TurnStarted:
     """表示 Worker 已取得并开始执行一个 Turn 的生命周期标记。
 
-    ``conversation_id`` 关联对应 Lane 与事件流；在进入 Origin 并发池之前取消的请求不会
-    发出本事件。它没有业务载荷，消费者应把它理解为执行开始事实，而不是回复或成功承诺。
+    ``conversation_id`` 关联对应 Lane 与事件流，``turn_id`` 是 Runtime 分配给本次独立
+    执行的稳定身份；在进入 Origin 并发池之前取消的请求不会发出本事件。它没有业务载荷，
+    消费者应把它理解为执行开始事实，而不是回复或成功承诺。
     """
 
     conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,7 @@ class TurnFailed:
     error: str
     cancelled: bool
     conversation_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class TurnEnded:
     conversation_id: str | None = None
     tool_calls: int = 0
     tool_failures: int = 0
+    turn_id: str | None = None
 
 
 # 可投递 event 由 runner 发出，并路由到 Outlet。

@@ -14,6 +14,7 @@ from pico.spine import (
     TurnFailed,
     TurnOutcome,
     TurnRequest,
+    TurnStarted,
     Usage,
 )
 from pico.spine.scheduler import _DEFAULT_IDLE_TTL, SchedulerDrainingError
@@ -77,11 +78,63 @@ def _scheduler(runner) -> Scheduler:
     return Scheduler(runner, OriginPools(user=1, system=1), _sink)
 
 
+def _id_factory(*values: str):
+    ids = iter(values)
+    return lambda: next(ids)
+
+
 async def test_submit_result_returns_the_outcome():
     sched = _scheduler(SuccessRunner(TurnOutcome(usage=Usage(5, 7, 12), explicit_reply=True)))
     handle = sched.submit(_req())
     outcome = await handle.result()
     assert outcome == TurnOutcome(usage=Usage(5, 7, 12), explicit_reply=True)
+
+
+async def test_append_has_one_stable_runtime_turn_id_across_lifecycle():
+    events: list = []
+
+    async def sink(event) -> None:
+        events.append(event)
+
+    sched = Scheduler(
+        SuccessRunner(),
+        OriginPools(user=1, system=1),
+        sink,
+        turn_id_factory=_id_factory("turn-append"),
+    )
+    handle = sched.submit(_req())
+
+    assert handle.turn_id == "turn-append"
+    await handle.result()
+    lifecycle = [event for event in events if isinstance(event, (TurnStarted, TurnEnded, TurnFailed))]
+    assert [event.turn_id for event in lifecycle] == ["turn-append", "turn-append"]
+
+
+async def test_queued_independent_turns_keep_distinct_runtime_ids():
+    gate = asyncio.Event()
+    runner = NonDrainingRunner(gate)
+    events: list = []
+
+    async def sink(event) -> None:
+        events.append(event)
+
+    sched = Scheduler(
+        runner,
+        OriginPools(user=1, system=1),
+        sink,
+        turn_id_factory=_id_factory("turn-1", "turn-2"),
+    )
+    first = sched.submit(_req(text="first"))
+    await runner.started.wait()
+    queued = sched.submit(_req(text="second"))
+
+    assert first.turn_id == "turn-1"
+    assert queued.turn_id == "turn-2"
+    gate.set()
+    await first.result()
+    await queued.result()
+    assert [event.turn_id for event in events if isinstance(event, TurnStarted)] == ["turn-1", "turn-2"]
+    assert [event.turn_id for event in events if isinstance(event, TurnEnded)] == ["turn-1", "turn-2"]
 
 
 async def test_failed_turn_result_is_none():
@@ -165,11 +218,24 @@ async def test_same_conversation_reuses_one_lane():
 
 async def test_handle_cancel_running_turn():
     runner = HangingRunner()
-    sched = _scheduler(runner)
+    events: list = []
+
+    async def sink(event) -> None:
+        events.append(event)
+
+    sched = Scheduler(
+        runner,
+        OriginPools(user=1, system=1),
+        sink,
+        turn_id_factory=_id_factory("turn-cancelled"),
+    )
     handle = sched.submit(_req())
     await runner.started.wait()
     handle.cancel()
     assert await asyncio.wait_for(handle.result(), timeout=1.0) is None
+    terminal = next(event for event in events if isinstance(event, TurnFailed))
+    assert terminal.cancelled is True
+    assert terminal.turn_id == handle.turn_id == "turn-cancelled"
 
 
 async def test_handle_cancel_queued_turn_without_running_it():
@@ -377,14 +443,27 @@ async def test_inject_merges_into_host_and_chains_its_outcome():
     gate = asyncio.Event()
     outcome = TurnOutcome(usage=Usage(3, 4, 7), explicit_reply=True)
     runner = MergingRunner(gate, outcome)
-    sched = Scheduler(runner, OriginPools(user=1, system=1), _sink)
+    events: list = []
+
+    async def sink(event) -> None:
+        events.append(event)
+
+    sched = Scheduler(
+        runner,
+        OriginPools(user=1, system=1),
+        sink,
+        turn_id_factory=_id_factory("turn-host"),
+    )
     host = sched.submit(_req(channel="tg", chat_id="1", text="host"))
     await runner.started.wait()
     inject = sched.submit(_req(channel="tg", chat_id="1", busy=BusyPolicy.INJECT, text="inject"))
+    assert inject.turn_id == host.turn_id == "turn-host"
     gate.set()
     assert await asyncio.wait_for(host.result(), timeout=1.0) == outcome
     assert await asyncio.wait_for(inject.result(), timeout=1.0) == outcome
     assert runner.merged == ["inject"]
+    assert [event.turn_id for event in events if isinstance(event, TurnStarted)] == ["turn-host"]
+    assert [event.turn_id for event in events if isinstance(event, TurnEnded)] == ["turn-host"]
 
 
 async def test_cancel_on_a_merged_inject_is_noop_and_host_survives():
@@ -421,16 +500,32 @@ async def test_undrained_inject_falls_back_to_append_with_a_log():
     gate = asyncio.Event()
     runner = NonDrainingRunner(gate)
     lines, sink_id = _capture_logs()
-    sched = Scheduler(runner, OriginPools(user=1, system=1), _sink)
-    sched.submit(_req(channel="tg", chat_id="1", text="host"))
+    events: list = []
+
+    async def sink(event) -> None:
+        events.append(event)
+
+    sched = Scheduler(
+        runner,
+        OriginPools(user=1, system=1),
+        sink,
+        turn_id_factory=_id_factory("turn-host", "turn-fallback"),
+    )
+    host = sched.submit(_req(channel="tg", chat_id="1", text="host"))
     await runner.started.wait()
     inject = sched.submit(_req(channel="tg", chat_id="1", busy=BusyPolicy.INJECT, text="inject"))
+    assert inject.turn_id == host.turn_id == "turn-host"
     gate.set()
     try:
         assert isinstance(await asyncio.wait_for(inject.result(), timeout=1.0), TurnOutcome)
     finally:
         logger.remove(sink_id)
     assert runner.ran == ["host", "inject"]
+    assert inject.turn_id == "turn-fallback"
+    assert [event.turn_id for event in events if isinstance(event, TurnStarted)] == [
+        "turn-host",
+        "turn-fallback",
+    ]
     assert any("fell back" in line for line in lines)
 
 

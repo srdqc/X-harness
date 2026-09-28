@@ -233,7 +233,7 @@ CHANNEL_NO_OUTLET = "no_outlet"
 CHANNEL_OUTCOMES = (CHANNEL_DELIVERED, CHANNEL_DROPPED, CHANNEL_NO_OUTLET)
 
 
-def spine_turn_open(req: Any, conversation_id: str) -> dict[str, Any]:
+def spine_turn_open(req: Any, conversation_id: str, turn_id: str | None = None) -> dict[str, Any]:
     """构造 ``spine.turn`` Root Span 的 Opening Attributes。
 
     从 Turn Request 提取 Conversation ID、Origin、Source Channel 与 Busy Policy。返回 Dict 只描述 Turn
@@ -241,6 +241,7 @@ def spine_turn_open(req: Any, conversation_id: str) -> dict[str, Any]:
     """
     source = getattr(req, "source", None)
     return {
+        "spine.turn_id": turn_id,
         "spine.conversation_id": conversation_id,
         "spine.origin": str(getattr(req, "origin", "") or "") or None,
         "spine.channel": getattr(source, "channel", None),

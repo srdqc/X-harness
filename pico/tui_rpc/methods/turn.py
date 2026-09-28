@@ -254,6 +254,10 @@ async def turn_send(
                 attachments_discarded=attachments_discarded,
             )
         return {"turn_id": turn_id, "accepted": True}
+    # A real accepted Turn uses the Runtime-owned Spine identity. The locally
+    # generated value above remains only for pre-submit failure events, where no
+    # independent Runtime Turn exists.
+    turn_id = getattr(handle, "turn_id", turn_id)
     consume_pending_images(parsed.session_key)
 
     # submit 后立即绑定，中间不出现 await。worker 虽已排程，但在这些按请求存储的记录

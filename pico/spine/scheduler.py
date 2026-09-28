@@ -16,8 +16,9 @@ import contextlib
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import get_args
+from uuid import uuid4
 
 from loguru import logger
 
@@ -51,6 +52,18 @@ class SchedulerDrainingError(Exception):
     """
 
 
+@dataclass
+class _TurnIdentity:
+    """Mutable correlation shared by a submission handle and its eventual Turn.
+
+    An in-flight INJECT initially points at the running Turn. If it is not drained
+    and falls back to APPEND, the same reference is updated before that request is
+    queued as a new independent Turn.
+    """
+
+    turn_id: str
+
+
 class OriginPools:
     """按 Origin 提供彼此独立的 USER 与 Runtime 并发闸门。
 
@@ -76,54 +89,83 @@ class OriginPools:
 
 
 class Lane:
-    def __init__(self, runner: TurnRunner, pools: OriginPools, sink: EventSink, conversation_id: str):
+    def __init__(
+        self,
+        runner: TurnRunner,
+        pools: OriginPools,
+        sink: EventSink,
+        conversation_id: str,
+        turn_id_factory: Callable[[], str] | None = None,
+    ):
         self._runner = runner
         self._pools = pools
         self._sink = sink
         self._conversation_id = conversation_id
-        self._pending: deque[tuple[TurnRequest, asyncio.Future]] = deque()
+        self._pending: deque[tuple[TurnRequest, asyncio.Future, _TurnIdentity]] = deque()
         self._worker: asyncio.Task | None = None
         self._run_task: asyncio.Task | None = None
         self._running_fut: asyncio.Future | None = None
+        self._running_identity: _TurnIdentity | None = None
         self._idle_since: float | None = None  # worker drain 后设置，供 reaper 计时
         # Turn 运行期间提交的 inject 在此等待，在工具循环间隙 drain（合并）。
         # drain 后，inject 会在 _run_turn 的 Turn 局部状态中链接到运行中 Turn，
         # 不再保存在这里。
-        self._inject_mailbox: deque[tuple[TurnRequest, asyncio.Future]] = deque()
+        self._inject_mailbox: deque[tuple[TurnRequest, asyncio.Future, _TurnIdentity]] = deque()
+        self._turn_id_factory = turn_id_factory or (lambda: uuid4().hex)
+        self._identities: dict[asyncio.Future, _TurnIdentity] = {}
 
     def submit(self, req: TurnRequest, policy: BusyPolicy = BusyPolicy.APPEND) -> asyncio.Future:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._idle_since = None  # 再次活跃，重置 reaper 的静默计时
         running = self._run_task is not None and not self._run_task.done()
+        if policy is BusyPolicy.INJECT and running:
+            # The submission is a candidate part of the running Turn, not a new
+            # independent Turn. Use a separate mutable reference so fallback can
+            # acquire a new identity without changing the host Turn's identity.
+            if self._running_identity is None:
+                raise RuntimeError("running Turn has no Runtime identity")
+            identity = _TurnIdentity(self._running_identity.turn_id)
+        else:
+            identity = _TurnIdentity(self._turn_id_factory())
+        self._identities[fut] = identity
+        fut.add_done_callback(self._identities.pop)
+
         if policy is BusyPolicy.INTERRUPT and running:
             # 抢占：取消运行中的 Turn，但只取消其 task；worker 仍是其 future 的
             # 唯一 resolver。随后把 interrupter 插到队首，置于 APPEND 积压之前。
             self._run_task.cancel()
-            self._enqueue(req, fut, front=True)
+            self._enqueue(req, fut, identity, front=True)
         elif policy is BusyPolicy.INJECT and running:
             # 该 inject 属于运行中 Turn，暂存到 runner 在工具循环间隙 drain。
             # 若 Turn 结束时仍未 drain，worker 会将其回退为 APPEND Turn。
             # 运行中 Turn 的 worker 仍然存活，无需重新启动。
-            self._inject_mailbox.append((req, fut))
+            self._inject_mailbox.append((req, fut, identity))
             return fut
         else:
             # APPEND，或空闲 lane 上无目标 Turn 的 INTERRUPT/INJECT：
             # 像普通 Turn 一样入队运行。
-            self._enqueue(req, fut)
+            self._enqueue(req, fut, identity)
         if self._worker is None or self._worker.done():
             self._worker = loop.create_task(self._run_worker())
         return fut
 
-    def _enqueue(self, req: TurnRequest, fut: asyncio.Future, *, front: bool = False) -> None:
+    def _enqueue(
+        self,
+        req: TurnRequest,
+        fut: asyncio.Future,
+        identity: _TurnIdentity,
+        *,
+        front: bool = False,
+    ) -> None:
         # 所有 _pending 增长的唯一入口：APPEND 放尾部、INTERRUPT 放头部，以及
         # worker 的 inject 回退。这样深度检查能看到每次 +1，并在每次向上越过阈值
         # 时恰好警告一次，无需额外标志。所有 _pending 增长都必须经过这里，
         # 否则可能跳过 == 检查。
         if front:
-            self._pending.appendleft((req, fut))
+            self._pending.appendleft((req, fut, identity))
         else:
-            self._pending.append((req, fut))
+            self._pending.append((req, fut, identity))
         if len(self._pending) == _DEPTH_WARN_THRESHOLD:
             logger.warning(
                 "lane {} pending queue reached depth {}",
@@ -142,12 +184,12 @@ class Lane:
         """
         if fut.done():
             return
-        for i, (_req, queued) in enumerate(self._pending):
+        for i, (_req, queued, _identity) in enumerate(self._pending):
             if queued is fut:
                 del self._pending[i]
                 fut.set_result(None)
                 return
-        for i, (_req, pending_inject) in enumerate(self._inject_mailbox):
+        for i, (_req, pending_inject, _identity) in enumerate(self._inject_mailbox):
             if pending_inject is fut:
                 # inject 仍在 mailbox、尚未合并时可以取消自身。drain/合并后它不再
                 # 位于此处，此时取消其 handle 不产生效果，也无法杀死 Host Turn。
@@ -177,6 +219,11 @@ class Lane:
         """
         return self._running_fut
 
+    def turn_identity(self, fut: asyncio.Future) -> _TurnIdentity:
+        """Return the correlation reference created for an accepted submission."""
+
+        return self._identities[fut]
+
     def has_pending_or_running(self) -> bool:
         """判断该 Lane 是否仍拥有尚未到达终态的任意工作。
 
@@ -196,12 +243,12 @@ class Lane:
         """
         stopped = 0
         while self._pending:
-            _req, fut = self._pending.popleft()
+            _req, fut, _identity = self._pending.popleft()
             if not fut.done():
                 fut.set_result(None)  # 入队 Turn 从未运行，以 cancelled 完成
             stopped += 1
         while self._inject_mailbox:
-            _req, fut = self._inject_mailbox.popleft()
+            _req, fut, _identity = self._inject_mailbox.popleft()
             if not fut.done():
                 fut.set_result(None)  # 未 drain 的 inject，以 cancelled 完成且不再恢复
             stopped += 1
@@ -229,11 +276,12 @@ class Lane:
 
     async def _run_worker(self) -> None:
         while self._pending:
-            req, fut = self._pending.popleft()
+            req, fut, identity = self._pending.popleft()
             self._running_fut = fut
+            self._running_identity = identity
             # 同步创建 task（此前不 await），使 Turn 一离开队列便可通过
             # _run_task 观察和执行取消。
-            self._run_task = asyncio.create_task(self._run_turn(req))
+            self._run_task = asyncio.create_task(self._run_turn(req, identity.turn_id))
             outcome: TurnOutcome | None = None
             try:
                 outcome = await self._run_task  # 取消/失败为 None，成功时为 outcome
@@ -258,16 +306,18 @@ class Lane:
                     # Turn 未 drain 的 inject 回退为新的 APPEND Turn，确保消息不丢失。
                     # USER inject 会记录该回退，便于排查“为何没有完成注入”。
                     while self._inject_mailbox:
-                        inject_req, inject_fut = self._inject_mailbox.popleft()
+                        inject_req, inject_fut, inject_identity = self._inject_mailbox.popleft()
                         if inject_req.origin is Origin.USER:
                             logger.info(
                                 "inject fell back to append (not merged): origin={}",
                                 inject_req.origin,
                             )
-                        self._enqueue(inject_req, inject_fut)
+                        inject_identity.turn_id = self._turn_id_factory()
+                        self._enqueue(inject_req, inject_fut, inject_identity)
                 finally:
                     self._run_task = None
                     self._running_fut = None
+                    self._running_identity = None
         # 空闲退出时记录 reaper 的静默起点。队列检查与 return 之间不得 await，
         # 避免与退出竞争的 submit 丢失唤醒；同样的无 await 区间也保证该时间戳
         # 与 submit 清除动作之间的原子性。
@@ -293,7 +343,7 @@ class Lane:
         except Exception:
             logger.exception("terminal event sink failed: event={}", type(event).__name__)
 
-    async def _run_turn(self, req: TurnRequest) -> TurnOutcome | None:
+    async def _run_turn(self, req: TurnRequest, turn_id: str) -> TurnOutcome | None:
         chained: list[asyncio.Future] = []
 
         def drain() -> list[TurnRequest]:
@@ -301,8 +351,8 @@ class Lane:
             # /stop 不会再同时完成它们，从而保证每个 future 只有一个 resolver。
             drained = list(self._inject_mailbox)
             self._inject_mailbox.clear()
-            chained.extend(fut for _req, fut in drained)
-            return [req for req, _fut in drained]
+            chained.extend(fut for _req, fut, _identity in drained)
+            return [req for req, _fut, _identity in drained]
 
         outcome: TurnOutcome | None = None
         started = False
@@ -313,7 +363,7 @@ class Lane:
         # 每个 Turn 必须恰好拥有一个独立 trace。
         with trace.span(
             "spine.turn",
-            semconv.spine_turn_open(req, self._conversation_id),
+            semconv.spine_turn_open(req, self._conversation_id, turn_id),
             kind="session",
             root=True,
             session_key=self._conversation_id,
@@ -322,7 +372,7 @@ class Lane:
         ) as turn_span:
             try:
                 async with self._pools.for_origin(req.origin):
-                    await self._sink(TurnStarted(conversation_id=self._conversation_id))
+                    await self._sink(TurnStarted(conversation_id=self._conversation_id, turn_id=turn_id))
                     started = True
                     run_start = time.monotonic()
                     outcome = await self._runner.run(req, self._make_emit(req), drain)
@@ -330,7 +380,12 @@ class Lane:
                 turn_span.set(semconv.spine_turn_cancelled(started=started))
                 if started:  # 只与 TurnStarted 配对；启动前取消不发出事件
                     await self._emit_terminal(
-                        TurnFailed(error="cancelled", cancelled=True, conversation_id=self._conversation_id)
+                        TurnFailed(
+                            error="cancelled",
+                            cancelled=True,
+                            conversation_id=self._conversation_id,
+                            turn_id=turn_id,
+                        )
                     )
                 raise
             except Exception as exc:
@@ -338,7 +393,12 @@ class Lane:
                 turn_span.error(exc)
                 if started:
                     await self._emit_terminal(
-                        TurnFailed(error=str(exc), cancelled=False, conversation_id=self._conversation_id)
+                        TurnFailed(
+                            error=str(exc),
+                            cancelled=False,
+                            conversation_id=self._conversation_id,
+                            turn_id=turn_id,
+                        )
                     )
                 return None
             finally:
@@ -357,6 +417,7 @@ class Lane:
                     conversation_id=self._conversation_id,
                     tool_calls=outcome.tool_calls,
                     tool_failures=outcome.tool_failures,
+                    turn_id=turn_id,
                 )
             )
             return outcome
@@ -370,9 +431,16 @@ class TurnHandle:
     `TurnOutcome` 表示正常完成，``None`` 表示取消或失败路径，没有第二套终态来源。
     """
 
-    def __init__(self, lane: Lane, fut: asyncio.Future):
+    def __init__(self, lane: Lane, fut: asyncio.Future, identity: _TurnIdentity):
         self._lane = lane
         self._fut = fut
+        self._identity = identity
+
+    @property
+    def turn_id(self) -> str:
+        """Runtime identity of the Turn this submission currently correlates to."""
+
+        return self._identity.turn_id
 
     async def result(self) -> TurnOutcome | None:
         return await asyncio.shield(self._fut)
@@ -393,11 +461,19 @@ class Scheduler:
     仍保证进入四种结束路径之一。
     """
 
-    def __init__(self, runner: TurnRunner, pools: OriginPools, sink: EventSink):
+    def __init__(
+        self,
+        runner: TurnRunner,
+        pools: OriginPools,
+        sink: EventSink,
+        *,
+        turn_id_factory: Callable[[], str] | None = None,
+    ):
         self._loop = asyncio.get_running_loop()  # home loop；submit 必须来自这里
         self._runner = runner
         self._pools = pools
         self._sink = sink
+        self._turn_id_factory = turn_id_factory
         self._lanes: dict[str, Lane] = {}
         self._draining = False
         self._reaper: asyncio.Task | None = None
@@ -415,9 +491,16 @@ class Scheduler:
         conversation_id = self._conversation_id(req)
         lane = self._lanes.get(conversation_id)
         if lane is None:
-            lane = Lane(self._runner, self._pools, self._sink, conversation_id)
+            lane = Lane(
+                self._runner,
+                self._pools,
+                self._sink,
+                conversation_id,
+                self._turn_id_factory,
+            )
             self._lanes[conversation_id] = lane
-        handle = TurnHandle(lane, lane.submit(req, policy))
+        fut = lane.submit(req, policy)
+        handle = TurnHandle(lane, fut, lane.turn_identity(fut))
         # 与第一个 lane 一起惰性启动 reaper，模式与 lane worker 相同；
         # 没有剩余 lane 时它会自行终止。
         if self._reaper is None or self._reaper.done():
