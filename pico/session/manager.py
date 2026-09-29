@@ -954,6 +954,51 @@ class SessionManager:
             return cached
         return self._load(key)
 
+    def get_turn_boundary(
+        self,
+        key: str,
+        boundary_id: str,
+    ) -> SessionTurnBoundary | None:
+        """Return one boundary from a fresh, validated durable Session snapshot.
+
+        Recovery coordination must not infer a fork point from mutable cached
+        messages.  Loading through ``_load_state`` applies the existing
+        corruption and generation fences without creating a Session.
+        """
+
+        if not isinstance(boundary_id, str) or not boundary_id:
+            return None
+        session, _storage_epoch = self._load_state(key)
+        if session is None:
+            return None
+        return next(
+            (
+                boundary
+                for boundary in session.turn_boundaries
+                if boundary.boundary_id == boundary_id
+            ),
+            None,
+        )
+
+    def discard_fork_child(self, session: Session) -> bool:
+        """Delete one newly prepared fork using its exact persistence generation.
+
+        This narrow cleanup operation is for a coordinator that still owns an
+        unpublished child.  It refuses ordinary Sessions and delegates the
+        actual deletion/fencing to the existing Session owner.
+        """
+
+        if (
+            not session._persisted
+            or not isinstance(session.metadata.get("parent_session_id"), str)
+        ):
+            return False
+        return self.delete(
+            session.key,
+            expected_epoch=session._storage_epoch,
+            expected_exists=True,
+        )
+
     def fork(self, source_key: str, *, title: str | None = None) -> "Session | None":
         """在 ``source_key`` 当前 Head 创建可独立 Diverge 的 Child Session。
 
