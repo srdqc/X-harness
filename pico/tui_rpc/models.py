@@ -404,6 +404,63 @@ class SessionBranchResult(_Strict):
     message_count: int | None = None
 
 
+class SessionRewindParams(_Strict):
+    session_id: str
+    mode: Literal["conversation", "workspace", "both"]
+    boundary_id: str | None = None
+    checkpoint_record_id: str | None = None
+
+
+class SessionRewindResult(_Strict):
+    status: Literal["ready", "validation_failed", "preparation_failed", "unsupported"]
+    mode: Literal["conversation", "workspace", "both"]
+    session_id: str | None = None
+    workspace_id: str | None = None
+    workspace_path: str | None = None
+    source_session_id: str | None = None
+    boundary_id: str | None = None
+    checkpoint_record_id: str | None = None
+    session_created: bool = False
+    workspace_created: bool = False
+    reason: str | None = None
+    cleanup_failures: list[str] = Field(default_factory=list)
+
+
+class SessionRewindOptionsParams(_Strict):
+    session_id: str
+
+
+class SessionRewindBoundary(_Strict):
+    boundary_id: str
+    message_count: int
+    turn_id: str | None = None
+
+
+class SessionRewindCheckpoint(_Strict):
+    record_id: str
+    checkpoint_id: str
+    session_id: str | None = None
+    boundary_id: str | None = None
+    turn_id: str | None = None
+
+
+class SessionRewindOptionsResult(_Strict):
+    session_id: str
+    boundaries: list[SessionRewindBoundary]
+    checkpoints: list[SessionRewindCheckpoint]
+
+
+class SessionRewindReleaseParams(_Strict):
+    session_id: str
+
+
+class SessionRewindReleaseResult(_Strict):
+    released: bool
+    state: str | None = None
+    workspace_cleaned: bool | None = None
+    reason: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # turn.* 方法
 # ---------------------------------------------------------------------------
@@ -658,6 +715,9 @@ METHOD_MODELS: dict[str, tuple[type[BaseModel], type[BaseModel]]] = {
     "session.clear": (SessionClearParams, SessionClearResult),
     "session.undo": (SessionUndoParams, SessionUndoResult),
     "session.branch": (SessionBranchParams, SessionBranchResult),
+    "session.rewind": (SessionRewindParams, SessionRewindResult),
+    "session.rewind_options": (SessionRewindOptionsParams, SessionRewindOptionsResult),
+    "session.rewind_release": (SessionRewindReleaseParams, SessionRewindReleaseResult),
     "session.export": (SessionExportParams, SessionExportResult),
     # turn.* 方法
     "turn.send": (TurnSendParams, TurnSendResult),

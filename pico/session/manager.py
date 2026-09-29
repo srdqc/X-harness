@@ -980,6 +980,12 @@ class SessionManager:
             None,
         )
 
+    def list_turn_boundaries(self, key: str) -> tuple[SessionTurnBoundary, ...]:
+        """Return validated durable boundaries without exposing mutable Session state."""
+
+        session, _storage_epoch = self._load_state(key)
+        return tuple(session.turn_boundaries) if session is not None else ()
+
     def discard_fork_child(self, session: Session) -> bool:
         """Delete one newly prepared fork using its exact persistence generation.
 

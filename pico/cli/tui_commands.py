@@ -419,6 +419,7 @@ async def _run_rpc_server_until_done(
         return None
 
     turn_scheduler = None
+    rewind_coordinator = None
     turn_ids: dict[int, str] = {}
     submission_ids: dict[int, str] = {}
     turn_teardown = None
@@ -431,7 +432,7 @@ async def _run_rpc_server_until_done(
     cleanup_task: asyncio.Task[None] | None = None
 
     async def _bind_runtime() -> None:
-        nonlocal agent_loop, build_error, turn_scheduler, turn_teardown
+        nonlocal agent_loop, build_error, turn_scheduler, turn_teardown, rewind_coordinator
         try:
             runtime = await runtime_host.acquire()
             agent_loop = runtime.agent_loop
@@ -452,7 +453,17 @@ async def _run_rpc_server_until_done(
                 await_runtime_ready=_await_runtime_ready,
                 turn_ids=turn_ids,
                 submission_ids=submission_ids,
+                continuation_bindings=runtime.continuation_bindings,
+                continuation_loop_factory=runtime.continuation_agent_loop,
             )
+            try:
+                rewind_coordinator = runtime.rewind_coordinator(
+                    turn_scheduler.has_pending_or_running
+                )
+            except RuntimeError:
+                # Older/test RuntimeAssembly doubles may not provide the optional
+                # selective-rewind capability.  Normal TUI execution remains valid.
+                rewind_coordinator = None
             agent_loop.subagents.set_submit(turn_scheduler.submit)
             if agent_loop.cron_service is not None:
                 base_on_cron = make_on_cron_job(
@@ -486,6 +497,17 @@ async def _run_rpc_server_until_done(
                 data={"reason": "runtime_scheduler_unavailable"},
             )
         return turn_scheduler
+
+    async def _acquire_rewind_coordinator():
+        await runtime_bound.wait()
+        if build_error is not None:
+            raise build_error
+        if rewind_coordinator is None:
+            raise InternalError(
+                detail="rewind coordinator unavailable",
+                data={"reason": "rewind_coordinator_unavailable"},
+            )
+        return rewind_coordinator
 
     async def _start_runtime_services() -> None:
         nonlocal backend_start_error
@@ -586,6 +608,7 @@ async def _run_rpc_server_until_done(
             scheduler_factory=_acquire_turn_scheduler,
             turn_ids=turn_ids,
             submission_ids=submission_ids,
+            rewind_coordinator_factory=_acquire_rewind_coordinator,
         )
 
         from pico.config.paths import get_logs_dir

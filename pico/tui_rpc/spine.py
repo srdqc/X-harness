@@ -410,6 +410,8 @@ def build_tui(
     await_runtime_ready: Callable[[], Awaitable[None]] | None = None,
     turn_ids: dict[int, str] | None = None,
     submission_ids: dict[int, str] | None = None,
+    continuation_bindings: Any = None,
+    continuation_loop_factory: Callable[[Any], Any] | None = None,
 ) -> tuple[Scheduler, DeliveryHub, dict[int, str], dict[int, str], Callable[[], Awaitable[None]]]:
     """构建 TUI Turn 经过的完整 Spine bundle。
 
@@ -435,18 +437,37 @@ def build_tui(
     rpc_errors: dict[int, RpcError] = {}
     if readback_texts is None:
         readback_texts = {}
+    runner = TuiTurnRunner(
+        agent_loop,
+        emitter,
+        usages,
+        turn_ids,
+        readback_texts,
+        running_requests,
+        submission_ids,
+        rpc_errors,
+        await_runtime_ready,
+    )
+    if continuation_bindings is not None and continuation_loop_factory is not None:
+        from pico.agent.loop.rewind import ContinuationTurnRunner
+
+        runner = ContinuationTurnRunner(
+            runner,
+            continuation_bindings,
+            lambda target: TuiTurnRunner(
+                continuation_loop_factory(target),
+                emitter,
+                usages,
+                turn_ids,
+                readback_texts,
+                running_requests,
+                submission_ids,
+                rpc_errors,
+                await_runtime_ready,
+            ),
+        )
     scheduler = Scheduler(
-        TuiTurnRunner(
-            agent_loop,
-            emitter,
-            usages,
-            turn_ids,
-            readback_texts,
-            running_requests,
-            submission_ids,
-            rpc_errors,
-            await_runtime_ready,
-        ),
+        runner,
         OriginPools(user=user_pool, system=system_pool),
         _make_tui_sink(
             hub,

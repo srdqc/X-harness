@@ -56,6 +56,13 @@ class RewindRequest:
 
 
 @dataclass(frozen=True)
+class RewindSelectionOptions:
+    session_id: str
+    boundaries: tuple[SessionTurnBoundary, ...]
+    checkpoints: tuple[CheckpointRecord, ...]
+
+
+@dataclass(frozen=True)
 class ContinuationTarget:
     """Immutable facts needed to construct or select the next normal runner."""
 
@@ -313,6 +320,25 @@ class SelectiveRewindCoordinator:
         async with self._prepare_lock:
             return await self._rewind_locked(request)
 
+    async def selection_options(self, session_id: str) -> RewindSelectionOptions:
+        """List durable boundary and currently valid CREATED checkpoint identities."""
+
+        boundaries = self._sessions.list_turn_boundaries(session_id)
+        checkpoints: list[CheckpointRecord] = []
+        for record in self._checkpoints.list_records():
+            validation = await self._checkpoints.validate(
+                record.record_id,
+                expected_workspace=self._checkpoints.workspace_path,
+            )
+            if validation.usable and validation.record is not None:
+                checkpoints.append(validation.record)
+        return RewindSelectionOptions(session_id, boundaries, tuple(checkpoints))
+
+    def release(self, session_id: str) -> ContinuationRelease | None:
+        """Explicitly release one process-local continuation binding."""
+
+        return self._bindings.release(session_id)
+
     async def _rewind_locked(self, request: RewindRequest) -> RewindResult:
         if not isinstance(request.session_id, str) or not request.session_id:
             return self._result(RewindStatus.VALIDATION_FAILED, request, reason="session_required")
@@ -528,6 +554,7 @@ __all__ = [
     "RewindMode",
     "RewindRequest",
     "RewindResult",
+    "RewindSelectionOptions",
     "RewindStatus",
     "SelectiveRewindCoordinator",
     "WorkspaceLeaseState",

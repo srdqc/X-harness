@@ -103,6 +103,42 @@ export interface SessionBranchResponse {
   title?: string
 }
 
+export type RewindMode = 'conversation' | 'workspace' | 'both'
+
+export interface SessionRewindResponse {
+  boundary_id?: null | string
+  checkpoint_record_id?: null | string
+  cleanup_failures: string[]
+  mode: RewindMode
+  reason?: null | string
+  session_created: boolean
+  session_id?: null | string
+  source_session_id?: null | string
+  status: 'preparation_failed' | 'ready' | 'unsupported' | 'validation_failed'
+  workspace_created: boolean
+  workspace_id?: null | string
+  workspace_path?: null | string
+}
+
+export interface SessionRewindOptionsResponse {
+  boundaries: Array<{ boundary_id: string; message_count: number; turn_id?: null | string }>
+  checkpoints: Array<{
+    boundary_id?: null | string
+    checkpoint_id: string
+    record_id: string
+    session_id?: null | string
+    turn_id?: null | string
+  }>
+  session_id: string
+}
+
+export interface SessionRewindReleaseResponse {
+  reason?: null | string
+  released: boolean
+  state?: null | string
+  workspace_cleaned?: boolean | null
+}
+
 export interface SessionCloseResponse {
   ok?: boolean
 }

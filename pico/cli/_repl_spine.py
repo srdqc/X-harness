@@ -6,6 +6,7 @@ The REPL runs turns through spine (submit -> lane -> run_turn -> hub -> outlet).
 spine never imports cli; cli imports spine.
 """
 
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -106,6 +107,8 @@ def build_repl(
     send_tool_hints: bool = False,
     user_pool: int = 1,
     system_pool: int = 1,
+    continuation_bindings: Any = None,
+    continuation_loop_factory: Callable[[Any], Any] | None = None,
 ) -> tuple[Scheduler, DeliveryHub, Callable[[], Awaitable[None]]]:
     """Wire the spine pieces a REPL turn flows through: a hub with the channel's
     CliOutlet registered, and a Scheduler whose runner bridges the agent loop and
@@ -126,8 +129,17 @@ def build_repl(
             send_tool_hints=send_tool_hints,
         )
     )
+    runner = AgentTurnRunner(agent_loop, stream=False)
+    if continuation_bindings is not None and continuation_loop_factory is not None:
+        from pico.agent.loop.rewind import ContinuationTurnRunner
+
+        runner = ContinuationTurnRunner(
+            runner,
+            continuation_bindings,
+            lambda target: AgentTurnRunner(continuation_loop_factory(target), stream=False),
+        )
     scheduler = Scheduler(
-        AgentTurnRunner(agent_loop, stream=False),
+        runner,
         OriginPools(user=user_pool, system=system_pool),
         _make_cli_sink(hub, render_error),
     )
@@ -146,9 +158,10 @@ async def run_repl_loop(
     channel: str,
     chat_id: str,
     is_exit: Callable[[str], bool],
-    handle_slash: Callable[[str], bool],
+    handle_slash: Callable[[str], bool | Awaitable[bool]],
     thinking: Callable[[], Any],
     on_exit: Callable[[], None],
+    conversation_id: Callable[[], str] | None = None,
 ) -> None:
     """Read a line, submit it as a turn, wait for the turn to finish AND its
     output to render, then prompt again — so a reply always lands before the next
@@ -166,14 +179,18 @@ async def run_repl_loop(
             if is_exit(command):
                 on_exit()
                 return
-            if command.startswith("/") and handle_slash(command):
-                continue
+            if command.startswith("/"):
+                handled = handle_slash(command)
+                if inspect.isawaitable(handled):
+                    handled = await handled
+                if handled:
+                    continue
             handle = submit(
                 TurnRequest(
                     origin=Origin.USER,
                     source=Source(channel=channel, chat_id=chat_id, sender_id="user", chat_type=ChatType.DM),
                     text=user_input,
-                    conversation=f"{channel}:{chat_id}",
+                    conversation=(conversation_id() if conversation_id else f"{channel}:{chat_id}"),
                 )
             )
             with thinking():

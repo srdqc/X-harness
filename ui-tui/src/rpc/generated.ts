@@ -655,6 +655,77 @@ export interface SessionBranchParams {
 }
 /**
  * This interface was referenced by `PicoRpcRoot`'s JSON-Schema
+ * via the `definition` "SessionRewindParams".
+ */
+export interface SessionRewindParams {
+  session_id: string;
+  mode: 'conversation' | 'workspace' | 'both';
+  boundary_id?: string;
+  checkpoint_record_id?: string;
+}
+/**
+ * This interface was referenced by `PicoRpcRoot`'s JSON-Schema
+ * via the `definition` "SessionRewindResult".
+ */
+export interface SessionRewindResult {
+  status: 'ready' | 'validation_failed' | 'preparation_failed' | 'unsupported';
+  mode: 'conversation' | 'workspace' | 'both';
+  session_id?: string;
+  workspace_id?: string;
+  workspace_path?: string;
+  source_session_id?: string;
+  boundary_id?: string;
+  checkpoint_record_id?: string;
+  session_created?: boolean;
+  workspace_created?: boolean;
+  reason?: string;
+  cleanup_failures?: string[];
+}
+/**
+ * This interface was referenced by `PicoRpcRoot`'s JSON-Schema
+ * via the `definition` "SessionRewindOptionsParams".
+ */
+export interface SessionRewindOptionsParams {
+  session_id: string;
+}
+/**
+ * This interface was referenced by `PicoRpcRoot`'s JSON-Schema
+ * via the `definition` "SessionRewindOptionsResult".
+ */
+export interface SessionRewindOptionsResult {
+  session_id: string;
+  boundaries: {
+    boundary_id: string;
+    message_count: number;
+    turn_id?: string;
+  }[];
+  checkpoints: {
+    record_id: string;
+    checkpoint_id: string;
+    session_id?: string;
+    boundary_id?: string;
+    turn_id?: string;
+  }[];
+}
+/**
+ * This interface was referenced by `PicoRpcRoot`'s JSON-Schema
+ * via the `definition` "SessionRewindReleaseParams".
+ */
+export interface SessionRewindReleaseParams {
+  session_id: string;
+}
+/**
+ * This interface was referenced by `PicoRpcRoot`'s JSON-Schema
+ * via the `definition` "SessionRewindReleaseResult".
+ */
+export interface SessionRewindReleaseResult {
+  released: boolean;
+  state?: string;
+  workspace_cleaned?: boolean;
+  reason?: string;
+}
+/**
+ * This interface was referenced by `PicoRpcRoot`'s JSON-Schema
  * via the `definition` "SessionExportParams".
  */
 export interface SessionExportParams {

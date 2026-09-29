@@ -37,6 +37,11 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     from rich.console import Console
 
+    from pico.agent.loop.rewind import (
+        ContinuationTarget,
+        SelectiveRewindCoordinator,
+    )
+
 _CRON_SHELL_ONLY = {
     "run": "test-fire mutates job state and uses asyncio.run, which can't "
     "run inside the REPL event loop. Use `pico cron run` in a shell.",
@@ -60,6 +65,93 @@ def handle_repl_slash(command: str, *, console: "Console") -> bool:
         _print_help(console)
         return True
     return False
+
+
+async def handle_repl_rewind(
+    command: str,
+    *,
+    console: "Console",
+    coordinator: "SelectiveRewindCoordinator",
+    session_id: str,
+    on_ready: Callable[["ContinuationTarget"], None],
+) -> bool:
+    """Handle the explicit in-process selective-rewind command."""
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError as exc:
+        console.print(f"[red]invalid /rewind command: {exc}[/red]")
+        return True
+    if not tokens or tokens[0].lower() != "/rewind":
+        return False
+    args = tokens[1:]
+    if not args or args[0] in {"help", "-h", "--help"}:
+        _print_rewind_help(console)
+        return True
+    if args[0] == "list":
+        options = await coordinator.selection_options(session_id)
+        console.print("[bold]Durable Session boundaries[/bold]")
+        for boundary in options.boundaries:
+            console.print(
+                f"  [cyan]{boundary.boundary_id}[/cyan] "
+                f"turn={boundary.turn_id or '-'} messages={boundary.message_count}"
+            )
+        console.print("[bold]Valid CREATED checkpoint records[/bold]")
+        for record in options.checkpoints:
+            console.print(
+                f"  [cyan]{record.record_id}[/cyan] turn={record.turn_id or '-'} "
+                f"boundary={record.boundary_id or '-'}"
+            )
+        return True
+    if args[0] == "release" and len(args) == 1:
+        released = coordinator.release(session_id)
+        if released is None:
+            console.print("[yellow]no active continuation binding for this Session[/yellow]")
+        elif released.reason:
+            console.print(f"[red]continuation release failed: {released.reason}[/red]")
+        else:
+            console.print(
+                f"[green]continuation released[/green]: session={released.session_id}; "
+                f"workspace_cleaned={released.workspace_cleaned}"
+            )
+        return True
+
+    from pico.agent.loop.rewind import RewindMode, RewindRequest
+
+    try:
+        mode = RewindMode(args[0])
+    except ValueError:
+        _print_rewind_help(console)
+        return True
+    boundary_id = args[1] if mode in {RewindMode.CONVERSATION, RewindMode.BOTH} and len(args) > 1 else None
+    checkpoint_index = 2 if mode is RewindMode.BOTH else 1
+    checkpoint_id = args[checkpoint_index] if mode in {RewindMode.WORKSPACE, RewindMode.BOTH} and len(args) > checkpoint_index else None
+    expected = 2 if mode in {RewindMode.CONVERSATION, RewindMode.WORKSPACE} else 3
+    if len(args) != expected:
+        _print_rewind_help(console)
+        return True
+    result = await coordinator.rewind(
+        RewindRequest(
+            mode,
+            session_id,
+            boundary_id=boundary_id,
+            checkpoint_record_id=checkpoint_id,
+        )
+    )
+    if not result.ready or result.target is None:
+        cleanup = f"; cleanup failures: {', '.join(result.cleanup_failures)}" if result.cleanup_failures else ""
+        console.print(f"[red]rewind {result.status.value}: {result.reason or 'unknown'}{cleanup}[/red]")
+        return True
+    target = result.target
+    on_ready(target)
+    session_state = "branched" if target.session_created else "history unchanged"
+    workspace_state = "restored" if target.workspace_created else "unchanged"
+    console.print(
+        f"[green]rewind ready[/green]: mode={mode.value}; session={target.session_id} "
+        f"({session_state}); workspace={target.workspace_path} ({workspace_state})"
+    )
+    console.print("[dim]Memory and external side effects were not rewound.[/dim]")
+    return True
 
 
 # ── 小型参数辅助方法 ─────────────────────────────────────────────────
@@ -238,7 +330,19 @@ def _print_help(console: "Console") -> None:
     console.print(
         "[bold]Local slash commands[/bold] (run in-process, not sent to the agent):\n"
         "  [cyan]/cron[/cyan] …      manage scheduled jobs — type [cyan]/cron help[/cyan]\n"
+        "  [cyan]/rewind[/cyan] …    selective conversation/Workspace rewind\n"
         "  [cyan]/help[/cyan]        this message"
+    )
+
+
+def _print_rewind_help(console: "Console") -> None:
+    console.print(
+        "[bold]/rewind[/bold] — branch-preserving selective rewind\n"
+        "  [cyan]/rewind list[/cyan]\n"
+        "  [cyan]/rewind release[/cyan]\n"
+        "  [cyan]/rewind conversation <boundary-id>[/cyan]\n"
+        "  [cyan]/rewind workspace <checkpoint-record-id>[/cyan]\n"
+        "  [cyan]/rewind both <boundary-id> <checkpoint-record-id>[/cyan]"
     )
 
 
@@ -257,4 +361,4 @@ def _print_cron_help(console: "Console") -> None:
     )
 
 
-__all__ = ["handle_repl_slash"]
+__all__ = ["handle_repl_rewind", "handle_repl_slash"]

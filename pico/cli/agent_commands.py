@@ -273,6 +273,8 @@ def register(app: typer.Typer) -> None:
                         render_error=lambda c: console.print(f"[red]{c}[/red]"),
                         send_progress=bool(ch.send_progress) if ch else False,
                         send_tool_hints=bool(ch.send_tool_hints) if ch else False,
+                        continuation_bindings=getattr(runtime, "continuation_bindings", None),
+                        continuation_loop_factory=getattr(runtime, "continuation_agent_loop", None),
                     )
                     # 单次 spawn 很少能在下方硬退出前完成（与总线路径相同），但仍连接 submit，
                     # 使行为与 REPL/TUI 一致。
@@ -351,6 +353,14 @@ def register(app: typer.Typer) -> None:
                         render_error=lambda c: console.print(f"[red]{c}[/red]"),
                         send_progress=bool(_ch.send_progress) if _ch else False,
                         send_tool_hints=bool(_ch.send_tool_hints) if _ch else False,
+                        continuation_bindings=getattr(runtime, "continuation_bindings", None),
+                        continuation_loop_factory=getattr(runtime, "continuation_agent_loop", None),
+                    )
+                    rewind_factory = getattr(runtime, "rewind_coordinator", None)
+                    rewind_coordinator = (
+                        rewind_factory(scheduler.has_pending_or_running)
+                        if callable(rewind_factory)
+                        else None
                     )
                     # 子智能体结果回注会提交来源为 SUBAGENT 的轮次。
                     agent_loop.subagents.set_submit(scheduler.submit)
@@ -374,10 +384,31 @@ def register(app: typer.Typer) -> None:
                         _restore_terminal()
                         console.print("\nGoodbye!")
 
-                    def _slash(command: str) -> bool:
-                        from pico.cli._repl_slash import handle_repl_slash
+                    active_session_id = session_id
 
+                    async def _slash(command: str) -> bool:
+                        nonlocal active_session_id
+                        from pico.cli._repl_slash import (
+                            handle_repl_rewind,
+                            handle_repl_slash,
+                        )
+
+                        if command.split(maxsplit=1)[0].lower() == "/rewind":
+                            if rewind_coordinator is None:
+                                console.print("[red]selective rewind unavailable[/red]")
+                                return True
+                            return await handle_repl_rewind(
+                                command,
+                                console=console,
+                                coordinator=rewind_coordinator,
+                                session_id=active_session_id,
+                                on_ready=lambda target: _set_active_session(target.session_id),
+                            )
                         return handle_repl_slash(command, console=console)
+
+                    def _set_active_session(value: str) -> None:
+                        nonlocal active_session_id
+                        active_session_id = value
 
                     await run_repl_loop(
                         read_input=_read_interactive_input_async,
@@ -389,6 +420,7 @@ def register(app: typer.Typer) -> None:
                         handle_slash=_slash,
                         thinking=_thinking_ctx,
                         on_exit=_on_exit,
+                        conversation_id=lambda: active_session_id,
                     )
                 finally:
                     try:
