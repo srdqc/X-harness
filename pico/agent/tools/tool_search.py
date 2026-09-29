@@ -165,7 +165,7 @@ class ToolSearchController:
         invocation = self.resolve_invocation(name, arguments, context or ToolExecutionContext())
         if invocation is None:
             return "Error: 'arguments' must be a JSON object."
-        execution = await self._registry.execute_invocation(invocation)
+        execution = await self._registry.execute_target(invocation, routed_via=TOOL_CALL_NAME)
         return execution.result
 
 

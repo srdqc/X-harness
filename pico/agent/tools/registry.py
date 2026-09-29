@@ -14,6 +14,7 @@ from typing import Any
 
 from pico.agent.tools.base import Tool, ToolResult
 from pico.agent.tools.execution import (
+    ResolvedToolInvocation,
     ToolEffect,
     ToolExecution,
     ToolExecutionContext,
@@ -162,6 +163,24 @@ class ToolRegistry:
             return ToolResult(f"Error executing {name}: {str(e)}" + _hint, failed=True)
 
     async def execute_invocation(self, invocation: ToolInvocation) -> ToolExecution:
+        return await self.execute_target(invocation)
+
+    async def execute_target(
+        self,
+        invocation: ToolInvocation,
+        *,
+        routed_via: str | None = None,
+    ) -> ToolExecution:
+        """Resolve and execute one concrete Registry target through the common seam.
+
+        ``routed_via`` identifies a transport/meta Tool such as ``tool_call``; it
+        never substitutes for the concrete target name or changes Registry lookup.
+        Missing targets retain the normal ``execute`` failure contract.
+        """
+        resolved = self.resolve_target(invocation, routed_via=routed_via)
+        if resolved is not None:
+            return await self.execute_resolved(resolved)
+
         started = time.perf_counter_ns()
         result = await self.execute(
             invocation.name,
@@ -171,6 +190,54 @@ class ToolRegistry:
         )
         duration_ms = (time.perf_counter_ns() - started) / 1_000_000
         return ToolExecution(invocation=invocation, result=result, duration_ms=duration_ms)
+
+    def resolve_target(
+        self,
+        invocation: ToolInvocation,
+        *,
+        routed_via: str | None = None,
+    ) -> ResolvedToolInvocation | None:
+        """Return the current executable Tool without running or mutating it."""
+        tool = self._tools.get(invocation.name)
+        if tool is None:
+            return None
+        return ResolvedToolInvocation(
+            invocation=invocation,
+            tool=tool,
+            routed_via=routed_via,
+        )
+
+    async def execute_resolved(self, resolved: ResolvedToolInvocation) -> ToolExecution:
+        """Common post-resolution, pre-execution seam for every concrete target."""
+        invocation = resolved.invocation
+        current_tool = self._tools.get(invocation.name)
+        if current_tool is None:
+            started = time.perf_counter_ns()
+            result = await self.execute(
+                invocation.name,
+                invocation.arguments,
+                invocation.context.call_id,
+                invocation.context,
+            )
+            duration_ms = (time.perf_counter_ns() - started) / 1_000_000
+            return ToolExecution(invocation=invocation, result=result, duration_ms=duration_ms)
+        if current_tool is not resolved.tool:
+            resolved = replace(resolved, tool=current_tool)
+
+        started = time.perf_counter_ns()
+        result = await self.execute(
+            invocation.name,
+            invocation.arguments,
+            invocation.context.call_id,
+            invocation.context,
+        )
+        duration_ms = (time.perf_counter_ns() - started) / 1_000_000
+        return ToolExecution(
+            invocation=invocation,
+            result=result,
+            duration_ms=duration_ms,
+            resolved=resolved,
+        )
 
     async def execute_many(
         self,
@@ -240,7 +307,8 @@ class ToolRegistry:
             await on_start(observed)
         execution = await self.execute_invocation(invocation)
         if execution.invocation is not observed:
-            execution = replace(execution, invocation=observed)
+            resolved = self.resolve_target(observed, routed_via=invocation.name)
+            execution = replace(execution, invocation=observed, resolved=resolved)
         if on_complete is not None:
             await on_complete(execution)
         return execution

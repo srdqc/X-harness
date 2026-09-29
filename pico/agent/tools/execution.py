@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pico.agent.tools.base import ToolResult
+    from pico.agent.tools.base import Tool, ToolResult
 
 
 class ToolEffect(StrEnum):
@@ -42,10 +42,24 @@ class ToolInvocation:
 
 
 @dataclass(frozen=True)
+class ResolvedToolInvocation:
+    """One Registry-resolved executable target and its invocation metadata."""
+
+    invocation: ToolInvocation
+    tool: Tool
+    routed_via: str | None = None
+
+    @property
+    def effect(self) -> ToolEffect:
+        return self.tool.capability.effect
+
+
+@dataclass(frozen=True)
 class ToolExecution:
     invocation: ToolInvocation
     result: ToolResult
     duration_ms: float
+    resolved: ResolvedToolInvocation | None = None
 
 
 __all__ = [
@@ -54,4 +68,5 @@ __all__ = [
     "ToolExecution",
     "ToolExecutionContext",
     "ToolInvocation",
+    "ResolvedToolInvocation",
 ]

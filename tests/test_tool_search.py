@@ -6,7 +6,14 @@ from typing import Any
 import pytest
 
 from pico.agent.tools.base import Tool
-from pico.agent.tools.execution import ToolExecutionContext
+from pico.agent.tools.execution import (
+    ResolvedToolInvocation,
+    ToolCapability,
+    ToolEffect,
+    ToolExecution,
+    ToolExecutionContext,
+    ToolInvocation,
+)
 from pico.agent.tools.registry import ToolRegistry
 from pico.agent.tools.tool_index import ToolIndex, _schema_text
 from pico.agent.tools.tool_search import (
@@ -56,6 +63,36 @@ class _ContextTool(_FakeTool):
     async def execute_with_context(self, context: ToolExecutionContext, **kwargs: Any) -> str:
         self.context = context
         return f"ran {self.name}"
+
+
+class _ResolvedProbeRegistry(ToolRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resolved_calls: list[ResolvedToolInvocation] = []
+
+    async def execute_resolved(self, resolved: ResolvedToolInvocation) -> ToolExecution:
+        self.resolved_calls.append(resolved)
+        return await super().execute_resolved(resolved)
+
+
+class _WriteTarget(_FakeTool):
+    capability = ToolCapability(effect=ToolEffect.WRITE)
+
+    def __init__(self) -> None:
+        super().__init__(
+            "create_issue",
+            "open a github issue",
+            parameters={
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+            },
+        )
+        self.execution_count = 0
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.execution_count += 1
+        return f"created {kwargs['title']}"
 
 
 def test_index_ranks_name_match_first() -> None:
@@ -301,6 +338,79 @@ async def test_tool_call_preserves_parent_call_identity_for_target_execution() -
         iteration=2,
         parent_call_id="outer",
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_and_tool_call_targets_cross_same_resolved_execution_seam() -> None:
+    target = _WriteTarget()
+    reg = _ResolvedProbeRegistry()
+    reg.register(target)
+    ctrl = _controller(reg)
+    reg.register(ToolCallTool(ctrl))
+
+    direct = await reg.execute_many(
+        [
+            ToolInvocation(
+                target.name,
+                {"title": "direct"},
+                ToolExecutionContext(call_id="direct-call"),
+            )
+        ]
+    )
+    routed = await reg.execute_many(
+        [
+            ToolInvocation(
+                TOOL_CALL_NAME,
+                {"name": target.name, "arguments": {"title": "routed"}},
+                ToolExecutionContext(call_id="outer-call"),
+            )
+        ]
+    )
+
+    target_resolutions = [item for item in reg.resolved_calls if item.invocation.name == target.name]
+    assert [item.routed_via for item in target_resolutions] == [None, TOOL_CALL_NAME]
+    assert [item.effect for item in target_resolutions] == [ToolEffect.WRITE, ToolEffect.WRITE]
+    assert target_resolutions[0].tool is target
+    assert target_resolutions[1].tool is target
+    assert target_resolutions[1].invocation.context == ToolExecutionContext(
+        call_id="outer-call:create_issue",
+        parent_call_id="outer-call",
+    )
+    assert target.execution_count == 2
+    assert direct[0].resolved is target_resolutions[0]
+    assert routed[0].resolved is not None
+    assert routed[0].resolved.tool is target
+    assert routed[0].resolved.routed_via == TOOL_CALL_NAME
+    assert routed[0].invocation.name == target.name
+    assert [str(direct[0].result), str(routed[0].result)] == ["created direct", "created routed"]
+
+
+@pytest.mark.asyncio
+async def test_tool_call_target_schema_validation_occurs_at_resolved_seam() -> None:
+    target = _WriteTarget()
+    reg = _ResolvedProbeRegistry()
+    reg.register(target)
+    ctrl = _controller(reg)
+    reg.register(ToolCallTool(ctrl))
+
+    execution = (
+        await reg.execute_many(
+            [
+                ToolInvocation(
+                    TOOL_CALL_NAME,
+                    {"name": target.name, "arguments": {}},
+                    ToolExecutionContext(call_id="invalid-outer"),
+                )
+            ]
+        )
+    )[0]
+
+    assert execution.result.failed is True
+    assert "Invalid parameters for tool 'create_issue'" in execution.result
+    assert execution.resolved is not None
+    assert execution.resolved.effect is ToolEffect.WRITE
+    assert execution.resolved.routed_via == TOOL_CALL_NAME
+    assert target.execution_count == 0
 
 
 @pytest.mark.asyncio
