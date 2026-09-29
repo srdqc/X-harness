@@ -195,6 +195,7 @@ class HistoryTrimmer:
         reserved_output: int,
         build_messages: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
         priority_scores: dict[int, float] | None = None,
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], TrimOutcome]:
         """闭包 ``ids``、构建完整 Prompt，并按整 Turn 组删除直至预算允许或无法再删。
 
@@ -212,11 +213,12 @@ class HistoryTrimmer:
         history = self.history_from_ids(session_messages, canon)
         messages = build_messages(history)
 
+        effective_tools = self.get_tool_definitions() if tool_definitions is None else tool_definitions
         estimated, source = estimate_prompt_tokens_chain(
             self.provider,
             self.model,
             messages,
-            self.get_tool_definitions(),
+            effective_tools,
         )
         max_prompt = max(1, self.context_window_tokens - reserved_output)
         warnings: list[str] = []
@@ -247,7 +249,7 @@ class HistoryTrimmer:
                 self.provider,
                 self.model,
                 messages,
-                self.get_tool_definitions(),
+                effective_tools,
             )
 
         return messages, TrimOutcome(

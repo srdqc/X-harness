@@ -109,7 +109,11 @@ class ContextAssembler(ContextEngine):
             prefix=AssembledPrefix(
                 system_prefix=system_prefix,
                 user_message=user_msg,
-                tool_defs=self.get_tool_definitions(),
+                tool_defs=(
+                    turn.tool_definitions
+                    if turn.tool_definitions is not None
+                    else self.get_tool_definitions()
+                ),
             ),
         )
         b_segs = await asyncio.gather(*[b.build(ctx_b) for b in self._phase_b])

@@ -17,6 +17,7 @@ prefix 的 System+Messages 之前，动态列表会使后续全部失效。代�
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pico.agent.tools.base import Tool
@@ -48,6 +49,44 @@ DEFAULT_ALWAYS_VISIBLE: tuple[str, ...] = (
 TOOL_CALL_NAME: str = "tool_call"
 # 元工具在功能开启时始终注册，但绝不进入目录。
 META_TOOL_NAMES: frozenset[str] = frozenset({"tool_search", TOOL_CALL_NAME})
+
+
+@dataclass(frozen=True)
+class ToolDisclosureView:
+    """Immutable evidence for the Tool schemas visible to one Provider call.
+
+    The serialized payload is captured once so budgeting and request construction
+    cannot independently filter the registry.  ``provider_tools`` returns a fresh
+    mutable projection because Provider adapters may annotate definitions in place;
+    those annotations cannot mutate this visibility snapshot.
+    """
+
+    mode: str
+    _payload: str
+    visible_names: tuple[str, ...]
+    _is_none: bool = False
+
+    @classmethod
+    def capture(
+        cls,
+        tools: list[dict[str, Any]] | None,
+        *,
+        mode: str,
+    ) -> "ToolDisclosureView":
+        definitions = tools or []
+        return cls(
+            mode=mode,
+            _payload=json.dumps(definitions, ensure_ascii=False),
+            visible_names=tuple(definition["function"]["name"] for definition in definitions),
+            _is_none=tools is None,
+        )
+
+    @property
+    def visible_count(self) -> int:
+        return len(self.visible_names)
+
+    def provider_tools(self) -> list[dict[str, Any]] | None:
+        return None if self._is_none else json.loads(self._payload)
 
 
 class ToolSearchController:
@@ -313,24 +352,36 @@ class ToolSearchStrategy(TokenStrategy):
     def name(self) -> str:
         return "tool_search"
 
+    def disclosure_view(
+        self,
+        tools: list[dict[str, Any]] | None,
+    ) -> ToolDisclosureView:
+        """Select the exact Provider-visible schemas and record why.
+
+        This is the sole filtering implementation.  AgentLoop captures this view
+        before context assembly and skips this strategy when later applying the
+        remaining request decorators, while direct callers of ``before_llm_call``
+        retain the historical behavior below.
+        """
+        if not tools:
+            return ToolDisclosureView.capture(tools, mode="full")
+        self._ctrl.refresh()
+        catalog_size = sum(1 for t in tools if t["function"]["name"] not in META_TOOL_NAMES)
+        if catalog_size <= self._compaction_threshold:
+            out = [t for t in tools if t["function"]["name"] not in META_TOOL_NAMES]
+            return ToolDisclosureView.capture(out, mode="full")
+        present = {t["function"]["name"] for t in tools}
+        if not META_TOOL_NAMES.issubset(present):
+            return ToolDisclosureView.capture(tools, mode="fail_open_full")
+        visible = self._ctrl.visible_names()
+        out = [t for t in tools if t["function"]["name"] in visible]
+        return ToolDisclosureView.capture(out, mode="progressive")
+
     async def before_llm_call(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         model: str,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, str]:
-        if not tools:
-            return messages, tools, model
-        self._ctrl.refresh()
-        catalog_size = sum(1 for t in tools if t["function"]["name"] not in META_TOOL_NAMES)
-        if catalog_size <= self._compaction_threshold:
-            out = [t for t in tools if t["function"]["name"] not in META_TOOL_NAMES]
-            return messages, out, model
-        present = {t["function"]["name"] for t in tools}
-        if not META_TOOL_NAMES.issubset(present):
-            # 元工具不可用时，例如被 disabled_tools 移除，直接暴露全部工具；
-            # 不要将已编目的工具困在模型无法调用的搜索之后。
-            return messages, tools, model
-        visible = self._ctrl.visible_names()
-        out = [t for t in tools if t["function"]["name"] in visible]
-        return messages, out, model
+        view = self.disclosure_view(tools)
+        return messages, view.provider_tools(), model

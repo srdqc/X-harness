@@ -16,14 +16,16 @@ import pytest
 from pico.agent.loop import AgentLoop
 from pico.agent.tools.discovery import ToolSourceKind
 from pico.config.schema import ToolSearchConfig
-from pico.providers.base import LLMProvider, LLMResponse
+from pico.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from pico.token_wise.base import TokenStrategy
 from pico.token_wise.registry import StrategyRegistry
+from pico.utils.helpers import estimate_prompt_tokens
 
 
 class _StubProvider(LLMProvider):
     def __init__(self) -> None:
         super().__init__(api_key="test")
+        self.visible_tools: list[list[dict]] = []
 
     async def chat(
         self,
@@ -35,6 +37,7 @@ class _StubProvider(LLMProvider):
         reasoning_effort=None,
         tool_choice=None,
     ):
+        self.visible_tools.append(tools or [])
         return LLMResponse(content="stub", finish_reason="stop")
 
     def get_default_model(self) -> str:
@@ -53,9 +56,9 @@ def workspace():
         yield Path(td)
 
 
-def _make_loop(workspace: Path, cfg, strategies=None) -> AgentLoop:
+def _make_loop(workspace: Path, cfg, strategies=None, provider=None) -> AgentLoop:
     return AgentLoop(
-        provider=_StubProvider(),
+        provider=provider or _StubProvider(),
         workspace=workspace,
         model="stub",
         max_iterations=2,
@@ -122,3 +125,92 @@ async def test_enabled_loop_keeps_interaction_primitives_visible(workspace) -> N
     assert {"read_file", "message", "ask_user", "spawn"} <= names, "primitives must stay visible"
     assert {"tool_search", "tool_call"} <= names, "meta-tools must stay visible"
     assert "web_search" not in names, "cataloged domain tools are withheld above threshold"
+
+
+@pytest.mark.asyncio
+async def test_progressive_budget_and_provider_share_exact_disclosure_view(workspace) -> None:
+    loop = _make_loop(workspace, ToolSearchConfig(enabled=True, compaction_threshold=5))
+    view = loop._effective_tool_disclosure_view()
+    tools = view.provider_tools()
+    assert tools is not None
+
+    budget = loop._make_token_budget(tool_definitions=tools)
+    full_budget = loop._make_token_budget(tool_definitions=loop.tools.get_definitions())
+    evidence: list[dict] = []
+    await loop._run_agent_loop(
+        [{"role": "system", "content": "system"}, {"role": "user", "content": "go"}],
+        initial_disclosure_view=view,
+        disclosure_evidence_sink=evidence,
+    )
+
+    provider_tools = loop.provider.visible_tools[0]
+    assert provider_tools == tools
+    assert budget.reserved_tools == estimate_prompt_tokens([], provider_tools)
+    assert budget.reserved_tools < full_budget.reserved_tools
+    assert evidence[0]["visible_tool_names"] == view.visible_names
+    assert evidence[0]["tool_array_schema_tokens"] == budget.reserved_tools
+
+
+def test_full_disclosure_budget_matches_full_registry(workspace) -> None:
+    loop = _make_loop(workspace, ToolSearchConfig(enabled=False))
+    view = loop._effective_tool_disclosure_view()
+    tools = view.provider_tools()
+    assert tools == loop.tools.get_definitions()
+    assert loop._make_token_budget(tool_definitions=tools).reserved_tools == estimate_prompt_tokens([], tools)
+
+
+def test_fail_open_budget_matches_full_provider_view(workspace) -> None:
+    loop = _make_loop(workspace, ToolSearchConfig(enabled=True, compaction_threshold=5))
+    loop.tools.unregister("tool_search")
+    loop.tools.unregister("tool_call")
+
+    view = loop._effective_tool_disclosure_view()
+    tools = view.provider_tools()
+    assert view.mode == "fail_open_full"
+    assert tools == loop.tools.get_definitions()
+    assert loop._make_token_budget(tool_definitions=tools).reserved_tools == estimate_prompt_tokens([], tools)
+
+
+@pytest.mark.asyncio
+async def test_disclosure_view_refreshes_for_each_provider_iteration(workspace) -> None:
+    class _TwoIterationProvider(_StubProvider):
+        async def chat(self, messages, tools=None, **kwargs):
+            del kwargs
+            self.visible_tools.append(tools or [])
+            if len(self.visible_tools) == 1:
+                return LLMResponse(
+                    content=None,
+                    tool_calls=[ToolCallRequest(id="missing-1", name="missing_tool", arguments={})],
+                )
+            return LLMResponse(content="done", finish_reason="stop")
+
+    provider = _TwoIterationProvider()
+    loop = _make_loop(
+        workspace,
+        ToolSearchConfig(enabled=True, compaction_threshold=5),
+        provider=provider,
+    )
+    strategy = loop._tool_search_strategy
+    assert strategy is not None
+    original = strategy.disclosure_view
+    refreshes = 0
+
+    def counted(tools):
+        nonlocal refreshes
+        refreshes += 1
+        return original(tools)
+
+    strategy.disclosure_view = counted
+    initial = loop._effective_tool_disclosure_view()
+    evidence: list[dict] = []
+    await loop._run_agent_loop(
+        [{"role": "system", "content": "system"}, {"role": "user", "content": "go"}],
+        initial_disclosure_view=initial,
+        disclosure_evidence_sink=evidence,
+    )
+
+    assert refreshes == 2
+    assert len(evidence) == len(provider.visible_tools) == 2
+    assert [item["tool_array_schema_tokens"] for item in evidence] == [
+        estimate_prompt_tokens([], tools) for tools in provider.visible_tools
+    ]

@@ -611,6 +611,23 @@ async def test_strategy_passthrough_when_meta_tools_absent() -> None:
     assert {t["function"]["name"] for t in out} == {t["function"]["name"] for t in tools}
 
 
+def test_disclosure_view_is_immutable_and_fail_open_is_explicit() -> None:
+    reg, ctrl = _registry_with_n(40)
+    reg.unregister("tool_search")
+    reg.unregister(TOOL_CALL_NAME)
+    strategy = ToolSearchStrategy(ctrl, compaction_threshold=25)
+
+    view = strategy.disclosure_view(reg.get_definitions())
+    projected = view.provider_tools()
+    assert view.mode == "fail_open_full"
+    assert projected is not None and len(projected) == 40
+
+    projected.clear()
+    assert len(view.provider_tools() or []) == 40
+    with pytest.raises(FrozenInstanceError):
+        view.mode = "progressive"  # type: ignore[misc]
+
+
 def test_registry_register_first_runs_before_others() -> None:
     from pico.token_wise.base import TokenStrategy
     from pico.token_wise.registry import StrategyRegistry

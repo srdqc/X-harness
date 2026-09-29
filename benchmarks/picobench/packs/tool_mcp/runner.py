@@ -58,6 +58,7 @@ from pico.spine import (
 from .metrics import (
     TOOL_SCHEMA_ESTIMATOR_DIGEST,
     TOOL_SCHEMA_ESTIMATOR_ID,
+    estimate_in_band_disclosure_tokens,
     estimate_visible_tool_schema_tokens,
     normalize_target_calls,
 )
@@ -172,6 +173,43 @@ class _RecordingToolMCPProvider(LLMProvider):
         self.tool_payloads: list[list[dict[str, Any]]] = []
         self.call_records: list[dict[str, Any]] = []
         self._request_attempts: dict[str, int] = {}
+        self._seen_search_results: set[str] = set()
+        self._cumulative_tool_array_tokens = 0
+        self._cumulative_in_band_tokens = 0
+
+    def _new_in_band_disclosure_tokens(self, messages: list[dict[str, Any]]) -> int:
+        added = 0
+        for message in messages:
+            if message.get("role") != "tool" or message.get("name") != "tool_search":
+                continue
+            call_id = str(message.get("tool_call_id") or "")
+            if not call_id or call_id in self._seen_search_results:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            payload_text = content
+            if content.startswith("[BEGIN UNTRUSTED tool_search #"):
+                lines = content.splitlines()
+                if len(lines) >= 3 and lines[-1].startswith("[END UNTRUSTED tool_search #"):
+                    payload_text = "\n".join(lines[1:-1])
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, list) or not payload:
+                continue
+            if not all(
+                isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and "description" in item
+                and isinstance(item.get("parameters"), dict)
+                for item in payload
+            ):
+                continue
+            self._seen_search_results.add(call_id)
+            added += estimate_in_band_disclosure_tokens(payload_text)
+        return added
 
     async def chat(
         self,
@@ -188,6 +226,10 @@ class _RecordingToolMCPProvider(LLMProvider):
         effective_model = self.model
         tool_payload = to_primitive(tools or [])
         self.tool_payloads.append(tool_payload)
+        tool_array_tokens = estimate_visible_tool_schema_tokens(tool_payload)
+        in_band_tokens = self._new_in_band_disclosure_tokens(messages)
+        self._cumulative_tool_array_tokens += tool_array_tokens
+        self._cumulative_in_band_tokens += in_band_tokens
         request_digest = canonical_digest(
             {
                 "messages": messages,
@@ -214,7 +256,21 @@ class _RecordingToolMCPProvider(LLMProvider):
             "visible_tool_count": len(tool_payload),
             "visible_tool_names": sorted(definition["function"]["name"] for definition in tool_payload),
             "visible_tool_schema_digest": canonical_digest(tool_payload),
-            "estimated_visible_tool_schema_tokens": (estimate_visible_tool_schema_tokens(tool_payload)),
+            "estimated_visible_tool_schema_tokens": tool_array_tokens,
+            "tool_array_schema_tokens": tool_array_tokens,
+            "cumulative_tool_array_schema_tokens": self._cumulative_tool_array_tokens,
+            "in_band_disclosure_tokens": in_band_tokens,
+            "cumulative_in_band_disclosure_tokens": self._cumulative_in_band_tokens,
+            "total_disclosure_proxy": (
+                self._cumulative_tool_array_tokens + self._cumulative_in_band_tokens
+            ),
+            "disclosure_mode": (
+                "progressive"
+                if {"tool_search", "tool_call"}.issubset(
+                    definition["function"]["name"] for definition in tool_payload
+                )
+                else "full"
+            ),
             "conservative_serialized_input_tokens": (
                 _conservative_serialized_input_tokens(
                     messages,
@@ -419,6 +475,8 @@ async def _run_runtime_trial(
         expected_target=task.targets[0].runtime_name,
     )
     schema_tokens = [estimate_visible_tool_schema_tokens(payload) for payload in provider.tool_payloads]
+    in_band_tokens = [int(record["in_band_disclosure_tokens"]) for record in provider.call_records]
+    visible_counts = [int(record["visible_tool_count"]) for record in provider.call_records]
     usage = _aggregate_usage(provider.call_records)
     mcp_connected = catalog_names == _EXPECTED_CATALOG_NAMES
     findings: list[str] = []
@@ -456,6 +514,15 @@ async def _run_runtime_trial(
             "initial_visible_catalog_tool_names": sorted(initially_visible_catalog),
             "visible_tool_schema_tokens_per_call": schema_tokens,
             "trial_total_estimated_visible_tool_schema_tokens": sum(schema_tokens),
+            "tool_array_schema_tokens_per_call": schema_tokens,
+            "cumulative_tool_array_schema_tokens": sum(schema_tokens),
+            "in_band_disclosure_tokens_per_call": in_band_tokens,
+            "cumulative_in_band_disclosure_tokens": sum(in_band_tokens),
+            "total_disclosure_proxy": sum(schema_tokens) + sum(in_band_tokens),
+            "average_visible_tool_count": (
+                sum(visible_counts) / len(visible_counts) if visible_counts else 0.0
+            ),
+            "peak_visible_tool_count": max(visible_counts, default=0),
             "schema_estimator_id": TOOL_SCHEMA_ESTIMATOR_ID,
             "schema_estimator_digest": TOOL_SCHEMA_ESTIMATOR_DIGEST,
             "meta_tool_invocations": normalized.meta_tool_invocations,

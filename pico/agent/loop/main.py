@@ -56,7 +56,7 @@ from pico.spine.message import Media
 from pico.spine.runner import current_turn_id
 from pico.spine.turn import Origin
 from pico.tracing import semconv, trace
-from pico.utils.helpers import estimate_prompt_tokens
+from pico.utils.helpers import estimate_prompt_tokens, estimate_prompt_tokens_chain
 from pico.utils.persisted_payload import sanitize_persisted_payload
 
 # 刻意在 ``__init__`` 和 ``_assemble_context_messages`` 内延迟导入 ``pico.context_engine``，以打破运行时
@@ -67,6 +67,7 @@ from pico.utils.persisted_payload import sanitize_persisted_payload
 if TYPE_CHECKING:
     from pico.agent.hook import CompositeHook
     from pico.agent.tools.base import Tool
+    from pico.agent.tools.tool_search import ToolDisclosureView
     from pico.call_efficiency import CallEfficiency
     from pico.config.pico import (
         ContextConfig,
@@ -345,6 +346,7 @@ class AgentLoop:
         # 供 BCP 等需要严格工具子集的评测框架使用。
         self._disabled_tools = set(disabled_tools or [])
         self._tool_search_config = tool_search_config
+        self._tool_search_strategy = None
         self.tools = ToolRegistry()
 
         # Context Engine 是唯一的 ContextAssembler。在 self.tools 之后于此构建，使工厂能将
@@ -596,13 +598,11 @@ class AgentLoop:
             self.tools.register(ToolCallTool(self.tool_search_controller))
             # ``first=True`` 表示在 CacheOptimizer 用 ``cache_control`` 标记最后一个工具前先过滤列表；
             # 否则已标记的工具可能被过滤，导致缓存断点丢失。
-            self.strategies.register(
-                ToolSearchStrategy(
-                    self.tool_search_controller,
-                    compaction_threshold=cfg.compaction_threshold,
-                ),
-                first=True,
+            self._tool_search_strategy = ToolSearchStrategy(
+                self.tool_search_controller,
+                compaction_threshold=cfg.compaction_threshold,
             )
+            self.strategies.register(self._tool_search_strategy, first=True)
 
     # ── 上下文引擎辅助方法 ─────────────────────────────────────────────
 
@@ -618,7 +618,21 @@ class AgentLoop:
             return list(session.messages)
         return session.get_history(max_messages=0)
 
-    def _make_token_budget(self, selected_skills: list[Any] | None = None) -> TokenBudget:
+    def _effective_tool_disclosure_view(self) -> "ToolDisclosureView":
+        """Capture the one Tool visibility decision shared by budget and call."""
+        from pico.agent.tools.tool_search import ToolDisclosureView
+
+        definitions = self.tools.get_definitions()
+        if self._tool_search_strategy is not None:
+            return self._tool_search_strategy.disclosure_view(definitions)
+        return ToolDisclosureView.capture(definitions, mode="full")
+
+    def _make_token_budget(
+        self,
+        selected_skills: list[Any] | None = None,
+        *,
+        tool_definitions: list[dict[str, Any]] | None = None,
+    ) -> TokenBudget:
         """为当前 Context Engine 计算一份保守的单 Turn Prompt 预算。
 
         预算从 `context_window_tokens` 总窗口中依次预留模型最大输出、当前 Tool definitions
@@ -628,7 +642,8 @@ class AgentLoop:
         成可用历史。返回 `TokenBudget`，不裁剪消息本身。
         """
         reserved_output = int(getattr(getattr(self.provider, "generation", None), "max_tokens", 4096) or 4096)
-        tool_tokens = estimate_prompt_tokens([], self.tools.get_definitions())
+        effective_tools = self.tools.get_definitions() if tool_definitions is None else tool_definitions
+        tool_tokens = estimate_prompt_tokens([], effective_tools)
         system_prompt = self.context.build_system_prompt(
             selected_skills,
             include_memory=self.memory_enabled,
@@ -671,6 +686,7 @@ class AgentLoop:
         channel: str | None = None,
         chat_id: str | None = None,
         selected_skills: list[Any] | None = None,
+        tool_definitions: list[dict[str, Any]] | None = None,
         metadata_sink: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """请求当前 Context Engine 组装主 Agent 本轮实际可见的消息窗口。
@@ -690,13 +706,14 @@ class AgentLoop:
         assembled = await self.context_engine.assemble(
             session_key,
             session_messages,
-            self._make_token_budget(selected_skills),
+            self._make_token_budget(selected_skills, tool_definitions=tool_definitions),
             turn=TurnContext(
                 current_message=current_message,
                 media=media,
                 channel=channel,
                 chat_id=chat_id,
                 selected_skills=selected_skills,
+                tool_definitions=tool_definitions,
             ),
         )
         if metadata_sink is not None:
@@ -1222,6 +1239,41 @@ class AgentLoop:
             await on_token_delta(fallback)
         return fallback
 
+    def _fit_provider_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str,
+        *,
+        protected_start: int,
+    ) -> list[dict[str, Any]]:
+        """Trim old user-led history groups against the exact call payload."""
+        fitted = list(messages)
+        protected_start = min(max(protected_start, 1), len(fitted))
+        reserved_output = int(getattr(getattr(self.provider, "generation", None), "max_tokens", 4096) or 4096)
+        max_prompt = max(1, self.context_window_tokens - reserved_output)
+        while protected_start > 1:
+            estimated, _ = estimate_prompt_tokens_chain(self.provider, model, fitted, tools)
+            if estimated <= max_prompt:
+                break
+            first_user = next(
+                (index for index in range(1, protected_start) if fitted[index].get("role") == "user"),
+                None,
+            )
+            if first_user is None:
+                break
+            next_user = next(
+                (
+                    index
+                    for index in range(first_user + 1, protected_start)
+                    if fitted[index].get("role") == "user"
+                ),
+                protected_start,
+            )
+            del fitted[first_user:next_user]
+            protected_start -= next_user - first_user
+        return fitted
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -1236,6 +1288,8 @@ class AgentLoop:
         usage_sink: dict[str, Any] | None = None,
         drain: Drain | None = None,
         origin: Origin | None = None,
+        initial_disclosure_view: "ToolDisclosureView | None" = None,
+        disclosure_evidence_sink: list[dict[str, Any]] | None = None,
     ) -> tuple[str | None, list[str], list[dict], TurnOutcome]:
         """执行一次有预算的模型—Tool 迭代，并返回回复、证据与明确终态。
 
@@ -1260,6 +1314,8 @@ class AgentLoop:
         tools_used: list[str] = []
         session_key = session_key or ""
         effective_model = model or self.model
+        protected_start = max(1, len(initial_messages) - 1)
+        cumulative_tool_array_tokens = 0
 
         # 记录 Turn 是正常退出还是因迭代上限中断。下游只读取 ``status``，
         # 用于标记影子 Git 提交并写入 ``TurnOutcome``。
@@ -1302,14 +1358,40 @@ class AgentLoop:
                         messages.append({"role": "user", "content": inj_text})
                         logger.info("inject: merged a mid-turn user message")
 
-            tool_defs = self.tools.get_definitions()
+            disclosure_view = (
+                initial_disclosure_view
+                if iteration == 1 and initial_disclosure_view is not None
+                else self._effective_tool_disclosure_view()
+            )
+            tool_defs = disclosure_view.provider_tools()
 
-            # 先运行历史策略，使工具过滤先于缓存规划。
+            # Tool Search 已在 Context assembly 前形成 immutable view；这里跳过同一
+            # strategy，避免第二次独立过滤。其余策略仍可添加 Provider cache metadata。
             call_messages, call_tools, call_model = await self.strategies.before_llm_call(
                 messages,
                 tool_defs,
                 effective_model,
+                skip=((self._tool_search_strategy,) if self._tool_search_strategy is not None else ()),
             )
+            call_messages = self._fit_provider_messages(
+                call_messages,
+                call_tools,
+                call_model,
+                protected_start=protected_start,
+            )
+            tool_array_tokens = estimate_prompt_tokens([], call_tools)
+            cumulative_tool_array_tokens += tool_array_tokens
+            if disclosure_evidence_sink is not None:
+                disclosure_evidence_sink.append(
+                    {
+                        "iteration": iteration,
+                        "mode": disclosure_view.mode,
+                        "visible_tool_names": disclosure_view.visible_names,
+                        "visible_tool_count": disclosure_view.visible_count,
+                        "tool_array_schema_tokens": tool_array_tokens,
+                        "cumulative_tool_array_schema_tokens": cumulative_tool_array_tokens,
+                    }
+                )
             if on_token_delta is not None or on_reasoning_delta is not None:
                 response = await self._llm_call_stream(
                     messages=call_messages,
@@ -1945,6 +2027,7 @@ class AgentLoop:
             context_messages,
         )
         context_metadata = context_metadata_sink if context_metadata_sink is not None else {}
+        disclosure_view = self._effective_tool_disclosure_view()
         initial_messages = await self._assemble_context_messages(
             session=session,
             session_key=key,
@@ -1953,6 +2036,7 @@ class AgentLoop:
             channel=channel,
             chat_id=chat_id,
             selected_skills=selected_skills or None,
+            tool_definitions=disclosure_view.provider_tools(),
             metadata_sink=context_metadata,
         )
         injected_skill_ids = list(
@@ -1983,6 +2067,8 @@ class AgentLoop:
             usage_sink=usage_sink,
             drain=drain,
             origin=origin,
+            initial_disclosure_view=disclosure_view,
+            disclosure_evidence_sink=context_metadata.setdefault("tool_disclosure_iterations", []),
         )
         self._stash_recovery(key, outcome)
         if outcome.status == "error":

@@ -177,6 +177,22 @@ async def test_formal_task_runs_both_variants_through_runtime_host(
         treatment.metrics["trial_total_estimated_visible_tool_schema_tokens"]
         < control.metrics["trial_total_estimated_visible_tool_schema_tokens"]
     )
+    for execution in executions.values():
+        assert execution.metrics["tool_array_schema_tokens_per_call"] == execution.metrics[
+            "visible_tool_schema_tokens_per_call"
+        ]
+        assert execution.metrics["cumulative_tool_array_schema_tokens"] == execution.metrics[
+            "trial_total_estimated_visible_tool_schema_tokens"
+        ]
+        assert execution.metrics["total_disclosure_proxy"] == (
+            execution.metrics["cumulative_tool_array_schema_tokens"]
+            + execution.metrics["cumulative_in_band_disclosure_tokens"]
+        )
+        assert execution.metrics["peak_visible_tool_count"] >= execution.metrics[
+            "average_visible_tool_count"
+        ]
+    assert control.metrics["cumulative_in_band_disclosure_tokens"] == 0
+    assert treatment.metrics["cumulative_in_band_disclosure_tokens"] > 0
     assert control.metrics["meta_tool_invocations"] == {
         "tool_call": 0,
         "tool_search": 0,

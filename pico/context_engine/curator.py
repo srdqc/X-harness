@@ -60,6 +60,7 @@ class TurnContext:
     channel: str | None = None
     chat_id: str | None = None
     selected_skills: list[Any] | None = None
+    tool_definitions: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -424,6 +425,7 @@ class CuratorAssembler:
             priority_scores={item.id: item.relevance for item in state.manifest},
             reserved_output=state.budget.reserved_output,
             build_messages=lambda h: self._full_messages(state.prefix, h, working_state),
+            tool_definitions=state.prefix.tool_defs,
         )
 
         validation = {

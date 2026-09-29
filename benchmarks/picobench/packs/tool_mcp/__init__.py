@@ -9,6 +9,7 @@ from .metrics import (
     ToolMCPClaimAssessment,
     ToolMCPPairMeasurement,
     assess_tool_mcp_claim,
+    estimate_in_band_disclosure_tokens,
     estimate_visible_tool_schema_tokens,
     normalize_target_calls,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "ToolTarget",
     "assess_tool_mcp_claim",
     "catalog_definitions",
+    "estimate_in_band_disclosure_tokens",
     "estimate_visible_tool_schema_tokens",
     "load_tool_mcp_tasks",
     "mcp_verifier_code_digest",
