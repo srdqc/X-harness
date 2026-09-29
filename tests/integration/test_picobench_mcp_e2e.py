@@ -188,11 +188,23 @@ async def test_formal_task_runs_both_variants_through_runtime_host(
             execution.metrics["cumulative_tool_array_schema_tokens"]
             + execution.metrics["cumulative_in_band_disclosure_tokens"]
         )
+        assert execution.metrics["cumulative_provider_visible_disclosure_tokens"] == (
+            execution.metrics["cumulative_tool_array_schema_tokens"]
+            + execution.metrics["cumulative_provider_visible_in_band_disclosure_tokens"]
+        )
+        assert execution.metrics["fallback_count"] == 0
+        assert execution.metrics["fallback_rate"] == 0.0
+        assert execution.metrics["fallback_reason_counts"] == {}
+        assert execution.metrics["provider_attempts_after_fallback"] == 0
+        assert execution.metrics["success_after_fallback"] is False
         assert execution.metrics["peak_visible_tool_count"] >= execution.metrics[
             "average_visible_tool_count"
         ]
     assert control.metrics["cumulative_in_band_disclosure_tokens"] == 0
     assert treatment.metrics["cumulative_in_band_disclosure_tokens"] > 0
+    assert treatment.metrics["cumulative_provider_visible_in_band_disclosure_tokens"] > (
+        treatment.metrics["cumulative_unique_in_band_disclosure_tokens"]
+    )
     assert control.metrics["meta_tool_invocations"] == {
         "tool_call": 0,
         "tool_search": 0,

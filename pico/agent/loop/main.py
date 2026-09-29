@@ -19,7 +19,7 @@ import asyncio
 import json
 import re
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -67,7 +67,7 @@ from pico.utils.persisted_payload import sanitize_persisted_payload
 if TYPE_CHECKING:
     from pico.agent.hook import CompositeHook
     from pico.agent.tools.base import Tool
-    from pico.agent.tools.tool_search import ToolDisclosureView
+    from pico.agent.tools.tool_search import ToolDisclosureFallbackEvidence, ToolDisclosureView
     from pico.call_efficiency import CallEfficiency
     from pico.config.pico import (
         ContextConfig,
@@ -114,6 +114,7 @@ class TurnOutcome:
     checkpoint_status: str | None = None
     edited_files: list[str] = field(default_factory=list)
     error_category: str | None = None
+    tool_disclosure_fallback: "ToolDisclosureFallbackEvidence | None" = None
 
 
 class ProviderTurnError(RuntimeError):
@@ -1290,6 +1291,7 @@ class AgentLoop:
         origin: Origin | None = None,
         initial_disclosure_view: "ToolDisclosureView | None" = None,
         disclosure_evidence_sink: list[dict[str, Any]] | None = None,
+        fallback_evidence_sink: list["ToolDisclosureFallbackEvidence"] | None = None,
     ) -> tuple[str | None, list[str], list[dict], TurnOutcome]:
         """执行一次有预算的模型—Tool 迭代，并返回回复、证据与明确终态。
 
@@ -1316,6 +1318,16 @@ class AgentLoop:
         effective_model = model or self.model
         protected_start = max(1, len(initial_messages) - 1)
         cumulative_tool_array_tokens = 0
+        from pico.agent.tools.tool_search import (
+            TOOL_CALL_NAME,
+            TurnToolDisclosureState,
+            is_zero_hit_tool_search_result,
+        )
+
+        first_disclosure_view = initial_disclosure_view or self._effective_tool_disclosure_view()
+        disclosure_state = TurnToolDisclosureState(
+            progressive_enabled=first_disclosure_view.mode == "progressive"
+        )
 
         # 记录 Turn 是正常退出还是因迭代上限中断。下游只读取 ``status``，
         # 用于标记影子 Git 提交并写入 ``TurnOutcome``。
@@ -1358,10 +1370,12 @@ class AgentLoop:
                         messages.append({"role": "user", "content": inj_text})
                         logger.info("inject: merged a mid-turn user message")
 
-            disclosure_view = (
-                initial_disclosure_view
-                if iteration == 1 and initial_disclosure_view is not None
-                else self._effective_tool_disclosure_view()
+            normal_disclosure_view = (
+                first_disclosure_view if iteration == 1 else self._effective_tool_disclosure_view()
+            )
+            disclosure_view = disclosure_state.provider_view(
+                normal_disclosure_view,
+                self.tools.get_definitions(),
             )
             tool_defs = disclosure_view.provider_tools()
 
@@ -1381,6 +1395,8 @@ class AgentLoop:
             )
             tool_array_tokens = estimate_prompt_tokens([], call_tools)
             cumulative_tool_array_tokens += tool_array_tokens
+            disclosure_state.record_provider_call(disclosure_view.mode)
+            iteration_budget = self._make_token_budget(tool_definitions=call_tools)
             if disclosure_evidence_sink is not None:
                 disclosure_evidence_sink.append(
                     {
@@ -1390,6 +1406,12 @@ class AgentLoop:
                         "visible_tool_count": disclosure_view.visible_count,
                         "tool_array_schema_tokens": tool_array_tokens,
                         "cumulative_tool_array_schema_tokens": cumulative_tool_array_tokens,
+                        "available_history_tokens": iteration_budget.available_history,
+                        "fallback_used": disclosure_state.fallback_used,
+                        "fallback_reason": disclosure_state.fallback_reason,
+                        "fallback_activation_iteration": disclosure_state.activation_iteration,
+                        "zero_hit_searches": disclosure_state.zero_hit_searches,
+                        "provider_calls_after_fallback": disclosure_state.provider_calls_after_fallback,
                     }
                 )
             if on_token_delta is not None or on_reasoning_delta is not None:
@@ -1570,6 +1592,27 @@ class AgentLoop:
                 for tool_call, execution in zip(response.tool_calls, executions, strict=True):
                     result = execution.result
                     messages = self.context.add_tool_result(messages, tool_call.id, tool_call.name, result)
+                    if tool_call.name == "tool_search":
+                        activated = disclosure_state.observe_search_result(
+                            zero_hit=is_zero_hit_tool_search_result(result),
+                            iteration=iteration,
+                            mode=disclosure_view.mode,
+                        )
+                        if activated:
+                            logger.info("Tool disclosure fallback activated: {}", disclosure_state.fallback_reason)
+                    elif tool_call.name == TOOL_CALL_NAME:
+                        target_name = tool_call.arguments.get("name")
+                        if isinstance(target_name, str) and not self.tools.has(target_name):
+                            activated = disclosure_state.observe_unknown_target(
+                                iteration=iteration,
+                                mode=disclosure_view.mode,
+                            )
+                            if activated:
+                                logger.info(
+                                    "Tool disclosure fallback activated: {} target={}",
+                                    disclosure_state.fallback_reason,
+                                    target_name,
+                                )
                     # 跟踪同一工具的连续确定性失败；排除可通过重试清除的短暂错误。
                     if _is_hard_tool_failure(result):
                         if tool_call.name == loop_fail_tool:
@@ -1697,9 +1740,19 @@ class AgentLoop:
         if any(m.get("_recovery_synthetic") for m in messages):
             messages = [m for m in messages if not m.get("_recovery_synthetic")]
 
+        fallback_evidence = disclosure_state.evidence(
+            recovery_succeeded=(
+                disclosure_state.fallback_used
+                and status == "completed"
+                and final_content is not None
+            )
+        )
+        if fallback_evidence_sink is not None:
+            fallback_evidence_sink.append(fallback_evidence)
         outcome = TurnOutcome(
             status=status,
             error_category=error_category,
+            tool_disclosure_fallback=fallback_evidence,
         )
         if self._checkpoint is not None:
             # 每轮快照：一次提交覆盖本轮全部编辑，正常退出和中断退出均如此
@@ -2070,6 +2123,8 @@ class AgentLoop:
             initial_disclosure_view=disclosure_view,
             disclosure_evidence_sink=context_metadata.setdefault("tool_disclosure_iterations", []),
         )
+        if outcome.tool_disclosure_fallback is not None:
+            context_metadata["tool_disclosure_fallback"] = asdict(outcome.tool_disclosure_fallback)
         self._stash_recovery(key, outcome)
         if outcome.status == "error":
             raise ProviderTurnError(outcome.error_category or "unknown")
@@ -2414,6 +2469,7 @@ class AgentLoop:
         # message 工具回复虽会让 _process_message 返回 None，但确实已回复，
         # 因此也计作显式回复。
         replied_via_tool = isinstance(message_tool, MessageTool) and message_tool.sent_in_turn
+        fallback_evidence = context_metadata.get("tool_disclosure_fallback") or {}
         return TurnOutcome(
             usage=usage,
             explicit_reply=out is not None or replied_via_tool,
@@ -2424,6 +2480,19 @@ class AgentLoop:
             context_path=context_metadata.get("path"),
             context_fallback_reason=context_metadata.get("fallback_reason"),
             skill_source_failures=tuple(context_metadata.get("skill_source_failures") or ()),
+            tool_disclosure_fallback_used=bool(fallback_evidence.get("fallback_used", False)),
+            tool_disclosure_fallback_reason=fallback_evidence.get("fallback_reason"),
+            tool_disclosure_fallback_iteration=fallback_evidence.get("activation_iteration"),
+            tool_disclosure_zero_hits_before_fallback=int(
+                fallback_evidence.get("zero_hits_before_fallback", 0) or 0
+            ),
+            tool_disclosure_provider_calls_before_fallback=int(
+                fallback_evidence.get("provider_calls_before_fallback", 0) or 0
+            ),
+            tool_disclosure_provider_calls_after_fallback=int(
+                fallback_evidence.get("provider_calls_after_fallback", 0) or 0
+            ),
+            tool_disclosure_recovery_succeeded=fallback_evidence.get("recovery_succeeded"),
         )
 
 

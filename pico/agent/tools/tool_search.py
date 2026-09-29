@@ -49,6 +49,9 @@ DEFAULT_ALWAYS_VISIBLE: tuple[str, ...] = (
 TOOL_CALL_NAME: str = "tool_call"
 # 元工具在功能开启时始终注册，但绝不进入目录。
 META_TOOL_NAMES: frozenset[str] = frozenset({"tool_search", TOOL_CALL_NAME})
+ZERO_HIT_FALLBACK_THRESHOLD = 2
+ZERO_HIT_FALLBACK_REASON = "repeated_zero_hit_tool_search"
+UNKNOWN_TARGET_FALLBACK_REASON = "unknown_tool_call_target"
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,88 @@ class ToolDisclosureView:
 
     def provider_tools(self) -> list[dict[str, Any]] | None:
         return None if self._is_none else json.loads(self._payload)
+
+
+@dataclass(frozen=True)
+class ToolDisclosureFallbackEvidence:
+    fallback_used: bool
+    fallback_reason: str | None
+    activation_iteration: int | None
+    zero_hits_before_fallback: int
+    provider_calls_before_fallback: int
+    provider_calls_after_fallback: int
+    recovery_succeeded: bool | None
+
+
+@dataclass
+class TurnToolDisclosureState:
+    """Ephemeral bounded fallback state for one independent Runtime Turn."""
+
+    progressive_enabled: bool
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    activation_iteration: int | None = None
+    zero_hit_searches: int = 0
+    consecutive_zero_hits: int = 0
+    zero_hits_before_fallback: int = 0
+    provider_calls_before_fallback: int = 0
+    provider_calls_after_fallback: int = 0
+
+    def provider_view(
+        self,
+        normal_view: ToolDisclosureView,
+        full_tools: list[dict[str, Any]],
+    ) -> ToolDisclosureView:
+        if self.fallback_used:
+            return ToolDisclosureView.capture(full_tools, mode="fallback_full")
+        return normal_view
+
+    def record_provider_call(self, mode: str) -> None:
+        if mode == "fallback_full":
+            self.provider_calls_after_fallback += 1
+        else:
+            self.provider_calls_before_fallback += 1
+
+    def observe_search_result(self, *, zero_hit: bool, iteration: int, mode: str) -> bool:
+        if not self.progressive_enabled or self.fallback_used or mode != "progressive":
+            return False
+        if not zero_hit:
+            self.consecutive_zero_hits = 0
+            return False
+        self.zero_hit_searches += 1
+        self.consecutive_zero_hits += 1
+        if self.consecutive_zero_hits < ZERO_HIT_FALLBACK_THRESHOLD:
+            return False
+        return self._activate(ZERO_HIT_FALLBACK_REASON, iteration)
+
+    def observe_unknown_target(self, *, iteration: int, mode: str) -> bool:
+        if not self.progressive_enabled or self.fallback_used or mode != "progressive":
+            return False
+        return self._activate(UNKNOWN_TARGET_FALLBACK_REASON, iteration)
+
+    def _activate(self, reason: str, iteration: int) -> bool:
+        if self.fallback_used:
+            return False
+        self.fallback_used = True
+        self.fallback_reason = reason
+        self.activation_iteration = iteration
+        self.zero_hits_before_fallback = self.zero_hit_searches
+        return True
+
+    def evidence(self, *, recovery_succeeded: bool | None) -> ToolDisclosureFallbackEvidence:
+        return ToolDisclosureFallbackEvidence(
+            fallback_used=self.fallback_used,
+            fallback_reason=self.fallback_reason,
+            activation_iteration=self.activation_iteration,
+            zero_hits_before_fallback=self.zero_hits_before_fallback,
+            provider_calls_before_fallback=self.provider_calls_before_fallback,
+            provider_calls_after_fallback=self.provider_calls_after_fallback,
+            recovery_succeeded=recovery_succeeded,
+        )
+
+
+def is_zero_hit_tool_search_result(result: object) -> bool:
+    return str(result).startswith("No tools matched '")
 
 
 class ToolSearchController:

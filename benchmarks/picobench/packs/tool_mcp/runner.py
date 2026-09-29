@@ -176,23 +176,31 @@ class _RecordingToolMCPProvider(LLMProvider):
         self._seen_search_results: set[str] = set()
         self._cumulative_tool_array_tokens = 0
         self._cumulative_in_band_tokens = 0
+        self._cumulative_provider_visible_in_band_tokens = 0
 
-    def _new_in_band_disclosure_tokens(self, messages: list[dict[str, Any]]) -> int:
-        added = 0
+    @staticmethod
+    def _unwrap_tool_result(content: str, name: str) -> str:
+        if content.startswith(f"[BEGIN UNTRUSTED {name} #"):
+            lines = content.splitlines()
+            if len(lines) >= 3 and lines[-1].startswith(f"[END UNTRUSTED {name} #"):
+                return "\n".join(lines[1:-1])
+        return content
+
+    def _recognized_in_band_disclosures(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[tuple[str, str, int]]:
+        disclosures: list[tuple[str, str, int]] = []
         for message in messages:
             if message.get("role") != "tool" or message.get("name") != "tool_search":
                 continue
             call_id = str(message.get("tool_call_id") or "")
-            if not call_id or call_id in self._seen_search_results:
+            if not call_id:
                 continue
             content = message.get("content")
             if not isinstance(content, str):
                 continue
-            payload_text = content
-            if content.startswith("[BEGIN UNTRUSTED tool_search #"):
-                lines = content.splitlines()
-                if len(lines) >= 3 and lines[-1].startswith("[END UNTRUSTED tool_search #"):
-                    payload_text = "\n".join(lines[1:-1])
+            payload_text = self._unwrap_tool_result(content, "tool_search")
             try:
                 payload = json.loads(payload_text)
             except json.JSONDecodeError:
@@ -207,9 +215,40 @@ class _RecordingToolMCPProvider(LLMProvider):
                 for item in payload
             ):
                 continue
+            disclosures.append(
+                (call_id, payload_text, estimate_in_band_disclosure_tokens(payload_text))
+            )
+        return disclosures
+
+    def _new_in_band_disclosure_tokens(
+        self,
+        disclosures: list[tuple[str, str, int]],
+    ) -> int:
+        added = 0
+        for call_id, _payload, tokens in disclosures:
+            if call_id in self._seen_search_results:
+                continue
             self._seen_search_results.add(call_id)
-            added += estimate_in_band_disclosure_tokens(payload_text)
+            added += tokens
         return added
+
+    def _fallback_reason_from_messages(self, messages: list[dict[str, Any]]) -> str | None:
+        zero_hits = 0
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            name = str(message.get("name") or "")
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            body = self._unwrap_tool_result(content, name)
+            if name == "tool_search" and body.startswith("No tools matched '"):
+                zero_hits += 1
+            if name == "tool_call" and "not found. Use tool_search" in body:
+                return "unknown_tool_call_target"
+        if zero_hits >= 2:
+            return "repeated_zero_hit_tool_search"
+        return None
 
     async def chat(
         self,
@@ -227,9 +266,19 @@ class _RecordingToolMCPProvider(LLMProvider):
         tool_payload = to_primitive(tools or [])
         self.tool_payloads.append(tool_payload)
         tool_array_tokens = estimate_visible_tool_schema_tokens(tool_payload)
-        in_band_tokens = self._new_in_band_disclosure_tokens(messages)
+        disclosures = self._recognized_in_band_disclosures(messages)
+        in_band_tokens = self._new_in_band_disclosure_tokens(disclosures)
+        provider_visible_in_band_tokens = sum(tokens for _call_id, _payload, tokens in disclosures)
         self._cumulative_tool_array_tokens += tool_array_tokens
         self._cumulative_in_band_tokens += in_band_tokens
+        self._cumulative_provider_visible_in_band_tokens += provider_visible_in_band_tokens
+        visible_names = {definition["function"]["name"] for definition in tool_payload}
+        has_meta = {"tool_search", "tool_call"}.issubset(visible_names)
+        disclosure_mode = (
+            "fallback_full"
+            if has_meta and any(name.startswith("mcp_picobench_") for name in visible_names)
+            else "progressive" if has_meta else "full"
+        )
         request_digest = canonical_digest(
             {
                 "messages": messages,
@@ -254,22 +303,31 @@ class _RecordingToolMCPProvider(LLMProvider):
             "temperature": temperature,
             "reasoning_effort": reasoning_effort,
             "visible_tool_count": len(tool_payload),
-            "visible_tool_names": sorted(definition["function"]["name"] for definition in tool_payload),
+            "visible_tool_names": sorted(visible_names),
             "visible_tool_schema_digest": canonical_digest(tool_payload),
             "estimated_visible_tool_schema_tokens": tool_array_tokens,
             "tool_array_schema_tokens": tool_array_tokens,
             "cumulative_tool_array_schema_tokens": self._cumulative_tool_array_tokens,
             "in_band_disclosure_tokens": in_band_tokens,
             "cumulative_in_band_disclosure_tokens": self._cumulative_in_band_tokens,
+            "unique_in_band_disclosure_tokens": in_band_tokens,
+            "cumulative_unique_in_band_disclosure_tokens": self._cumulative_in_band_tokens,
+            "provider_visible_in_band_disclosure_tokens": provider_visible_in_band_tokens,
+            "cumulative_provider_visible_in_band_disclosure_tokens": (
+                self._cumulative_provider_visible_in_band_tokens
+            ),
             "total_disclosure_proxy": (
                 self._cumulative_tool_array_tokens + self._cumulative_in_band_tokens
             ),
-            "disclosure_mode": (
-                "progressive"
-                if {"tool_search", "tool_call"}.issubset(
-                    definition["function"]["name"] for definition in tool_payload
-                )
-                else "full"
+            "cumulative_provider_visible_disclosure_tokens": (
+                self._cumulative_tool_array_tokens
+                + self._cumulative_provider_visible_in_band_tokens
+            ),
+            "disclosure_mode": disclosure_mode,
+            "fallback_reason": (
+                self._fallback_reason_from_messages(messages)
+                if disclosure_mode == "fallback_full"
+                else None
             ),
             "conservative_serialized_input_tokens": (
                 _conservative_serialized_input_tokens(
@@ -476,6 +534,10 @@ async def _run_runtime_trial(
     )
     schema_tokens = [estimate_visible_tool_schema_tokens(payload) for payload in provider.tool_payloads]
     in_band_tokens = [int(record["in_band_disclosure_tokens"]) for record in provider.call_records]
+    provider_visible_in_band_tokens = [
+        int(record["provider_visible_in_band_disclosure_tokens"])
+        for record in provider.call_records
+    ]
     visible_counts = [int(record["visible_tool_count"]) for record in provider.call_records]
     usage = _aggregate_usage(provider.call_records)
     mcp_connected = catalog_names == _EXPECTED_CATALOG_NAMES
@@ -493,6 +555,22 @@ async def _run_runtime_trial(
         failure_category=failure_category,
         verification_state=verification.state,
         mcp_connected=mcp_connected,
+    )
+    fallback_records = [
+        record for record in provider.call_records if record["disclosure_mode"] == "fallback_full"
+    ]
+    first_fallback_index = next(
+        (
+            index
+            for index, record in enumerate(provider.call_records)
+            if record["disclosure_mode"] == "fallback_full"
+        ),
+        None,
+    )
+    fallback_reason = (
+        observation.outcome.tool_disclosure_fallback_reason
+        if observation.outcome is not None
+        else None
     )
     return TrialExecution(
         status=status,
@@ -519,6 +597,23 @@ async def _run_runtime_trial(
             "in_band_disclosure_tokens_per_call": in_band_tokens,
             "cumulative_in_band_disclosure_tokens": sum(in_band_tokens),
             "total_disclosure_proxy": sum(schema_tokens) + sum(in_band_tokens),
+            "unique_in_band_disclosure_tokens_per_call": in_band_tokens,
+            "cumulative_unique_in_band_disclosure_tokens": sum(in_band_tokens),
+            "provider_visible_in_band_disclosure_tokens_per_call": provider_visible_in_band_tokens,
+            "cumulative_provider_visible_in_band_disclosure_tokens": sum(
+                provider_visible_in_band_tokens
+            ),
+            "cumulative_provider_visible_disclosure_tokens": (
+                sum(schema_tokens) + sum(provider_visible_in_band_tokens)
+            ),
+            "fallback_count": int(bool(fallback_records)),
+            "fallback_rate": float(bool(fallback_records)),
+            "fallback_reason_counts": ({fallback_reason: 1} if fallback_reason else {}),
+            "provider_attempts_before_fallback": (
+                first_fallback_index if first_fallback_index is not None else len(provider.call_records)
+            ),
+            "provider_attempts_after_fallback": len(fallback_records),
+            "success_after_fallback": bool(fallback_records and status is TrialStatus.PASSED),
             "average_visible_tool_count": (
                 sum(visible_counts) / len(visible_counts) if visible_counts else 0.0
             ),

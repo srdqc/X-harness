@@ -194,6 +194,15 @@ async def test_tool_mcp_provider_accounts_native_and_new_in_band_disclosure() ->
     assert provider.call_records[-1]["cumulative_tool_array_schema_tokens"] == native * 4
     assert provider.call_records[-1]["cumulative_in_band_disclosure_tokens"] == in_band * 2
     assert provider.call_records[-1]["total_disclosure_proxy"] == native * 4 + in_band * 2
+    assert [
+        record["provider_visible_in_band_disclosure_tokens"]
+        for record in provider.call_records
+    ] == [0, in_band, in_band, in_band * 2]
+    assert provider.call_records[-1]["cumulative_unique_in_band_disclosure_tokens"] == in_band * 2
+    assert provider.call_records[-1]["cumulative_provider_visible_in_band_disclosure_tokens"] == in_band * 4
+    assert provider.call_records[-1]["cumulative_provider_visible_disclosure_tokens"] == (
+        native * 4 + in_band * 4
+    )
 
 
 def test_tool_mcp_detects_budget_exhaustion_hidden_by_final_synthesis() -> None:
