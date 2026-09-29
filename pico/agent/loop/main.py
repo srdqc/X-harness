@@ -50,7 +50,7 @@ from pico.memory_engine.base import TokenBudget
 from pico.memory_engine.consolidate.consolidator import MemoryConsolidator, MemoryStore
 from pico.providers.base import ErrorClassification, LLMProvider, LLMResponse, ToolCallRequest
 from pico.sandbox import SandboxConfig, SandboxExecutor, SandboxInitError, build_executor
-from pico.session.manager import Session, SessionManager
+from pico.session.manager import Session, SessionManager, SessionTurnBoundary
 from pico.spine.message import Media
 from pico.spine.runner import current_turn_id
 from pico.spine.turn import Origin
@@ -99,7 +99,8 @@ class TurnOutcome:
     调用方绝不能把 "ran out of budget" 当成 "done"。``error_category`` 在错误终态下携带
     稳定分类，供边界外记录或展示，而不是要求读者解析 Provider 的原始异常文本。
 
-    ``checkpoint_id`` 与 ``edited_files`` 携带本轮 shadow-git 快照标识和已编辑文件清单。
+    ``checkpoint_status``、``checkpoint_record_id``、``checkpoint_id`` 与 ``edited_files`` 携带本轮
+    shadow-git 结果、Catalogue Evidence、快照标识和已编辑文件清单。
     `_stash_recovery` 只会为可恢复的中断保存它们，下一 Turn 的 `_inject_recovery_block`
     再据此构造恢复提示。它们提供的是“先检查哪些现场”的证据，不保证下一轮一定能自动
     恢复成功，也不会把模型回复本身当作文件状态的事实来源。
@@ -107,6 +108,8 @@ class TurnOutcome:
 
     status: str = "completed"  # 可选 "completed" | "interrupted" | "error"
     checkpoint_id: str | None = None
+    checkpoint_record_id: str | None = None
+    checkpoint_status: str | None = None
     edited_files: list[str] = field(default_factory=list)
     error_category: str | None = None
 
@@ -1611,10 +1614,16 @@ class AgentLoop:
             # 每轮快照：一次提交覆盖本轮全部编辑，正常退出和中断退出均如此
             # （与 Claude Code/Cursor 的粒度一致）。这里只尽力而为，commit_turn 从不抛错。
             label = f"turn {session_key or 'anon'} [{status}]"
-            cid, changed = await self._checkpoint.commit_turn(label)
-            outcome.checkpoint_id = cid
+            checkpoint = await self._checkpoint.commit_turn(
+                label,
+                session_id=session_key or None,
+                turn_id=current_turn_id(),
+            )
+            outcome.checkpoint_id = checkpoint.checkpoint_id
+            outcome.checkpoint_record_id = checkpoint.record_id
+            outcome.checkpoint_status = checkpoint.status.value
             if status == "interrupted":
-                outcome.edited_files = changed
+                outcome.edited_files = list(checkpoint.changed_paths)
 
         return final_content, tools_used, messages, outcome
 
@@ -1995,7 +2004,14 @@ class AgentLoop:
             turn_start_idx,
             origin,
         )
-        self._persist_completed_session_turn(session)
+        boundary = self._persist_completed_session_turn(session)
+        if self._checkpoint is not None and outcome.checkpoint_record_id is not None:
+            self._checkpoint.correlate(
+                outcome.checkpoint_record_id,
+                session_id=key,
+                boundary_id=boundary.boundary_id,
+                turn_id=boundary.turn_id,
+            )
         await self.context_engine.after_turn(
             key,
             {
@@ -2107,10 +2123,10 @@ class AgentLoop:
         session.updated_at = self._now_fn()
         return persisted
 
-    def _persist_completed_session_turn(self, session: Session) -> None:
+    def _persist_completed_session_turn(self, session: Session) -> SessionTurnBoundary:
         """Atomically save the current message tail with one independent-Turn boundary."""
 
-        self.sessions.commit_turn_boundary(session, turn_id=current_turn_id())
+        return self.sessions.commit_turn_boundary(session, turn_id=current_turn_id())
 
     async def run_turn(
         self,
