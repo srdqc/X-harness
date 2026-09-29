@@ -19,7 +19,11 @@ from typing import Any
 import pytest
 
 from pico.agent.loop import AgentLoop
+from pico.agent.spine_runner import AgentTurnRunner
+from pico.config.pico import CheckpointConfig, RuntimeConfig
 from pico.providers.base import LLMProvider, LLMResponse
+from pico.session.manager import SessionManager
+from pico.spine import OriginPools, Scheduler
 from pico.spine.message import ChatType, Source
 from pico.spine.turn import Origin, TurnRequest
 
@@ -53,13 +57,14 @@ def workspace():
         yield Path(td)
 
 
-def _make_agent(workspace: Path) -> AgentLoop:
+def _make_agent(workspace: Path, *, session_manager: SessionManager | None = None) -> AgentLoop:
     return AgentLoop(
         provider=StubProvider(),
         workspace=workspace,
         model="stub",
         max_iterations=2,
         restrict_to_workspace=True,
+        session_manager=session_manager,
     )
 
 
@@ -97,6 +102,82 @@ async def test_persisted_messages_carry_timestamp_not_turn_fields(workspace):
         assert m.get("timestamp"), f"missing timestamp: {m}"
         assert "received_at" not in m, f"received_at should be dropped: {m}"
         assert "turn_id" not in m, f"turn_id should be dropped: {m}"
+
+    loaded = SessionManager(workspace).get_or_create("tui:chat1")
+    assert len(loaded.turn_boundaries) == 1
+    assert loaded.turn_boundaries[0].message_count == len(msgs)
+    assert loaded.turn_boundaries[0].turn_id is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_runtime_turn_ids_persist_on_ordered_session_boundaries(workspace):
+    boundary_ids = iter(("boundary-1", "boundary-2"))
+    turn_ids = iter(("turn-1", "turn-2"))
+    manager = SessionManager(workspace, boundary_id_factory=lambda: next(boundary_ids))
+    agent = _make_agent(workspace, session_manager=manager)
+
+    async def sink(_event) -> None:
+        return None
+
+    scheduler = Scheduler(
+        AgentTurnRunner(agent, stream=False),
+        OriginPools(user=1, system=1),
+        sink,
+        turn_id_factory=lambda: next(turn_ids),
+    )
+    try:
+        first = scheduler.submit(_make_msg("first"))
+        await first.result()
+        second = scheduler.submit(_make_msg("second"))
+        await second.result()
+    finally:
+        await scheduler.shutdown(0)
+
+    loaded = SessionManager(workspace).get_or_create("tui:chat1")
+    assert [boundary.boundary_id for boundary in loaded.turn_boundaries] == ["boundary-1", "boundary-2"]
+    assert [boundary.turn_id for boundary in loaded.turn_boundaries] == ["turn-1", "turn-2"]
+    assert [boundary.message_count for boundary in loaded.turn_boundaries] == [2, 4]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_catalogue_correlates_runtime_turn_and_durable_session_boundary(workspace):
+    manager = SessionManager(workspace, boundary_id_factory=lambda: "boundary-1")
+    agent = AgentLoop(
+        provider=StubProvider(),
+        workspace=workspace,
+        model="stub",
+        max_iterations=2,
+        restrict_to_workspace=True,
+        session_manager=manager,
+        runtime_config=RuntimeConfig(checkpoint=CheckpointConfig(policy="always")),
+    )
+    (workspace / "project.py").write_text("value = 1\n", encoding="utf-8")
+
+    async def sink(_event) -> None:
+        return None
+
+    scheduler = Scheduler(
+        AgentTurnRunner(agent, stream=False),
+        OriginPools(user=1, system=1),
+        sink,
+        turn_id_factory=lambda: "turn-1",
+    )
+    try:
+        handle = scheduler.submit(_make_msg("checkpoint this"))
+        await handle.result()
+    finally:
+        await scheduler.shutdown(0)
+
+    assert agent._checkpoint is not None
+    records = agent._checkpoint.list_records()
+    assert len(records) == 1
+    record = records[0]
+    assert record.session_id == "tui:chat1"
+    assert record.boundary_id == "boundary-1"
+    assert record.turn_id == "turn-1"
+    loaded = SessionManager(workspace).get_or_create("tui:chat1")
+    assert loaded.turn_boundaries[0].turn_id == record.turn_id
+    assert loaded.turn_boundaries[0].boundary_id == record.boundary_id
 
 
 @pytest.mark.asyncio

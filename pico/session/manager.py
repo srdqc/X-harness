@@ -7,12 +7,13 @@ Session 保存消息事实与少量交互状态；SessionManager 负责 Channel/
 
 import copy
 import errno
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -55,6 +56,47 @@ class SessionResolution:
     candidates: tuple[str, ...] = ()
 
 
+_TURN_BOUNDARY_VERSION = 1
+
+
+def _history_digest(messages: list[dict[str, Any]], message_count: int) -> str:
+    """Return a stable digest for the exact persisted prefix at a boundary."""
+
+    encoded = json.dumps(
+        messages[:message_count],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class SessionTurnBoundary:
+    """Stable address for one completed independent Turn in a Session branch.
+
+    ``message_count`` is the exclusive end of the Turn's durable conversation
+    prefix.  ``history_digest`` binds that position to its exact content, while
+    ``turn_id`` correlates the boundary with Runtime identity when execution
+    entered through Spine.  Branch identity remains the containing Session key.
+    """
+
+    boundary_id: str
+    message_count: int
+    history_digest: str
+    turn_id: str | None = None
+    version: int = _TURN_BOUNDARY_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "boundary_id": self.boundary_id,
+            "message_count": self.message_count,
+            "history_digest": self.history_digest,
+            "turn_id": self.turn_id,
+        }
+
+
 @dataclass
 class Session:
     """保存一段 Conversation 的 Message Fact、Metadata 与 Persistence State。
@@ -75,6 +117,7 @@ class Session:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0  # 已归并到文件的消息数量
+    turn_boundaries: list[SessionTurnBoundary] = field(default_factory=list)
     # ── 个性化状态 ───────────────────────────────────────────────────────────
     # Agent 提出澄清问题并等待回答时设置。
     # 结构：{"original_message": str, "question": str, "domain": str}
@@ -101,8 +144,8 @@ class Session:
 
         这是 Session Write 的 Single Choke Point：``add_message``、AgentLoop ``_save_turn``、
         Clarification Append 都必须经过这里，确保没有 Unstamped Message。Caller-set ``timestamp``
-        保留；Per-message Order 与 Turn Group 直接来自 Append Order 和 ``role`` Boundary，不维护另一套
-        received_at/turn_id。
+        保留；Per-message Order 来自 Append Order。Independent Turn Group 由 Session-level
+        ``SessionTurnBoundary`` 保存，不把 received_at/turn_id 复制到每条 Message。
 
         方法原地接纳 Dict、更新 updated_at，但不 Save；Caller 后续修改同 Dict 会影响 Session，因而
         应把传入对象视为已转移所有权。
@@ -147,6 +190,7 @@ class Session:
         Writer。Metadata/Created_at 保留，Session Identity 不变。
         """
         self.messages = []
+        self.turn_boundaries = []
         self.last_consolidated = 0
         self.pending_clarification = None
         self.updated_at = datetime.now()
@@ -171,6 +215,9 @@ class Session:
         cut_index = user_starts[-n] if n <= len(user_starts) else user_starts[0]
         removed = len(self.messages) - cut_index
         self.messages = self.messages[:cut_index]
+        self.turn_boundaries = [
+            boundary for boundary in self.turn_boundaries if boundary.message_count <= cut_index
+        ]
         self.pending_clarification = None
         self.updated_at = datetime.now()
         return removed
@@ -179,6 +226,7 @@ class Session:
         return copy.deepcopy(
             {
                 "messages": self.messages,
+                "turn_boundaries": self.turn_boundaries,
                 "metadata": self.metadata,
                 "last_consolidated": self.last_consolidated,
                 "pending_clarification": self.pending_clarification,
@@ -193,7 +241,11 @@ class Session:
             return True
         if not self._persisted:
             return bool(
-                self.messages or self.metadata or self.last_consolidated or self.pending_clarification is not None
+                self.messages
+                or self.turn_boundaries
+                or self.metadata
+                or self.last_consolidated
+                or self.pending_clarification is not None
             )
         return self._persisted_snapshot != self._persistence_snapshot()
 
@@ -203,16 +255,142 @@ class SessionManager:
 
     每个 Key 映射 ``sessions/<safe channel>/<safe chat_id>.jsonl``。Manager 用 Metadata Record 保存
     Authoritative Key/Time/State，用 Message Record 保存 Append Fact；Cross-process Lock 与 Epoch 防止
-    Concurrent Writer Lost Update，Atomic Rewrite 处理 Undo/Clear/Partial Tail。
+    Concurrent Writer Lost Update，Atomic Rewrite 处理 Undo/Clear/Partial Tail。Turn Boundary 作为
+    Versioned Metadata 保存，绑定 Message Prefix Digest，而不是伪装成 Provider Message。
 
     Cache 只优化对象复用，不是 Persistence Truth。Read-only Caller 应用 `peek`，未知 Key 不会因查询
     创建 Lazy Session；Delete/Fork/Resolve/List 都维护 Logical Generation Boundary。
     """
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        boundary_id_factory: Callable[[], str] | None = None,
+    ):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self._cache: dict[str, Session] = {}
+        self._boundary_id_factory = boundary_id_factory or (lambda: uuid.uuid4().hex)
+
+    @classmethod
+    def _decode_turn_boundaries(
+        cls,
+        requested_key: str,
+        raw_boundaries: Any,
+        messages: list[dict[str, Any]],
+    ) -> list[SessionTurnBoundary]:
+        if raw_boundaries is None:
+            return []
+        if not isinstance(raw_boundaries, list):
+            raise StorageCorruptionError(f"session {requested_key} turn_boundaries must be an array")
+
+        boundaries: list[SessionTurnBoundary] = []
+        boundary_ids: set[str] = set()
+        turn_ids: set[str] = set()
+        previous_count = 0
+        for index, raw_boundary in enumerate(raw_boundaries):
+            if not isinstance(raw_boundary, dict):
+                raise StorageCorruptionError(
+                    f"session {requested_key} turn boundary {index} must be an object"
+                )
+            version = raw_boundary.get("version")
+            boundary_id = raw_boundary.get("boundary_id")
+            message_count = raw_boundary.get("message_count")
+            history_digest = raw_boundary.get("history_digest")
+            turn_id = raw_boundary.get("turn_id")
+            if version != _TURN_BOUNDARY_VERSION:
+                raise StorageCorruptionError(
+                    f"session {requested_key} turn boundary {index} has unsupported version"
+                )
+            if not isinstance(boundary_id, str) or not boundary_id:
+                raise StorageCorruptionError(
+                    f"session {requested_key} turn boundary {index} boundary_id must be a non-empty string"
+                )
+            if boundary_id in boundary_ids:
+                raise StorageCorruptionError(f"session {requested_key} has duplicate turn boundary id")
+            if (
+                isinstance(message_count, bool)
+                or not isinstance(message_count, int)
+                or message_count < previous_count
+                or message_count > len(messages)
+            ):
+                raise StorageCorruptionError(
+                    f"session {requested_key} turn boundary {index} has invalid message_count"
+                )
+            if (
+                not isinstance(history_digest, str)
+                or len(history_digest) != 64
+                or any(char not in "0123456789abcdef" for char in history_digest)
+            ):
+                raise StorageCorruptionError(
+                    f"session {requested_key} turn boundary {index} has invalid history_digest"
+                )
+            if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
+                raise StorageCorruptionError(
+                    f"session {requested_key} turn boundary {index} turn_id must be null or a non-empty string"
+                )
+            if turn_id is not None and turn_id in turn_ids:
+                raise StorageCorruptionError(f"session {requested_key} has duplicate Runtime turn_id")
+            if history_digest != _history_digest(messages, message_count):
+                raise StorageCorruptionError(
+                    f"session {requested_key} turn boundary {index} history digest does not match"
+                )
+            boundary_ids.add(boundary_id)
+            if turn_id is not None:
+                turn_ids.add(turn_id)
+            previous_count = message_count
+            boundaries.append(
+                SessionTurnBoundary(
+                    boundary_id=boundary_id,
+                    message_count=message_count,
+                    history_digest=history_digest,
+                    turn_id=turn_id,
+                    version=version,
+                )
+            )
+        return boundaries
+
+    def record_turn_boundary(
+        self,
+        session: Session,
+        *,
+        turn_id: str | None,
+    ) -> SessionTurnBoundary:
+        """Append one stable boundary for the Session's current message prefix."""
+
+        if turn_id is not None and any(boundary.turn_id == turn_id for boundary in session.turn_boundaries):
+            raise ValueError(f"Runtime turn {turn_id!r} already has a Session boundary")
+        boundary_id = self._boundary_id_factory()
+        if not isinstance(boundary_id, str) or not boundary_id:
+            raise ValueError("boundary_id_factory must return a non-empty string")
+        if any(boundary.boundary_id == boundary_id for boundary in session.turn_boundaries):
+            raise ValueError(f"duplicate Session turn boundary id {boundary_id!r}")
+        boundary = SessionTurnBoundary(
+            boundary_id=boundary_id,
+            message_count=len(session.messages),
+            history_digest=_history_digest(session.messages, len(session.messages)),
+            turn_id=turn_id,
+        )
+        session.turn_boundaries.append(boundary)
+        return boundary
+
+    def commit_turn_boundary(
+        self,
+        session: Session,
+        *,
+        turn_id: str | None,
+    ) -> SessionTurnBoundary:
+        """Persist a completed Turn's message tail and boundary as one save unit."""
+
+        boundary = self.record_turn_boundary(session, turn_id=turn_id)
+        try:
+            self.save(session)
+        except BaseException:
+            if session.turn_boundaries and session.turn_boundaries[-1] is boundary:
+                session.turn_boundaries.pop()
+            raise
+        return boundary
 
     def _get_session_path(self, key: str) -> Path:
         """把 Full Session Key 映射为 ``sessions/{channel}/{chat_id}.jsonl`` Path。
@@ -271,6 +449,7 @@ class SessionManager:
         updated_at: datetime | None = None
         last_consolidated = 0
         pending_clarification: dict[str, Any] | None = None
+        raw_turn_boundaries: Any = None
         has_metadata_key = False
         partial_tail_found = False
         for index, (line_number, line) in enumerate(records):
@@ -294,6 +473,7 @@ class SessionManager:
                 record_updated_at = data.get("updated_at")
                 record_last_consolidated = data.get("last_consolidated", 0)
                 record_pending_clarification = data.get("pending_clarification")
+                record_turn_boundaries = data.get("turn_boundaries")
                 has_metadata_key = cls._validate_metadata_identity(record_key, requested_key) or has_metadata_key
                 if not isinstance(record_metadata, dict):
                     raise StorageCorruptionError(f"session {requested_key} metadata payload must be an object")
@@ -319,6 +499,7 @@ class SessionManager:
                     raise StorageCorruptionError(f"session {requested_key} timestamp is invalid") from exc
                 last_consolidated = record_last_consolidated
                 pending_clarification = record_pending_clarification
+                raw_turn_boundaries = record_turn_boundaries
             else:
                 messages.append(data)
         cls._validate_fallback_identity(
@@ -326,8 +507,10 @@ class SessionManager:
             requested_key,
             has_metadata_key=has_metadata_key,
         )
+        turn_boundaries = cls._decode_turn_boundaries(requested_key, raw_turn_boundaries, messages)
         return {
             "messages": messages,
+            "turn_boundaries": turn_boundaries,
             "metadata": metadata,
             "created_at": created_at,
             "updated_at": updated_at,
@@ -340,6 +523,7 @@ class SessionManager:
     def _durable_state(payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "messages": payload["messages"],
+            "turn_boundaries": payload["turn_boundaries"],
             "metadata": payload["metadata"],
             "last_consolidated": payload["last_consolidated"],
             "pending_clarification": payload["pending_clarification"],
@@ -471,6 +655,7 @@ class SessionManager:
                     updated_at = data.get("updated_at")
                     last_consolidated = data.get("last_consolidated", 0)
                     pending_clarification = data.get("pending_clarification")
+                    turn_boundaries = data.get("turn_boundaries")
                     if not isinstance(record_metadata, dict):
                         return None, 0
                     if created_at is not None and not isinstance(created_at, str):
@@ -484,6 +669,8 @@ class SessionManager:
                     ):
                         return None, 0
                     if pending_clarification is not None and not isinstance(pending_clarification, dict):
+                        return None, 0
+                    if turn_boundaries is not None and not isinstance(turn_boundaries, list):
                         return None, 0
                     identity = key
                     meta = data
@@ -561,6 +748,7 @@ class SessionManager:
                 updated_at=payload["updated_at"] or payload["created_at"] or datetime.now(),
                 metadata=payload["metadata"],
                 last_consolidated=payload["last_consolidated"],
+                turn_boundaries=payload["turn_boundaries"],
                 pending_clarification=payload["pending_clarification"],
                 _storage_epoch=storage_epoch,
                 _requires_rewrite=payload["partial_tail_found"],
@@ -605,6 +793,7 @@ class SessionManager:
             "chat_id": chat_id,
             "title": None,
             "parent_session_id": None,
+            "parent_boundary_id": None,
         }
         session.metadata = {**reserved, **session.metadata}
 
@@ -616,6 +805,7 @@ class SessionManager:
                 "updated_at": session.updated_at.isoformat(),
                 "metadata": session.metadata,
                 "last_consolidated": session.last_consolidated,
+                "turn_boundaries": [boundary.to_dict() for boundary in session.turn_boundaries],
                 # 个性化状态：跨重启保留澄清问题的等待状态。
                 "pending_clarification": session.pending_clarification,
             },
@@ -764,6 +954,57 @@ class SessionManager:
             return cached
         return self._load(key)
 
+    def get_turn_boundary(
+        self,
+        key: str,
+        boundary_id: str,
+    ) -> SessionTurnBoundary | None:
+        """Return one boundary from a fresh, validated durable Session snapshot.
+
+        Recovery coordination must not infer a fork point from mutable cached
+        messages.  Loading through ``_load_state`` applies the existing
+        corruption and generation fences without creating a Session.
+        """
+
+        if not isinstance(boundary_id, str) or not boundary_id:
+            return None
+        session, _storage_epoch = self._load_state(key)
+        if session is None:
+            return None
+        return next(
+            (
+                boundary
+                for boundary in session.turn_boundaries
+                if boundary.boundary_id == boundary_id
+            ),
+            None,
+        )
+
+    def list_turn_boundaries(self, key: str) -> tuple[SessionTurnBoundary, ...]:
+        """Return validated durable boundaries without exposing mutable Session state."""
+
+        session, _storage_epoch = self._load_state(key)
+        return tuple(session.turn_boundaries) if session is not None else ()
+
+    def discard_fork_child(self, session: Session) -> bool:
+        """Delete one newly prepared fork using its exact persistence generation.
+
+        This narrow cleanup operation is for a coordinator that still owns an
+        unpublished child.  It refuses ordinary Sessions and delegates the
+        actual deletion/fencing to the existing Session owner.
+        """
+
+        if (
+            not session._persisted
+            or not isinstance(session.metadata.get("parent_session_id"), str)
+        ):
+            return False
+        return self.delete(
+            session.key,
+            expected_epoch=session._storage_epoch,
+            expected_exists=True,
+        )
+
     def fork(self, source_key: str, *, title: str | None = None) -> "Session | None":
         """在 ``source_key`` 当前 Head 创建可独立 Diverge 的 Child Session。
 
@@ -783,11 +1024,92 @@ class SessionManager:
         if not source.messages:
             return None
 
-        channel = source_key.partition(":")[0]
+        return self._persist_fork_child(
+            source,
+            messages=source.messages,
+            boundaries=source.turn_boundaries,
+            parent_boundary_id=(
+                source.turn_boundaries[-1].boundary_id
+                if source.turn_boundaries
+                and source.turn_boundaries[-1].message_count == len(source.messages)
+                else None
+            ),
+            last_consolidated=source.last_consolidated,
+            title=title,
+        )
+
+    def fork_at(
+        self,
+        source_key: str,
+        boundary_id: str,
+        *,
+        title: str | None = None,
+    ) -> "Session | None":
+        """Create a child from one exact durable boundary in ``source_key``.
+
+        The source is read from a fresh locked disk snapshot rather than the
+        mutable cache, so an active Turn's unpersisted tail cannot enter the
+        child.  Unknown sources or boundary ids return ``None``.  Corrupt
+        boundary metadata continues to raise ``StorageCorruptionError``.
+        """
+
+        if not isinstance(boundary_id, str) or not boundary_id:
+            return None
+        source, _storage_epoch = self._load_state(source_key)
+        if source is None:
+            return None
+        selected_index = next(
+            (
+                index
+                for index, boundary in enumerate(source.turn_boundaries)
+                if boundary.boundary_id == boundary_id
+            ),
+            None,
+        )
+        if selected_index is None:
+            return None
+        selected = source.turn_boundaries[selected_index]
+        if (
+            selected.message_count > len(source.messages)
+            or selected.history_digest != _history_digest(source.messages, selected.message_count)
+        ):
+            raise StorageCorruptionError(
+                f"session {source_key} turn boundary {boundary_id!r} does not match its message prefix"
+            )
+
+        # Memory is a separate shared state domain.  If the source has already
+        # consolidated beyond the selected prefix, replay the copied transcript
+        # from its beginning instead of hiding messages behind an invalid cursor.
+        child_last_consolidated = (
+            source.last_consolidated if source.last_consolidated <= selected.message_count else 0
+        )
+        return self._persist_fork_child(
+            source,
+            messages=source.messages[: selected.message_count],
+            boundaries=source.turn_boundaries[: selected_index + 1],
+            parent_boundary_id=selected.boundary_id,
+            last_consolidated=child_last_consolidated,
+            title=title,
+        )
+
+    def _persist_fork_child(
+        self,
+        source: Session,
+        *,
+        messages: list[dict[str, Any]],
+        boundaries: list[SessionTurnBoundary],
+        parent_boundary_id: str | None,
+        last_consolidated: int,
+        title: str | None,
+    ) -> Session:
+        """Persist an isolated child assembled from already validated facts."""
+
+        channel = source.key.partition(":")[0]
         child = Session(
             key=f"{channel}:{new_chat_id()}",
-            messages=copy.deepcopy(source.messages),
-            last_consolidated=source.last_consolidated,
+            messages=copy.deepcopy(messages),
+            last_consolidated=last_consolidated,
+            turn_boundaries=copy.deepcopy(boundaries),
         )
         if title is not None:
             child.metadata["title"] = title
@@ -795,8 +1117,20 @@ class SessionManager:
             parent_title = (source.metadata or {}).get("title")
             if parent_title:
                 child.metadata["title"] = f"{parent_title} (fork)"
-        child.metadata["parent_session_id"] = source_key
-        self.save(child)
+        child.metadata["parent_session_id"] = source.key
+        child.metadata["parent_boundary_id"] = parent_boundary_id
+        try:
+            self.save(child)
+        except BaseException:
+            # A wrapper may report failure after save completed.  Remove only
+            # the exact generation owned by this new child; never touch source.
+            if child._persisted:
+                self.delete(
+                    child.key,
+                    expected_epoch=child._storage_epoch,
+                    expected_exists=True,
+                )
+            raise
         return child
 
     def flush(self, key: str) -> bool:

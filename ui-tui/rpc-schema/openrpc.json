@@ -229,6 +229,122 @@
       "errors": []
     },
     {
+      "name": "session.rewind",
+        "summary": "Prepare an explicit selective-rewind continuation.",
+        "params": [
+          { "name": "session_id", "required": true, "schema": { "type": "string" } },
+          {
+            "name": "mode",
+            "required": true,
+            "schema": { "type": "string", "enum": ["conversation", "workspace", "both"] }
+          },
+          { "name": "boundary_id", "required": false, "schema": { "type": "string" } },
+          {
+            "name": "checkpoint_record_id",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "result": {
+          "name": "SessionRewindResult",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["ready", "validation_failed", "preparation_failed", "unsupported"]
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["conversation", "workspace", "both"]
+              },
+              "session_id": { "type": "string" },
+              "workspace_id": { "type": "string" },
+              "workspace_path": { "type": "string" },
+              "source_session_id": { "type": "string" },
+              "boundary_id": { "type": "string" },
+              "checkpoint_record_id": { "type": "string" },
+              "session_created": { "type": "boolean" },
+              "workspace_created": { "type": "boolean" },
+              "reason": { "type": "string" },
+              "cleanup_failures": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["status", "mode"]
+          }
+        },
+      "errors": []
+    },
+    {
+      "name": "session.rewind_options",
+        "summary": "List durable selective-rewind identities.",
+        "params": [
+          { "name": "session_id", "required": true, "schema": { "type": "string" } }
+        ],
+        "result": {
+          "name": "SessionRewindOptionsResult",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "session_id": { "type": "string" },
+              "boundaries": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "boundary_id": { "type": "string" },
+                    "message_count": { "type": "integer" },
+                    "turn_id": { "type": "string" }
+                  },
+                  "required": ["boundary_id", "message_count"]
+                }
+              },
+              "checkpoints": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "record_id": { "type": "string" },
+                    "checkpoint_id": { "type": "string" },
+                    "session_id": { "type": "string" },
+                    "boundary_id": { "type": "string" },
+                    "turn_id": { "type": "string" }
+                  },
+                  "required": ["record_id", "checkpoint_id"]
+                }
+              }
+            },
+            "required": ["session_id", "boundaries", "checkpoints"]
+          }
+        },
+      "errors": []
+    },
+    {
+      "name": "session.rewind_release",
+        "summary": "Release one process-local selective-rewind binding.",
+        "params": [
+          { "name": "session_id", "required": true, "schema": { "type": "string" } }
+        ],
+        "result": {
+          "name": "SessionRewindReleaseResult",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "released": { "type": "boolean" },
+              "state": { "type": "string" },
+              "workspace_cleaned": { "type": "boolean" },
+              "reason": { "type": "string" }
+            },
+            "required": ["released"]
+          }
+        },
+      "errors": []
+    },
+    {
       "name": "session.export",
       "summary": "Pico TUI operation: session.export.",
       "params": [

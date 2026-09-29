@@ -24,7 +24,7 @@ from loguru import logger
 
 from pico.spine._barrier import finish_barrier
 from pico.spine.events import RunnerEvent, TurnEnded, TurnEvent, TurnFailed, TurnStarted
-from pico.spine.runner import Emit, TurnOutcome, TurnRunner
+from pico.spine.runner import Emit, TurnOutcome, TurnRunner, turn_identity_scope
 from pico.spine.turn import BusyPolicy, Origin, TurnRequest
 from pico.tracing import semconv, trace
 
@@ -411,7 +411,8 @@ class Lane:
                     await self._sink(TurnStarted(conversation_id=self._conversation_id, turn_id=turn_id))
                     started = True
                     run_start = time.monotonic()
-                    outcome = await self._runner.run(req, self._make_emit(req, turn_id), drain)
+                    with turn_identity_scope(turn_id):
+                        outcome = await self._runner.run(req, self._make_emit(req, turn_id), drain)
             except asyncio.CancelledError:
                 turn_span.set(semconv.spine_turn_cancelled(started=started))
                 if started:  # 只与 TurnStarted 配对；启动前取消不发出事件

@@ -7,7 +7,10 @@ import type {
   ConfigSetResponse,
   ImageAttachResponse,
   SessionBranchResponse,
-  SessionExportResponse
+  SessionExportResponse,
+  SessionRewindOptionsResponse,
+  SessionRewindReleaseResponse,
+  SessionRewindResponse
 } from '../../../gatewayTypes.js'
 import type { SlashCommand } from '../types.js'
 
@@ -217,6 +220,95 @@ export const sessionCommands: SlashCommand[] = [
             ctx.transcript.sys(`session export failed: ${response.reason ?? 'not found'}`)
           })
         )
+        .catch(ctx.guardedErr)
+    }
+  },
+  {
+    help: 'selectively rewind conversation, Workspace, or both',
+    name: 'rewind',
+    usage: '/rewind [list|release|conversation <boundary>|workspace <record>|both <boundary> <record>]',
+    run: (arg, ctx) => {
+      if (!ctx.sid || ctx.session.guardBusySessionSwitch('rewind sessions')) {
+        return
+      }
+      const parts = arg.trim().split(/\s+/).filter(Boolean)
+      if (parts[0] === 'list') {
+        void ctx.gateway
+          .rpc<SessionRewindOptionsResponse>('session.rewind_options', { session_id: ctx.sid })
+          .then(
+            ctx.guarded(options => {
+              ctx.transcript.sys(
+                `boundaries: ${options.boundaries.map(item => `${item.boundary_id} (turn ${item.turn_id ?? '-'})`).join(', ') || 'none'}`
+              )
+              ctx.transcript.sys(
+                `checkpoint records: ${options.checkpoints.map(item => `${item.record_id} (boundary ${item.boundary_id ?? '-'})`).join(', ') || 'none'}`
+              )
+            })
+          )
+          .catch(ctx.guardedErr)
+        return
+      }
+      if (parts[0] === 'release' && parts.length === 1) {
+        void ctx.gateway
+          .rpc<SessionRewindReleaseResponse>('session.rewind_release', { session_id: ctx.sid })
+          .then(
+            ctx.guarded(response => {
+              ctx.transcript.sys(
+                response.released
+                  ? `continuation released; workspace cleaned=${response.workspace_cleaned ?? false}`
+                  : `continuation release failed: ${response.reason ?? 'unknown'}`
+              )
+            })
+          )
+          .catch(ctx.guardedErr)
+        return
+      }
+      const mode = parts[0]
+      const valid =
+        (mode === 'conversation' && parts.length === 2) ||
+        (mode === 'workspace' && parts.length === 2) ||
+        (mode === 'both' && parts.length === 3)
+      if (!valid) {
+        return ctx.transcript.sys(
+          'usage: /rewind [list|release|conversation <boundary>|workspace <record>|both <boundary> <record>]'
+        )
+      }
+      const source = ctx.sid
+      void ctx.session
+        .runSessionMutation('rewind sessions', async () => {
+          const response = await ctx.gateway.rpc<SessionRewindResponse>('session.rewind', {
+            ...(mode === 'conversation' || mode === 'both' ? { boundary_id: parts[1] } : {}),
+            ...(mode === 'workspace'
+              ? { checkpoint_record_id: parts[1] }
+              : mode === 'both'
+                ? { checkpoint_record_id: parts[2] }
+                : {}),
+            mode,
+            session_id: source
+          })
+          if (!response) {
+            ctx.transcript.sys('error: invalid response: session.rewind')
+            return null
+          }
+          if (response.status !== 'ready' || !response.session_id || !response.workspace_path) {
+            const cleanup = response.cleanup_failures.length
+              ? `; cleanup failures: ${response.cleanup_failures.join(', ')}`
+              : ''
+            return ctx.transcript.sys(
+              `rewind ${response.status}: ${response.reason ?? 'unknown'}${cleanup}`
+            )
+          }
+          ctx.transcript.sys(
+            `rewind ready: mode=${response.mode}; session=${response.session_id} (${response.session_created ? 'branched' : 'history unchanged'}); workspace=${response.workspace_path} (${response.workspace_created ? 'restored' : 'unchanged'})`
+          )
+          ctx.transcript.sys('Memory and external side effects were not rewound.')
+          return response
+        })
+        .then(response => {
+          if (response?.status === 'ready' && response.session_created && response.session_id) {
+            ctx.session.resumeById(response.session_id)
+          }
+        })
         .catch(ctx.guardedErr)
     }
   },

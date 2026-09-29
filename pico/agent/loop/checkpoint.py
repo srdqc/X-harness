@@ -12,17 +12,106 @@ Tree 的 *undo stack*，not full crash recovery。
 Safety 采用 Defense in Depth：Shadow Repo ``info/exclude`` 默认排除 Build、Virtualenv、IDE、OS
 Junk 与 likely-credential path；Work-tree 自身 ``.gitignore`` 继续按 Git standard semantics 生效；
 ``gc.auto`` 与周期 ``git gc --auto`` 控制 loose objects。Every Git invocation 都是 best-effort，
-失败记录后退化为 ``None``/空结果，Checkpoint 绝不能打断 Turn。
+失败记录为显式 ``FAILED`` 结果，Checkpoint 绝不能打断 Turn。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import uuid
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
 from pico.product import WORKSPACE_STATE_DIRNAME
+from pico.utils.atomic_io import StorageCorruptionError, locked_append, locked_read
+
+_CATALOGUE_SCHEMA_VERSION = 1
+_CATALOGUE_FILENAME = "checkpoint-catalogue.jsonl"
+
+
+class CheckpointStatus(str, Enum):
+    """Outcome of one checkpoint attempt."""
+
+    CREATED = "created"
+    UNCHANGED = "unchanged"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class CheckpointRecord:
+    """One durable checkpoint attempt and its recovery correlation facts."""
+
+    record_id: str
+    revision: int
+    status: CheckpointStatus
+    checkpoint_id: str | None
+    workspace_path: str
+    shadow_git_dir: str
+    session_id: str | None
+    boundary_id: str | None
+    turn_id: str | None
+    changed_paths: tuple[str, ...]
+    created_at: str
+    schema_version: int = _CATALOGUE_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "record_id": self.record_id,
+            "revision": self.revision,
+            "status": self.status.value,
+            "checkpoint_id": self.checkpoint_id,
+            "workspace_path": self.workspace_path,
+            "shadow_git_dir": self.shadow_git_dir,
+            "session_id": self.session_id,
+            "boundary_id": self.boundary_id,
+            "turn_id": self.turn_id,
+            "changed_paths": list(self.changed_paths),
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class CheckpointResult:
+    """Explicit result while preserving legacy two-value unpacking."""
+
+    status: CheckpointStatus
+    checkpoint_id: str | None
+    changed_paths: tuple[str, ...]
+    record_id: str | None
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.checkpoint_id
+        yield list(self.changed_paths)
+
+    def __getitem__(self, index: int) -> object:
+        return (self.checkpoint_id, list(self.changed_paths))[index]
+
+    def __len__(self) -> int:
+        return 2
+
+
+@dataclass(frozen=True)
+class CheckpointValidation:
+    """Read-only validation evidence for a catalogue record."""
+
+    usable: bool
+    reason: str | None
+    record: CheckpointRecord | None = None
+    tree_id: str | None = None
+    workspace_drifted: bool | None = None
+    drifted_paths: tuple[str, ...] = ()
+
+
+class CheckpointCatalogueError(StorageCorruptionError):
+    """The durable checkpoint catalogue cannot be trusted."""
 
 # 将提交者身份写入影子仓库，使提交不依赖也不修改用户的全局 Git 配置。
 _GIT_IDENT = (
@@ -125,6 +214,8 @@ class CheckpointService:
         shadow_dir: str = f"{WORKSPACE_STATE_DIRNAME}/shadow.git",
         *,
         state: Path | None = None,
+        record_id_factory: Callable[[], str] | None = None,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._workspace = Path(workspace).expanduser().resolve()
         state_root = Path(state).expanduser().resolve() if state is not None else self._workspace
@@ -143,8 +234,232 @@ class CheckpointService:
                 f"under the {root_label} ({state_root}); got {candidate}"
             )
         self._git_dir = candidate
+        self._catalogue_path = self._git_dir.parent / _CATALOGUE_FILENAME
+        self._record_id_factory = record_id_factory or (lambda: uuid.uuid4().hex)
+        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._ready = False
         self._commit_count = 0
+
+    @property
+    def workspace_path(self) -> Path:
+        """Resolved live Workspace identity owned by this checkpoint service."""
+
+        return self._workspace
+
+    @staticmethod
+    def _optional_identity(value: Any, field: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value:
+            raise CheckpointCatalogueError(f"checkpoint {field} must be null or a non-empty string")
+        return value
+
+    @classmethod
+    def _decode_record(cls, raw: Any) -> CheckpointRecord:
+        if not isinstance(raw, dict):
+            raise CheckpointCatalogueError("checkpoint catalogue record must be an object")
+        if raw.get("schema_version") != _CATALOGUE_SCHEMA_VERSION:
+            raise CheckpointCatalogueError("unsupported checkpoint catalogue schema version")
+        record_id = raw.get("record_id")
+        revision = raw.get("revision")
+        if not isinstance(record_id, str) or not record_id:
+            raise CheckpointCatalogueError("checkpoint record_id must be a non-empty string")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise CheckpointCatalogueError("checkpoint revision must be a positive integer")
+        try:
+            status = CheckpointStatus(raw.get("status"))
+        except (TypeError, ValueError) as exc:
+            raise CheckpointCatalogueError("checkpoint status is invalid") from exc
+        checkpoint_id = cls._optional_identity(raw.get("checkpoint_id"), "checkpoint_id")
+        workspace_path = raw.get("workspace_path")
+        shadow_git_dir = raw.get("shadow_git_dir")
+        created_at = raw.get("created_at")
+        changed_paths = raw.get("changed_paths")
+        if not isinstance(workspace_path, str) or not workspace_path or not Path(workspace_path).is_absolute():
+            raise CheckpointCatalogueError("checkpoint workspace_path must be absolute")
+        if not isinstance(shadow_git_dir, str) or not shadow_git_dir or not Path(shadow_git_dir).is_absolute():
+            raise CheckpointCatalogueError("checkpoint shadow_git_dir must be absolute")
+        if not isinstance(created_at, str) or not created_at:
+            raise CheckpointCatalogueError("checkpoint created_at must be a non-empty string")
+        try:
+            parsed_created_at = datetime.fromisoformat(created_at)
+        except ValueError as exc:
+            raise CheckpointCatalogueError("checkpoint created_at must be ISO-8601") from exc
+        if parsed_created_at.tzinfo is None:
+            raise CheckpointCatalogueError("checkpoint created_at must include a timezone")
+        if not isinstance(changed_paths, list) or any(
+            not isinstance(path, str) or not path for path in changed_paths
+        ):
+            raise CheckpointCatalogueError("checkpoint changed_paths must contain non-empty strings")
+        if len(changed_paths) != len(set(changed_paths)):
+            raise CheckpointCatalogueError("checkpoint changed_paths contains duplicates")
+        session_id = cls._optional_identity(raw.get("session_id"), "session_id")
+        boundary_id = cls._optional_identity(raw.get("boundary_id"), "boundary_id")
+        turn_id = cls._optional_identity(raw.get("turn_id"), "turn_id")
+        if boundary_id is not None and session_id is None:
+            raise CheckpointCatalogueError("checkpoint boundary_id requires session_id")
+        if status is CheckpointStatus.CREATED:
+            if checkpoint_id is None or len(checkpoint_id) not in {40, 64} or any(
+                char not in "0123456789abcdef" for char in checkpoint_id
+            ):
+                raise CheckpointCatalogueError("created checkpoint requires a full Git object id")
+            if not changed_paths:
+                raise CheckpointCatalogueError("created checkpoint requires changed_paths")
+        elif checkpoint_id is not None or changed_paths:
+            raise CheckpointCatalogueError(
+                "unchanged or failed checkpoint cannot claim an object or changed paths"
+            )
+        return CheckpointRecord(
+            record_id=record_id,
+            revision=revision,
+            status=status,
+            checkpoint_id=checkpoint_id,
+            workspace_path=workspace_path,
+            shadow_git_dir=shadow_git_dir,
+            session_id=session_id,
+            boundary_id=boundary_id,
+            turn_id=turn_id,
+            changed_paths=tuple(changed_paths),
+            created_at=created_at,
+        )
+
+    @classmethod
+    def _decode_catalogue(cls, raw: str) -> dict[str, CheckpointRecord]:
+        records: dict[str, CheckpointRecord] = {}
+        if not raw:
+            return records
+        for line_number, line in enumerate(raw.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                decoded = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise CheckpointCatalogueError(
+                    f"invalid checkpoint catalogue JSON at line {line_number}"
+                ) from exc
+            record = cls._decode_record(decoded)
+            previous = records.get(record.record_id)
+            if previous is None:
+                if record.revision != 1:
+                    raise CheckpointCatalogueError("first checkpoint record revision must be 1")
+            else:
+                if record.revision != previous.revision + 1:
+                    raise CheckpointCatalogueError("checkpoint record revisions are not contiguous")
+                immutable_fields = (
+                    "status",
+                    "checkpoint_id",
+                    "workspace_path",
+                    "shadow_git_dir",
+                    "changed_paths",
+                    "created_at",
+                )
+                if any(getattr(record, field) != getattr(previous, field) for field in immutable_fields):
+                    raise CheckpointCatalogueError("checkpoint correlation update changed immutable evidence")
+                for field in ("session_id", "boundary_id", "turn_id"):
+                    old = getattr(previous, field)
+                    new = getattr(record, field)
+                    if old is not None and new != old:
+                        raise CheckpointCatalogueError(
+                            f"checkpoint correlation update changed existing {field}"
+                        )
+            records[record.record_id] = record
+        return records
+
+    def _load_catalogue(self) -> dict[str, CheckpointRecord]:
+        raw, _epoch, _known = locked_read(self._catalogue_path)
+        return self._decode_catalogue(raw or "")
+
+    def _append_record(self, record: CheckpointRecord) -> None:
+        self._decode_record(record.to_dict())
+        line = json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+        def validate_append(raw: str) -> None:
+            separator = "" if not raw or raw.endswith(("\n", "\r")) else "\n"
+            self._decode_catalogue(f"{raw}{separator}{line}\n")
+
+        locked_append(
+            self._catalogue_path,
+            [line],
+            require_existing=record.revision > 1,
+            validate_existing=validate_append,
+        )
+
+    def _record_result(
+        self,
+        status: CheckpointStatus,
+        *,
+        checkpoint_id: str | None = None,
+        changed_paths: tuple[str, ...] = (),
+        session_id: str | None,
+        boundary_id: str | None,
+        turn_id: str | None,
+    ) -> CheckpointResult:
+        record_id = self._record_id_factory()
+        if not isinstance(record_id, str) or not record_id:
+            logger.debug("checkpoint catalogue id factory returned an invalid id")
+            return CheckpointResult(CheckpointStatus.FAILED, None, (), None)
+        record = CheckpointRecord(
+            record_id=record_id,
+            revision=1,
+            status=status,
+            checkpoint_id=checkpoint_id,
+            workspace_path=str(self._workspace),
+            shadow_git_dir=str(self._git_dir),
+            session_id=session_id,
+            boundary_id=boundary_id,
+            turn_id=turn_id,
+            changed_paths=changed_paths,
+            created_at=self._now_fn().isoformat(),
+        )
+        try:
+            self._append_record(record)
+        except (OSError, StorageCorruptionError, UnicodeError) as exc:
+            logger.debug("checkpoint catalogue write failed: {}", exc)
+            return CheckpointResult(CheckpointStatus.FAILED, None, (), None)
+        return CheckpointResult(status, checkpoint_id, changed_paths, record_id)
+
+    def get_record(self, record_id: str) -> CheckpointRecord | None:
+        """Return one durable record without mutating checkpoint or Workspace state."""
+
+        if not isinstance(record_id, str) or not record_id:
+            return None
+        return self._load_catalogue().get(record_id)
+
+    def list_records(self) -> tuple[CheckpointRecord, ...]:
+        """Return the latest immutable revision of every durable record."""
+
+        return tuple(self._load_catalogue().values())
+
+    def correlate(
+        self,
+        record_id: str,
+        *,
+        session_id: str | None,
+        boundary_id: str | None,
+        turn_id: str | None,
+    ) -> CheckpointRecord | None:
+        """Append correlation facts after the Session boundary is durable."""
+
+        try:
+            current = self.get_record(record_id)
+            if current is None:
+                return None
+            values = {
+                "session_id": session_id,
+                "boundary_id": boundary_id,
+                "turn_id": turn_id,
+            }
+            for field, value in values.items():
+                old = getattr(current, field)
+                if old is not None and old != value:
+                    logger.debug("checkpoint correlation rejected conflicting {}", field)
+                    return None
+            updated = replace(current, revision=current.revision + 1, **values)
+            self._append_record(updated)
+            return updated
+        except (OSError, StorageCorruptionError, UnicodeError) as exc:
+            logger.debug("checkpoint correlation write failed: {}", exc)
+            return None
 
     async def _git(self, *args: str) -> tuple[int, str, str]:
         """针对 Shadow Repo 运行 Git Command，并返回 ``(rc, out, err)``。
@@ -246,40 +561,182 @@ class CheckpointService:
             logger.debug("checkpoint init error: {}", exc)
             return False
 
-    async def commit_turn(self, label: str) -> tuple[str | None, list[str]]:
+    async def commit_turn(
+        self,
+        label: str,
+        *,
+        session_id: str | None = None,
+        boundary_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> CheckpointResult:
         """把当前 Worktree Snapshot 为一个带 ``label`` 的 Shadow Commit。
 
-        Ready 后依次执行 ``add -A``、cached name-only diff、Commit、short HEAD。Changed Files 必须
+        Ready 后依次执行 ``add -A``、cached name-only diff、Commit、full HEAD。Changed Files 必须
         在 Commit 前捕获，才能精确表示本 Turn staged state；无变化不创建空 Commit。成功返回
         ``(checkpoint_id, changed_files)``，增加实例 Commit count 并触发 `_maybe_gc`。
 
-        Init、Add、Commit、Rev-parse 或 OS 任一步失败均 best-effort 返回 ``(None, [])``。这意味着
-        “没有 Checkpoint”可能是无变化也可能是 Git Failure，Caller 不能把它当作 Workspace 未改。
+        Result 明确区分 CREATED、UNCHANGED 与 FAILED；仍支持旧调用方的二值解包。完整 Commit id
+        与关联事实写入 Catalogue。任何失败都 best-effort 返回 FAILED，不中断 Agent Turn。
         """
         if not await self._ensure_init():
-            return None, []
+            return self._record_result(
+                CheckpointStatus.FAILED,
+                session_id=session_id,
+                boundary_id=boundary_id,
+                turn_id=turn_id,
+            )
         try:
             rc, _, err = await self._git("add", "-A")
             if rc != 0:
                 logger.debug("checkpoint add failed: {}", err.strip())
-                return None, []
+                return self._record_result(
+                    CheckpointStatus.FAILED,
+                    session_id=session_id,
+                    boundary_id=boundary_id,
+                    turn_id=turn_id,
+                )
             # 当前 Turn 暂存的文件就是本 Turn 的变更，需在提交前捕获。
-            _, out, _ = await self._git("diff", "--cached", "--name-only")
+            rc, out, err = await self._git("diff", "--cached", "--name-only")
+            if rc != 0:
+                logger.debug("checkpoint diff failed: {}", err.strip())
+                return self._record_result(
+                    CheckpointStatus.FAILED,
+                    session_id=session_id,
+                    boundary_id=boundary_id,
+                    turn_id=turn_id,
+                )
             changed = [ln for ln in out.splitlines() if ln.strip()]
             if not changed:
-                return None, []  # 没有可快照的内容
+                return self._record_result(
+                    CheckpointStatus.UNCHANGED,
+                    session_id=session_id,
+                    boundary_id=boundary_id,
+                    turn_id=turn_id,
+                )
             rc, _, err = await self._git(*_GIT_IDENT, "commit", "-m", label)
             if rc != 0:
                 logger.debug("checkpoint commit failed: {}", err.strip())
-                return None, []
-            rc, out, _ = await self._git("rev-parse", "--short", "HEAD")
-            cid = out.strip() or None
+                return self._record_result(
+                    CheckpointStatus.FAILED,
+                    session_id=session_id,
+                    boundary_id=boundary_id,
+                    turn_id=turn_id,
+                )
+            rc, out, err = await self._git("rev-parse", "HEAD")
+            cid = out.strip() if rc == 0 else ""
+            if len(cid) not in {40, 64} or any(char not in "0123456789abcdef" for char in cid):
+                logger.debug("checkpoint rev-parse failed: {}", err.strip())
+                return self._record_result(
+                    CheckpointStatus.FAILED,
+                    session_id=session_id,
+                    boundary_id=boundary_id,
+                    turn_id=turn_id,
+                )
             self._commit_count += 1
             await self._maybe_gc()
-            return cid, changed
+            return self._record_result(
+                CheckpointStatus.CREATED,
+                checkpoint_id=cid,
+                changed_paths=tuple(changed),
+                session_id=session_id,
+                boundary_id=boundary_id,
+                turn_id=turn_id,
+            )
         except OSError as exc:
             logger.debug("checkpoint commit error: {}", exc)
-            return None, []
+            return self._record_result(
+                CheckpointStatus.FAILED,
+                session_id=session_id,
+                boundary_id=boundary_id,
+                turn_id=turn_id,
+            )
+
+    async def validate(
+        self,
+        record_id: str,
+        *,
+        expected_workspace: Path | None = None,
+        expected_session_id: str | None = None,
+        expected_boundary_id: str | None = None,
+        expected_turn_id: str | None = None,
+    ) -> CheckpointValidation:
+        """Validate durable recovery evidence without restoring or staging files."""
+
+        try:
+            record = self.get_record(record_id)
+        except (OSError, StorageCorruptionError, UnicodeError):
+            return CheckpointValidation(False, "catalogue_corrupt")
+        if record is None:
+            return CheckpointValidation(False, "record_missing")
+        expected_workspace_path = (
+            str(Path(expected_workspace).expanduser().resolve())
+            if expected_workspace is not None
+            else str(self._workspace)
+        )
+        if record.workspace_path != expected_workspace_path or record.workspace_path != str(self._workspace):
+            return CheckpointValidation(False, "workspace_mismatch", record=record)
+        if record.shadow_git_dir != str(self._git_dir):
+            return CheckpointValidation(False, "shadow_repository_mismatch", record=record)
+        correlations = (
+            ("session_mismatch", expected_session_id, record.session_id),
+            ("boundary_mismatch", expected_boundary_id, record.boundary_id),
+            ("turn_mismatch", expected_turn_id, record.turn_id),
+        )
+        for reason, expected, actual in correlations:
+            if expected is not None and expected != actual:
+                return CheckpointValidation(False, reason, record=record)
+        if record.status is CheckpointStatus.UNCHANGED:
+            return CheckpointValidation(False, "checkpoint_unchanged", record=record)
+        if record.status is CheckpointStatus.FAILED:
+            return CheckpointValidation(False, "checkpoint_failed", record=record)
+        if not self._git_dir.is_dir():
+            return CheckpointValidation(False, "shadow_repository_missing", record=record)
+        checkpoint_id = record.checkpoint_id
+        if checkpoint_id is None:
+            return CheckpointValidation(False, "checkpoint_object_missing", record=record)
+        rc, _, _ = await self._git("cat-file", "-e", f"{checkpoint_id}^{{commit}}")
+        if rc != 0:
+            return CheckpointValidation(False, "checkpoint_object_missing", record=record)
+        rc, tree_out, _ = await self._git("rev-parse", f"{checkpoint_id}^{{tree}}")
+        tree_id = tree_out.strip()
+        if rc != 0 or len(tree_id) not in {40, 64}:
+            return CheckpointValidation(False, "checkpoint_tree_invalid", record=record)
+        rc, _, _ = await self._git("cat-file", "-e", f"{tree_id}^{{tree}}")
+        if rc != 0:
+            return CheckpointValidation(False, "checkpoint_tree_invalid", record=record)
+        rc, diff_out, _ = await self._git("diff", "--name-only", checkpoint_id, "--")
+        if rc != 0:
+            return CheckpointValidation(False, "workspace_drift_unknown", record=record, tree_id=tree_id)
+        rc, untracked_out, _ = await self._git("ls-files", "--others", "--exclude-standard")
+        if rc != 0:
+            return CheckpointValidation(False, "workspace_drift_unknown", record=record, tree_id=tree_id)
+        drifted_paths = tuple(
+            dict.fromkeys(
+                path
+                for path in (*diff_out.splitlines(), *untracked_out.splitlines())
+                if path.strip()
+            )
+        )
+        return CheckpointValidation(
+            True,
+            None,
+            record=record,
+            tree_id=tree_id,
+            workspace_drifted=bool(drifted_paths),
+            drifted_paths=drifted_paths,
+        )
+
+    async def export_archive(self, checkpoint_id: str, destination: Path) -> tuple[bool, str]:
+        """Write one validated Git tree as a tar archive without touching either work-tree."""
+
+        rc, _, err = await self._git(
+            "archive",
+            "--format=tar",
+            "-o",
+            str(Path(destination).resolve()),
+            checkpoint_id,
+        )
+        return rc == 0, err.strip()
 
     async def _maybe_gc(self) -> None:
         """周期运行 ``git gc --auto``，避免 Long-lived Session 无限累积 Loose Objects。
@@ -300,4 +757,11 @@ class CheckpointService:
             logger.debug("checkpoint gc failed: {}", err.strip())
 
 
-__all__ = ["CheckpointService"]
+__all__ = [
+    "CheckpointCatalogueError",
+    "CheckpointRecord",
+    "CheckpointResult",
+    "CheckpointService",
+    "CheckpointStatus",
+    "CheckpointValidation",
+]

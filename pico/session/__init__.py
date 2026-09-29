@@ -4,6 +4,6 @@ External Caller 从此入口使用 Session/SessionManager，不依赖 JSONL Impl
 位于 `pico.session.export`，避免基本 Session Import 同时加载渲染逻辑。
 """
 
-from pico.session.manager import Session, SessionManager
+from pico.session.manager import Session, SessionManager, SessionTurnBoundary
 
-__all__ = ["SessionManager", "Session"]
+__all__ = ["SessionManager", "Session", "SessionTurnBoundary"]

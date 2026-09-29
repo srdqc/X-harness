@@ -182,6 +182,66 @@ describe('createSlashHandler retained contract', () => {
     expect(getUiState()).toMatchObject({ sessionSwitching: false, sid: 'tui:branch', status: 'ready' })
   })
 
+  it.each([
+    ['conversation', '/rewind conversation boundary-1', { boundary_id: 'boundary-1' }],
+    ['workspace', '/rewind workspace checkpoint-record-1', { checkpoint_record_id: 'checkpoint-record-1' }],
+    [
+      'both',
+      '/rewind both boundary-1 checkpoint-record-1',
+      { boundary_id: 'boundary-1', checkpoint_record_id: 'checkpoint-record-1' }
+    ]
+  ])('routes %s rewind through session.rewind', async (mode, command, selected) => {
+    patchUiState({ sid: 'tui:active' })
+    const ctx = buildCtx()
+    ctx.gateway.rpc.mockResolvedValue({
+      cleanup_failures: [],
+      mode,
+      session_created: mode !== 'workspace',
+      session_id: mode === 'workspace' ? 'tui:active' : 'tui:child',
+      status: 'ready',
+      workspace_created: mode !== 'conversation',
+      workspace_path: mode === 'conversation' ? '/live' : '/restored'
+    })
+
+    createSlashHandler(ctx as any)(command)
+
+    await vi.waitFor(() => {
+      expect(ctx.gateway.rpc).toHaveBeenCalledWith('session.rewind', {
+        ...selected,
+        mode,
+        session_id: 'tui:active'
+      })
+    })
+    if (mode === 'workspace') {
+      expect(ctx.session.resumeById).not.toHaveBeenCalled()
+    } else {
+      await vi.waitFor(() => expect(ctx.session.resumeById).toHaveBeenCalledWith('tui:child'))
+    }
+  })
+
+  it('surfaces rewind failure and cleanup diagnostics without switching sessions', async () => {
+    patchUiState({ sid: 'tui:active' })
+    const ctx = buildCtx()
+    ctx.gateway.rpc.mockResolvedValue({
+      cleanup_failures: ['workspace_cleanup_failed'],
+      mode: 'both',
+      reason: 'source_session_active',
+      session_created: false,
+      status: 'validation_failed',
+      workspace_created: false
+    })
+
+    createSlashHandler(ctx as any)('/rewind both boundary-1 checkpoint-record-1')
+
+    await vi.waitFor(() => {
+      expect(ctx.transcript.sys).toHaveBeenCalledWith(
+        'rewind validation_failed: source_session_active; cleanup failures: workspace_cleanup_failed'
+      )
+    })
+    expect(getUiState().sid).toBe('tui:active')
+    expect(ctx.session.releaseSessionImages).not.toHaveBeenCalled()
+  })
+
   it('keeps parent attachments when the branch does not commit', async () => {
     patchUiState({ sid: 'tui:active' })
     const ctx = buildCtx()

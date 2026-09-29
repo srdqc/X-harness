@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
@@ -13,6 +14,11 @@ from pico.spine._barrier import finish_barrier
 
 if TYPE_CHECKING:
     from pico.agent.loop import AgentLoop
+    from pico.agent.loop.rewind import (
+        ContinuationBindings,
+        ContinuationTarget,
+        SelectiveRewindCoordinator,
+    )
     from pico.call_efficiency import CallEfficiency
     from pico.config.paths import RuntimePaths
     from pico.config.pico import PicoConfig
@@ -28,6 +34,15 @@ class RuntimeAssembly:
     session_manager: SessionManager
     backend: MemoryBackend | None
     call_efficiency: CallEfficiency | None = None
+    continuation_bindings: ContinuationBindings | None = None
+    _continuation_loop_factory: Callable[[ContinuationTarget], AgentLoop] | None = field(
+        default=None,
+        repr=False,
+    )
+    _rewind_coordinator_factory: Callable[
+        [Callable[[str], bool]], SelectiveRewindCoordinator
+    ] | None = field(default=None, repr=False)
+    _continuation_loops: dict[str, AgentLoop] = field(default_factory=dict, init=False, repr=False)
     _backend_start_attempted: bool = field(default=False, init=False)
     _backend_started: bool = field(default=False, init=False)
     _backend_start_error: BaseException | None = field(default=None, init=False)
@@ -53,7 +68,29 @@ class RuntimeAssembly:
         return True
 
     def begin_close(self) -> None:
+        for loop in self._continuation_loops.values():
+            loop.begin_close()
         self.agent_loop.begin_close()
+
+    def continuation_agent_loop(self, target: ContinuationTarget) -> AgentLoop:
+        """Return the one Workspace-bound loop owned by a continuation."""
+
+        loop = self._continuation_loops.get(target.continuation_id)
+        if loop is not None:
+            return loop
+        if self._continuation_loop_factory is None:
+            raise RuntimeError("selective rewind is unavailable for this runtime")
+        loop = self._continuation_loop_factory(target)
+        self._continuation_loops[target.continuation_id] = loop
+        return loop
+
+    def rewind_coordinator(
+        self,
+        is_session_active: Callable[[str], bool],
+    ) -> SelectiveRewindCoordinator:
+        if self._rewind_coordinator_factory is None:
+            raise RuntimeError("selective rewind is unavailable for this runtime")
+        return self._rewind_coordinator_factory(is_session_active)
 
     async def close(self) -> None:
         async with self._close_lock:
@@ -63,6 +100,13 @@ class RuntimeAssembly:
 
     async def _close_once(self) -> None:
         cancellation: BaseException | None = None
+        for loop in self._continuation_loops.values():
+            try:
+                await loop.close()
+            except Exception:
+                logger.exception("continuation agent runtime close failed; continuing shutdown")
+            except BaseException as exc:
+                cancellation = cancellation or exc
         if not self._agent_closed:
             try:
                 await self.agent_loop.close()
@@ -120,6 +164,9 @@ def assemble_runtime(
     paths: "RuntimePaths | None" = None,
 ) -> RuntimeAssembly:
     from pico.agent.loop import AgentLoop
+    from pico.agent.loop.checkpoint import CheckpointService
+    from pico.agent.loop.rewind import ContinuationBindings, SelectiveRewindCoordinator
+    from pico.agent.loop.workspace_restore import WorkspaceRestoreService
     from pico.call_efficiency import CallEfficiency, CallEfficiencyProvider
     from pico.cli._plugin_stack import (
         build_plugin_registry,
@@ -148,49 +195,96 @@ def assemble_runtime(
             pico_config,
             registry=plugin_registry,
         )
-        plugin_tools = build_plugin_tools(
-            paths.workspace,
-            pico_config,
-            registry=plugin_registry,
-        )
         defaults = config.agents.defaults
-        agent_loop = AgentLoop(
-            provider=runtime_provider,
-            workspace=paths.workspace,
-            state=paths.state,
-            model=defaults.model,
-            max_iterations=defaults.max_tool_iterations,
-            empty_recovery=limits_from_defaults(defaults),
-            context_window_tokens=defaults.context_window_tokens,
-            max_concurrent_subagents=defaults.max_concurrent_subagents,
-            max_subagent_spawns_per_hour=defaults.max_subagent_spawns_per_hour,
-            brave_api_key=config.tools.web.search.api_key or None,
-            jina_api_key=config.tools.web.jina_api_key or None,
-            web_proxy=config.tools.web.proxy or None,
-            exec_config=config.tools.exec,
-            cron_service=cron_service,
-            restrict_to_workspace=config.tools.restrict_to_workspace,
-            session_manager=session_manager,
-            mcp_servers=config.tools.mcp_servers,
-            disabled_tools=config.tools.disabled_tools,
-            tool_search_config=config.tools.tool_search,
-            sandbox_config=config.tools.sandbox,
-            channels_config=config.channels,
-            router=router,
-            call_efficiency=call_efficiency,
-            skill_forge_config=pico_config.skill_forge,
-            context_config=pico_config.context,
-            context_engine_factory=context_engine_factory,
-            runtime_config=pico_config.runtime,
-            interactive=interactive,
-            backend=backend,
-            memory_config=pico_config.memory,
-            skill_forge_router_config=pico_config.skill_forge.router,
-            plugin_tools=plugin_tools,
-        )
-        agent_loop.configure_personalization(
-            defaults.enable_personalization,
-        )
+
+        def build_agent_loop(workspace_path, *, checkpoint_namespace: str | None = None) -> AgentLoop:
+            runtime_config = pico_config.runtime
+            if checkpoint_namespace is not None and hasattr(runtime_config, "model_copy"):
+                checkpoint_config = runtime_config.checkpoint.model_copy(
+                    update={
+                        "shadow_dir": (
+                            f".pico/continuations/{checkpoint_namespace}/shadow.git"
+                        )
+                    }
+                )
+                runtime_config = runtime_config.model_copy(
+                    update={"checkpoint": checkpoint_config}
+                )
+            loop = AgentLoop(
+                provider=runtime_provider,
+                workspace=workspace_path,
+                state=paths.state,
+                model=defaults.model,
+                max_iterations=defaults.max_tool_iterations,
+                empty_recovery=limits_from_defaults(defaults),
+                context_window_tokens=defaults.context_window_tokens,
+                max_concurrent_subagents=defaults.max_concurrent_subagents,
+                max_subagent_spawns_per_hour=defaults.max_subagent_spawns_per_hour,
+                brave_api_key=config.tools.web.search.api_key or None,
+                jina_api_key=config.tools.web.jina_api_key or None,
+                web_proxy=config.tools.web.proxy or None,
+                exec_config=config.tools.exec,
+                cron_service=cron_service,
+                restrict_to_workspace=config.tools.restrict_to_workspace,
+                session_manager=session_manager,
+                mcp_servers=config.tools.mcp_servers,
+                disabled_tools=config.tools.disabled_tools,
+                tool_search_config=config.tools.tool_search,
+                sandbox_config=config.tools.sandbox,
+                channels_config=config.channels,
+                router=router,
+                call_efficiency=call_efficiency,
+                skill_forge_config=pico_config.skill_forge,
+                context_config=pico_config.context,
+                context_engine_factory=context_engine_factory,
+                runtime_config=runtime_config,
+                interactive=interactive,
+                backend=backend,
+                memory_config=pico_config.memory,
+                skill_forge_router_config=pico_config.skill_forge.router,
+                plugin_tools=build_plugin_tools(
+                    workspace_path,
+                    pico_config,
+                    registry=plugin_registry,
+                ),
+            )
+            loop.configure_personalization(defaults.enable_personalization)
+            return loop
+
+        agent_loop = build_agent_loop(paths.workspace)
+        checkpoints = getattr(agent_loop, "_checkpoint", None)
+        if checkpoints is None:
+            checkpoint_config = getattr(pico_config.runtime, "checkpoint", None)
+            shadow_dir = getattr(checkpoint_config, "shadow_dir", None)
+            checkpoint_kwargs = {
+                "state": paths.state if paths.state != paths.workspace else None,
+            }
+            if isinstance(shadow_dir, str):
+                checkpoint_kwargs["shadow_dir"] = shadow_dir
+            checkpoints = CheckpointService(paths.workspace, **checkpoint_kwargs)
+        restore_root = (Path(paths.state) / "restored-workspaces").resolve()
+        source_workspace = Path(paths.workspace).resolve()
+        if restore_root == source_workspace or restore_root.is_relative_to(source_workspace):
+            restore_root = (
+                source_workspace.parent / f".{source_workspace.name}-pico-restored-workspaces"
+            ).resolve()
+        restorer = WorkspaceRestoreService(checkpoints, restore_root=restore_root)
+        bindings = ContinuationBindings(restorer)
+
+        def continuation_loop(target):
+            return build_agent_loop(
+                target.workspace_path,
+                checkpoint_namespace=target.continuation_id,
+            )
+
+        def coordinator_factory(is_session_active):
+            return SelectiveRewindCoordinator(
+                session_manager,
+                checkpoints,
+                restorer,
+                bindings,
+                is_session_active=is_session_active,
+            )
     except BaseException:
         try:
             call_efficiency.close()
@@ -202,6 +296,9 @@ def assemble_runtime(
         session_manager=session_manager,
         backend=backend,
         call_efficiency=call_efficiency,
+        continuation_bindings=bindings,
+        _continuation_loop_factory=continuation_loop,
+        _rewind_coordinator_factory=coordinator_factory,
     )
 
 

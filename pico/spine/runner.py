@@ -10,7 +10,9 @@ Spine 只声明 ``TurnRunner`` protocol，Agent Loop 提供实现；Spine 从不
 运行时类型守卫。``drain`` 可以被最小实现忽略，此时所有 INJECT 最终回退为 APPEND Turn。
 """
 
-from collections.abc import Awaitable, Callable
+import contextlib
+import contextvars
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -22,6 +24,28 @@ Emit = Callable[[RunnerEvent], Awaitable[None]]
 # 忽略它；最小合法实现从不 drain，因此每个 inject 都回退为 APPEND Turn。
 # 该操作同步执行，因为 drain 只是读取 deque。
 Drain = Callable[[], list[TurnRequest]]
+
+_CURRENT_TURN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "pico_runtime_turn_id",
+    default=None,
+)
+
+
+def current_turn_id() -> str | None:
+    """Return the Runtime identity of the independent Turn currently executing."""
+
+    return _CURRENT_TURN_ID.get()
+
+
+@contextlib.contextmanager
+def turn_identity_scope(turn_id: str) -> Iterator[None]:
+    """Propagate Runtime Turn identity without attaching it to TurnRequest."""
+
+    token = _CURRENT_TURN_ID.set(turn_id)
+    try:
+        yield
+    finally:
+        _CURRENT_TURN_ID.reset(token)
 
 
 @dataclass(frozen=True)

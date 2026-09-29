@@ -446,6 +446,9 @@ async def test_inject_message_merged_before_next_iteration(tmp_path):
     assert any(m.get("role") == "user" and "also check the logs" in str(m.get("content", "")) for m in second), (
         f"injected message not merged into the second iteration: {second}"
     )
+    session = loop.sessions.get_or_create("cli:c")
+    assert len(session.turn_boundaries) == 1
+    assert session.turn_boundaries[0].message_count == len(session.messages)
 
 
 async def test_run_slash_emits_text_not_streamed(tmp_path):

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 import os
+from collections.abc import Awaitable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -45,12 +46,14 @@ from pico.tui_rpc.methods.system import _pico_version
 
 if TYPE_CHECKING:
     from pico.agent.loop.main import AgentLoop
+    from pico.agent.loop.rewind import SelectiveRewindCoordinator
     from pico.config.schema import Config
     from pico.tui_rpc.confirm_broker import ConfirmBroker
     from pico.tui_rpc.dispatcher import Dispatcher
 
 
 AgentLoopFactory = Callable[[], "AgentLoop | None"]
+RewindCoordinatorFactory = Callable[[], Awaitable["SelectiveRewindCoordinator"]]
 
 
 # 模块加载时只缓存一次包版本，因为 importlib.metadata.version 每次调用都会扫描
@@ -694,11 +697,106 @@ async def session_export(
     return {"exported": True, "path": str(written)}
 
 
+async def session_rewind(
+    params: dict,
+    *,
+    coordinator_factory: "RewindCoordinatorFactory",
+) -> dict:
+    """Submit one typed selective-rewind request to the Runtime owner."""
+
+    from pico.agent.loop.rewind import RewindMode, RewindRequest
+
+    coordinator = await coordinator_factory()
+    result = await coordinator.rewind(
+        RewindRequest(
+            RewindMode(params["mode"]),
+            params["session_id"],
+            boundary_id=params.get("boundary_id"),
+            checkpoint_record_id=params.get("checkpoint_record_id"),
+        )
+    )
+    target = result.target
+    response = {
+        "status": result.status.value,
+        "mode": result.mode.value,
+        "source_session_id": target.source_session_id if target else params["session_id"],
+        "session_created": target.session_created if target else False,
+        "workspace_created": target.workspace_created if target else False,
+        "cleanup_failures": list(result.cleanup_failures),
+    }
+    if target is not None:
+        response.update(
+            session_id=target.session_id,
+            workspace_id=target.workspace_id,
+            workspace_path=str(target.workspace_path),
+        )
+    if result.selected_boundary is not None:
+        response["boundary_id"] = result.selected_boundary.boundary_id
+    if result.selected_checkpoint is not None:
+        response["checkpoint_record_id"] = result.selected_checkpoint.record_id
+    if result.reason is not None:
+        response["reason"] = result.reason
+    return response
+
+
+async def session_rewind_options(
+    params: dict,
+    *,
+    coordinator_factory: "RewindCoordinatorFactory",
+) -> dict:
+    coordinator = await coordinator_factory()
+    options = await coordinator.selection_options(params["session_id"])
+    return {
+        "session_id": options.session_id,
+        "boundaries": [
+            {
+                "boundary_id": boundary.boundary_id,
+                "message_count": boundary.message_count,
+                **({"turn_id": boundary.turn_id} if boundary.turn_id is not None else {}),
+            }
+            for boundary in options.boundaries
+        ],
+        "checkpoints": [
+            {
+                "record_id": record.record_id,
+                "checkpoint_id": record.checkpoint_id,
+                **({"session_id": record.session_id} if record.session_id is not None else {}),
+                **({"boundary_id": record.boundary_id} if record.boundary_id is not None else {}),
+                **({"turn_id": record.turn_id} if record.turn_id is not None else {}),
+            }
+            for record in options.checkpoints
+            if record.checkpoint_id is not None
+        ],
+    }
+
+
+async def session_rewind_release(
+    params: dict,
+    *,
+    coordinator_factory: "RewindCoordinatorFactory",
+) -> dict:
+    coordinator = await coordinator_factory()
+    released = coordinator.release(params["session_id"])
+    response = {
+        "released": released is not None and released.reason is None,
+    }
+    if released is None:
+        response["reason"] = "binding_missing"
+    else:
+        response["state"] = released.state.value
+        if released.workspace_cleaned is not None:
+            response["workspace_cleaned"] = released.workspace_cleaned
+        if released.reason is not None:
+            response["reason"] = released.reason
+    return response
+
+
 def register_session_methods(
     dispatcher: "Dispatcher",
     *,
     agent_loop_factory: "AgentLoopFactory | None" = None,
     confirm_broker: "ConfirmBroker | None" = None,
+    rewind_coordinator_factory: "RewindCoordinatorFactory | None" = None,
 ) -> None:
     """在 Dispatcher 上注册 11 个 ``session.*`` handler。
 
@@ -747,6 +845,27 @@ def register_session_methods(
     async def _export(params: dict) -> dict:
         return await session_export(params, agent_loop_factory=agent_loop_factory)
 
+    async def _rewind(params: dict) -> dict:
+        if rewind_coordinator_factory is None:
+            raise RuntimeError("selective rewind is unavailable")
+        return await session_rewind(params, coordinator_factory=rewind_coordinator_factory)
+
+    async def _rewind_options(params: dict) -> dict:
+        if rewind_coordinator_factory is None:
+            raise RuntimeError("selective rewind is unavailable")
+        return await session_rewind_options(
+            params,
+            coordinator_factory=rewind_coordinator_factory,
+        )
+
+    async def _rewind_release(params: dict) -> dict:
+        if rewind_coordinator_factory is None:
+            raise RuntimeError("selective rewind is unavailable")
+        return await session_rewind_release(
+            params,
+            coordinator_factory=rewind_coordinator_factory,
+        )
+
     dispatcher.register("session.create", _create)
     dispatcher.register("session.close", _close)
     dispatcher.register("session.resume", _resume)
@@ -758,6 +877,9 @@ def register_session_methods(
     dispatcher.register("session.undo", _undo)
     dispatcher.register("session.branch", _branch)
     dispatcher.register("session.export", _export)
+    dispatcher.register("session.rewind", _rewind)
+    dispatcher.register("session.rewind_options", _rewind_options)
+    dispatcher.register("session.rewind_release", _rewind_release)
 
 
 __all__ = [
@@ -773,5 +895,8 @@ __all__ = [
     "session_undo",
     "session_branch",
     "session_export",
+    "session_rewind",
+    "session_rewind_options",
+    "session_rewind_release",
     "register_session_methods",
 ]

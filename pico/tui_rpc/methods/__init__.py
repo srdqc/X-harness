@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from pico.tui_rpc.confirm_broker import ConfirmBroker
     from pico.tui_rpc.dispatcher import Dispatcher
     from pico.tui_rpc.errors import RpcError
-    from pico.tui_rpc.methods.session import AgentLoopFactory
+    from pico.tui_rpc.methods.session import AgentLoopFactory, RewindCoordinatorFactory
     from pico.tui_rpc.methods.turn import SchedulerFactory
     from pico.tui_rpc.question_broker import QuestionBroker
     from pico.tui_rpc.subscriptions import SubscriptionEmitter
@@ -48,6 +48,7 @@ def register_aligned_methods(
     turn_ids: "dict[int, str] | None" = None,
     submission_ids: "dict[int, str] | None" = None,
     build_error: "RpcError | None" = None,
+    rewind_coordinator_factory: "RewindCoordinatorFactory | None" = None,
 ) -> None:
     """在 ``dispatcher`` 上注册全部 aligned RPC handler。
 
@@ -73,6 +74,7 @@ def register_aligned_methods(
         turn_ids=turn_ids,
         submission_ids=submission_ids,
         build_error=build_error,
+        rewind_coordinator_factory=rewind_coordinator_factory,
     )
 
 
@@ -88,6 +90,7 @@ def register_aligned_methods_except_system(
     turn_ids: "dict[int, str] | None" = None,
     submission_ids: "dict[int, str] | None" = None,
     build_error: "RpcError | None" = None,
+    rewind_coordinator_factory: "RewindCoordinatorFactory | None" = None,
 ) -> None:
     """注册除 ``system.*`` 之外的 retained RPC handler。
 
@@ -102,6 +105,7 @@ def register_aligned_methods_except_system(
         dispatcher,
         agent_loop_factory=agent_loop_factory,
         confirm_broker=confirm_broker,
+        rewind_coordinator_factory=rewind_coordinator_factory,
     )
     register_terminal_methods(dispatcher)
     register_image_methods(dispatcher)

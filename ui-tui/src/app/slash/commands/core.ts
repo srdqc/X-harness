@@ -44,6 +44,7 @@ const HELP_ROWS: [string, string][] = [
   ['/undo', 'remove the last exchange'],
   ['/retry', 'retry the last user message'],
   ['/branch [title]', 'fork the current Session'],
+  ['/rewind …', 'selectively rewind conversation, Workspace, or both'],
   ['/export [id]', 'export a Session transcript'],
   ['/quit', 'exit Pico']
 ]
