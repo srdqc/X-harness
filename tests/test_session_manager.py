@@ -1530,6 +1530,203 @@ def _seed(mgr: SessionManager, key: str, *turns: tuple[str, str]) -> Session:
     return session
 
 
+def _seed_bounded_session(mgr: SessionManager, key: str) -> Session:
+    session = mgr.get_or_create(key)
+    for index in range(1, 4):
+        session.add_message("user", f"q{index}")
+        session.add_message("assistant", f"a{index}")
+        mgr.commit_turn_boundary(session, turn_id=f"turn-{index}")
+    return session
+
+
+def test_fork_at_exact_boundary_copies_only_validated_prefix_and_lineage(tmp_path: Path):
+    boundary_ids = iter(("boundary-1", "boundary-2", "boundary-3"))
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(boundary_ids))
+    source = _seed_bounded_session(mgr, "cli:fork-at-prefix")
+    source.pending_clarification = {
+        "original_message": "q3",
+        "question": "continue?",
+        "domain": "conversation",
+    }
+    mgr.save(source)
+    source_path = tmp_path / "sessions" / "cli" / "fork-at-prefix.jsonl"
+    source_bytes = source_path.read_bytes()
+    source_messages = copy.deepcopy(source.messages)
+    source_boundaries = copy.deepcopy(source.turn_boundaries)
+
+    child = mgr.fork_at(source.key, "boundary-2")
+
+    assert child is not None
+    assert [message["content"] for message in child.messages] == ["q1", "a1", "q2", "a2"]
+    assert [boundary.boundary_id for boundary in child.turn_boundaries] == [
+        "boundary-1",
+        "boundary-2",
+    ]
+    assert child.metadata["parent_session_id"] == source.key
+    assert child.metadata["parent_boundary_id"] == "boundary-2"
+    assert child.pending_clarification is None
+    assert source_path.read_bytes() == source_bytes
+    assert source.messages == source_messages
+    assert source.turn_boundaries == source_boundaries
+
+    reloaded = SessionManager(tmp_path).get_or_create(child.key)
+    assert reloaded.messages == child.messages
+    assert reloaded.turn_boundaries == child.turn_boundaries
+    assert reloaded.metadata["parent_boundary_id"] == "boundary-2"
+
+
+def test_fork_at_latest_boundary_matches_bounded_head_fork(tmp_path: Path):
+    boundary_ids = iter(("boundary-1", "boundary-2", "boundary-3"))
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(boundary_ids))
+    source = _seed_bounded_session(mgr, "cli:fork-at-head")
+
+    child = mgr.fork_at(source.key, "boundary-3")
+
+    assert child is not None
+    assert child.messages == source.messages
+    assert child.turn_boundaries == source.turn_boundaries
+    assert child.metadata["parent_boundary_id"] == "boundary-3"
+
+
+def test_fork_at_parent_and_child_diverge_with_new_runtime_turns(tmp_path: Path):
+    boundary_ids = iter(
+        ("boundary-1", "boundary-2", "boundary-3", "parent-next", "child-next")
+    )
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(boundary_ids))
+    source = _seed_bounded_session(mgr, "cli:fork-at-diverge")
+    child = mgr.fork_at(source.key, "boundary-2")
+    assert child is not None
+
+    source.add_message("user", "parent q4")
+    source.add_message("assistant", "parent a4")
+    mgr.commit_turn_boundary(source, turn_id="turn-parent-next")
+    child.add_message("user", "child q3")
+    child.add_message("assistant", "child a3")
+    mgr.commit_turn_boundary(child, turn_id="turn-child-next")
+
+    fresh = SessionManager(tmp_path)
+    reloaded_source = fresh.get_or_create(source.key)
+    reloaded_child = fresh.get_or_create(child.key)
+    assert reloaded_source.messages[-1]["content"] == "parent a4"
+    assert reloaded_child.messages[-1]["content"] == "child a3"
+    assert reloaded_source.turn_boundaries[-1].turn_id == "turn-parent-next"
+    assert reloaded_child.turn_boundaries[-1].turn_id == "turn-child-next"
+
+
+def test_fork_at_uses_persisted_snapshot_not_active_unpersisted_tail(tmp_path: Path):
+    boundary_ids = iter(("boundary-1", "boundary-2", "boundary-3"))
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(boundary_ids))
+    source = _seed_bounded_session(mgr, "cli:fork-at-active")
+    source_path = tmp_path / "sessions" / "cli" / "fork-at-active.jsonl"
+    source_bytes = source_path.read_bytes()
+    source.add_message("user", "active unsaved input")
+
+    child = mgr.fork_at(source.key, "boundary-2")
+
+    assert child is not None
+    assert [message["content"] for message in child.messages] == ["q1", "a1", "q2", "a2"]
+    assert source.messages[-1]["content"] == "active unsaved input"
+    assert source_path.read_bytes() == source_bytes
+
+
+def test_fork_at_rejects_stale_or_tampered_boundary(tmp_path: Path):
+    boundary_ids = iter(("boundary-1", "boundary-2", "boundary-3"))
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(boundary_ids))
+    source = _seed_bounded_session(mgr, "cli:fork-at-stale")
+
+    assert mgr.fork_at(source.key, "removed-boundary") is None
+
+    path = tmp_path / "sessions" / "cli" / "fork-at-stale.jsonl"
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    metadata = next(record for record in reversed(records) if record.get("_type") == "metadata")
+    metadata["turn_boundaries"][1]["history_digest"] = "0" * 64
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    with pytest.raises(StorageCorruptionError, match="history digest does not match"):
+        SessionManager(tmp_path).fork_at(source.key, "boundary-2")
+
+
+def test_fork_at_legacy_session_requires_explicit_boundary(tmp_path: Path):
+    mgr = SessionManager(tmp_path)
+    source = _seed(mgr, "cli:legacy-fork-at", ("user", "q"), ("assistant", "a"))
+
+    assert mgr.fork_at(source.key, "guessed-from-message-role") is None
+    legacy_child = mgr.fork(source.key)
+    assert legacy_child is not None
+    assert legacy_child.messages == source.messages
+    assert legacy_child.metadata["parent_boundary_id"] is None
+
+
+@pytest.mark.parametrize(("cursor", "expected"), [(2, 2), (6, 0)])
+def test_fork_at_handles_memory_consolidation_cursor_conservatively(
+    tmp_path: Path,
+    cursor: int,
+    expected: int,
+) -> None:
+    boundary_ids = iter(("boundary-1", "boundary-2", "boundary-3"))
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(boundary_ids))
+    source = _seed_bounded_session(mgr, f"cli:fork-at-memory-{cursor}")
+    source.last_consolidated = cursor
+    mgr.save(source)
+
+    child = mgr.fork_at(source.key, "boundary-2")
+
+    assert child is not None
+    assert child.last_consolidated == expected
+
+
+@pytest.mark.parametrize("persist_before_failure", [False, True])
+def test_fork_at_child_persistence_failure_leaves_source_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persist_before_failure: bool,
+) -> None:
+    boundary_ids = iter(("boundary-1", "boundary-2", "boundary-3"))
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(boundary_ids))
+    source = _seed_bounded_session(mgr, "cli:fork-at-save-failure")
+    source_path = tmp_path / "sessions" / "cli" / "fork-at-save-failure.jsonl"
+    source_bytes = source_path.read_bytes()
+    original_save = mgr.save
+
+    def fail_child_save(session: Session) -> None:
+        if session.key != source.key:
+            if persist_before_failure:
+                original_save(session)
+            raise OSError("disk full")
+        original_save(session)
+
+    monkeypatch.setattr(mgr, "save", fail_child_save)
+
+    with pytest.raises(OSError, match="disk full"):
+        mgr.fork_at(source.key, "boundary-2")
+    assert source_path.read_bytes() == source_bytes
+    assert {item["key"] for item in mgr.list_sessions()} == {source.key}
+
+
+def test_fork_at_copies_tool_evidence_without_replay_or_workspace_change(tmp_path: Path):
+    workspace_file = tmp_path / "project.txt"
+    workspace_file.write_text("unchanged", encoding="utf-8")
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: "boundary-1")
+    source = mgr.get_or_create("cli:fork-at-tool-evidence")
+    source.record({"role": "user", "content": "inspect"})
+    source.record(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call-1", "function": {"name": "write_file"}}],
+        }
+    )
+    source.record({"role": "tool", "tool_call_id": "call-1", "content": "done"})
+    mgr.commit_turn_boundary(source, turn_id="turn-1")
+
+    child = mgr.fork_at(source.key, "boundary-1")
+
+    assert child is not None
+    assert child.messages == source.messages
+    assert workspace_file.read_text(encoding="utf-8") == "unchanged"
+    assert not (tmp_path / ".pico").exists()
+
+
 def test_fork_copies_history_to_new_same_channel_session(tmp_path: Path):
     """fork mints a fresh same-channel chat_id holding a verbatim message copy."""
     mgr = SessionManager(tmp_path)

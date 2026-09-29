@@ -973,12 +973,92 @@ class SessionManager:
         if not source.messages:
             return None
 
-        channel = source_key.partition(":")[0]
+        return self._persist_fork_child(
+            source,
+            messages=source.messages,
+            boundaries=source.turn_boundaries,
+            parent_boundary_id=(
+                source.turn_boundaries[-1].boundary_id
+                if source.turn_boundaries
+                and source.turn_boundaries[-1].message_count == len(source.messages)
+                else None
+            ),
+            last_consolidated=source.last_consolidated,
+            title=title,
+        )
+
+    def fork_at(
+        self,
+        source_key: str,
+        boundary_id: str,
+        *,
+        title: str | None = None,
+    ) -> "Session | None":
+        """Create a child from one exact durable boundary in ``source_key``.
+
+        The source is read from a fresh locked disk snapshot rather than the
+        mutable cache, so an active Turn's unpersisted tail cannot enter the
+        child.  Unknown sources or boundary ids return ``None``.  Corrupt
+        boundary metadata continues to raise ``StorageCorruptionError``.
+        """
+
+        if not isinstance(boundary_id, str) or not boundary_id:
+            return None
+        source, _storage_epoch = self._load_state(source_key)
+        if source is None:
+            return None
+        selected_index = next(
+            (
+                index
+                for index, boundary in enumerate(source.turn_boundaries)
+                if boundary.boundary_id == boundary_id
+            ),
+            None,
+        )
+        if selected_index is None:
+            return None
+        selected = source.turn_boundaries[selected_index]
+        if (
+            selected.message_count > len(source.messages)
+            or selected.history_digest != _history_digest(source.messages, selected.message_count)
+        ):
+            raise StorageCorruptionError(
+                f"session {source_key} turn boundary {boundary_id!r} does not match its message prefix"
+            )
+
+        # Memory is a separate shared state domain.  If the source has already
+        # consolidated beyond the selected prefix, replay the copied transcript
+        # from its beginning instead of hiding messages behind an invalid cursor.
+        child_last_consolidated = (
+            source.last_consolidated if source.last_consolidated <= selected.message_count else 0
+        )
+        return self._persist_fork_child(
+            source,
+            messages=source.messages[: selected.message_count],
+            boundaries=source.turn_boundaries[: selected_index + 1],
+            parent_boundary_id=selected.boundary_id,
+            last_consolidated=child_last_consolidated,
+            title=title,
+        )
+
+    def _persist_fork_child(
+        self,
+        source: Session,
+        *,
+        messages: list[dict[str, Any]],
+        boundaries: list[SessionTurnBoundary],
+        parent_boundary_id: str | None,
+        last_consolidated: int,
+        title: str | None,
+    ) -> Session:
+        """Persist an isolated child assembled from already validated facts."""
+
+        channel = source.key.partition(":")[0]
         child = Session(
             key=f"{channel}:{new_chat_id()}",
-            messages=copy.deepcopy(source.messages),
-            last_consolidated=source.last_consolidated,
-            turn_boundaries=copy.deepcopy(source.turn_boundaries),
+            messages=copy.deepcopy(messages),
+            last_consolidated=last_consolidated,
+            turn_boundaries=copy.deepcopy(boundaries),
         )
         if title is not None:
             child.metadata["title"] = title
@@ -986,13 +1066,20 @@ class SessionManager:
             parent_title = (source.metadata or {}).get("title")
             if parent_title:
                 child.metadata["title"] = f"{parent_title} (fork)"
-        child.metadata["parent_session_id"] = source_key
-        child.metadata["parent_boundary_id"] = (
-            source.turn_boundaries[-1].boundary_id
-            if source.turn_boundaries and source.turn_boundaries[-1].message_count == len(source.messages)
-            else None
-        )
-        self.save(child)
+        child.metadata["parent_session_id"] = source.key
+        child.metadata["parent_boundary_id"] = parent_boundary_id
+        try:
+            self.save(child)
+        except BaseException:
+            # A wrapper may report failure after save completed.  Remove only
+            # the exact generation owned by this new child; never touch source.
+            if child._persisted:
+                self.delete(
+                    child.key,
+                    expected_epoch=child._storage_epoch,
+                    expected_exists=True,
+                )
+            raise
         return child
 
     def flush(self, key: str) -> bool:
