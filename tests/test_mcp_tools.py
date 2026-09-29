@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import types
 
+from pico.agent.tools.discovery import ToolSourceKind
 from pico.agent.tools.mcp import MCPToolWrapper
 from pico.agent.tools.registry import ToolRegistry
 
@@ -41,6 +42,13 @@ async def test_mcp_result_preserves_server_error_status(is_error: bool):
     )
     registry = ToolRegistry()
     registry.register(wrapper)
+
+    metadata = registry.discovery_metadata(wrapper.name)
+    assert metadata is not None
+    assert metadata.name == "mcp_docs_read"
+    assert metadata.source_kind is ToolSourceKind.MCP
+    assert metadata.source_id == "docs"
+    assert metadata.category is None
 
     result = await registry.execute(wrapper.name, {})
 

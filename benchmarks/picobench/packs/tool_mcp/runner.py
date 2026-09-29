@@ -31,6 +31,7 @@ from benchmarks.picobench.records import (
 )
 from pico.agent.tools.mcp import connect_mcp_servers
 from pico.agent.tools.registry import ToolRegistry
+from pico.agent.tools.tool_index import ToolRetrievalResult
 from pico.agent.tools.tool_search import (
     ToolCallTool,
     ToolSearchController,
@@ -50,6 +51,7 @@ from pico.spine import (
     Origin,
     Source,
     ToolEvent,
+    ToolPhase,
     TurnRequest,
 )
 
@@ -360,6 +362,7 @@ async def _run_runtime_trial(
     started = time.perf_counter()
     observation = None
     catalog_payloads: list[dict[str, Any]] = []
+    retrieval_results: list[ToolRetrievalResult] = []
     environment = {
         **isolation.child_environment(),
         "PICO_TRACING_DIR": str(isolation.trace_root),
@@ -380,6 +383,20 @@ async def _run_runtime_trial(
                 for definition in definitions
                 if definition["function"]["name"].startswith("mcp_picobench_catalog_probe_")
             ]
+            controller = getattr(host.assembly.agent_loop, "tool_search_controller", None)
+            if controller is not None:
+                for event in observation.events:
+                    if (
+                        not isinstance(event, ToolEvent)
+                        or event.phase is not ToolPhase.START
+                        or event.name != "tool_search"
+                    ):
+                        continue
+                    arguments = event.arguments or {}
+                    query = arguments.get("query")
+                    limit = arguments.get("limit")
+                    if isinstance(query, str) and (limit is None or isinstance(limit, int)):
+                        retrieval_results.append(controller.retrieve(query, limit))
         finally:
             await host.close()
     latency_ms = (time.perf_counter() - started) * 1_000
@@ -396,6 +413,10 @@ async def _run_runtime_trial(
         catalog_names=catalog_names,
         initially_visible_names=initial_names,
         expected_first_target=task.targets[0].runtime_name,
+    )
+    retrieval_metrics = _retrieval_metrics(
+        retrieval_results,
+        expected_target=task.targets[0].runtime_name,
     )
     schema_tokens = [estimate_visible_tool_schema_tokens(payload) for payload in provider.tool_payloads]
     usage = _aggregate_usage(provider.call_records)
@@ -444,6 +465,7 @@ async def _run_runtime_trial(
             "exact_target_repeat_rate": normalized.exact_target_repeat_rate,
             "normalized_target_call_count": len(normalized.records),
             "target_call_records": [to_primitive(record) for record in normalized.records],
+            **retrieval_metrics,
             "provider_model": provider.model,
             "actual_model_names": sorted(
                 {str(record["model"]) for record in provider.call_records if record["model"] is not None}
@@ -457,6 +479,41 @@ async def _run_runtime_trial(
         findings=tuple(findings),
         artifact_refs=(isolation.root.relative_to(context.experiment.output_root).as_posix(),),
     )
+
+
+def _retrieval_metrics(
+    results: list[ToolRetrievalResult],
+    *,
+    expected_target: str,
+) -> dict[str, Any]:
+    first = results[0] if results else None
+    rank = first.rank_of(expected_target) if first is not None else None
+    wrong_before_target = (
+        [
+            hit.metadata.name
+            for hit in first.hits
+            if rank is None or hit.rank < rank
+        ]
+        if first is not None
+        else []
+    )
+    targets = {expected_target}
+    return {
+        "tool_retrieval_query_count": len(results),
+        "tool_retrieval_evidence": [to_primitive(result) for result in results],
+        "target_recall_at_1": first.recall_at(targets, 1) if first is not None else None,
+        "target_recall_at_3": first.recall_at(targets, 3) if first is not None else None,
+        "target_recall_at_5": first.recall_at(targets, 5) if first is not None else None,
+        "first_target_retrieval_rank": rank,
+        "target_retrieval_mrr": first.reciprocal_rank(expected_target) if first is not None else None,
+        "zero_hit_count": sum(result.zero_hit for result in results),
+        "zero_hit_rate": (
+            sum(result.zero_hit for result in results) / len(results)
+            if results
+            else None
+        ),
+        "wrong_target_ranking_evidence": wrong_before_target,
+    }
 
 
 async def run_mcp_transport_smoke(root: Path) -> MCPTransportSmokeResult:

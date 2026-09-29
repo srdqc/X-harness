@@ -185,6 +185,24 @@ async def test_formal_task_runs_both_variants_through_runtime_host(
         "tool_call": len(task.targets),
         "tool_search": 1,
     }
+    assert control.metrics["tool_retrieval_query_count"] == 0
+    assert control.metrics["target_recall_at_5"] is None
+    assert control.metrics["zero_hit_rate"] is None
+    assert treatment.metrics["tool_retrieval_query_count"] == 1
+    assert treatment.metrics["target_recall_at_1"] == 1.0
+    assert treatment.metrics["target_recall_at_3"] == 1.0
+    assert treatment.metrics["target_recall_at_5"] == 1.0
+    assert treatment.metrics["first_target_retrieval_rank"] == 1
+    assert treatment.metrics["target_retrieval_mrr"] == 1.0
+    assert treatment.metrics["zero_hit_count"] == 0
+    assert treatment.metrics["zero_hit_rate"] == 0.0
+    assert treatment.metrics["wrong_target_ranking_evidence"] == []
+    retrieval = treatment.metrics["tool_retrieval_evidence"][0]
+    assert len(retrieval["catalog_signature"]) == 64
+    assert retrieval["total_searchable_tools"] == 64
+    assert retrieval["requested_k"] == 5
+    assert retrieval["hits"][0]["metadata"]["source_kind"] == "mcp"
+    assert retrieval["hits"][0]["metadata"]["source_id"] == "picobench"
     assert control.metrics["mcp_catalog_digest"] == treatment.metrics["mcp_catalog_digest"]
 
 

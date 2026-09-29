@@ -14,6 +14,7 @@ import httpx
 from loguru import logger
 
 from pico.agent.tools.base import Tool, ToolResult
+from pico.agent.tools.discovery import ToolSourceKind
 from pico.agent.tools.registry import ToolRegistry
 from pico.sandbox import SandboxInitError
 
@@ -31,6 +32,8 @@ class MCPToolWrapper(Tool):
     显式失败状态。
     """
 
+    discovery_source_kind = ToolSourceKind.MCP
+
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
         self._session = session
         self._original_name = tool_def.name
@@ -38,6 +41,7 @@ class MCPToolWrapper(Tool):
         self._description = tool_def.description or tool_def.name
         self._parameters = tool_def.inputSchema or {"type": "object", "properties": {}}
         self._tool_timeout = tool_timeout
+        self.discovery_source_id = server_name
 
     @property
     def name(self) -> str:

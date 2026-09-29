@@ -36,6 +36,7 @@ from pico.agent.loop.recovery import (
 from pico.agent.subagent import SubagentManager
 from pico.agent.tools.ask_user import AskUserTool
 from pico.agent.tools.base import ToolResult
+from pico.agent.tools.discovery import ToolSourceKind
 from pico.agent.tools.execution import ToolExecution, ToolExecutionContext, ToolInvocation
 from pico.agent.tools.file_search import FindTool, GrepTool
 from pico.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -533,10 +534,14 @@ class AgentLoop:
         函数内延迟导入是为避开 `pico.agent.__init__` 的循环导入边界。
         """
         allowed_dir = self.workspace if self.restrict_to_workspace else None
+
+        def register_builtin(tool: Tool) -> None:
+            self.tools.register(tool, source_kind=ToolSourceKind.BUILTIN)
+
         for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, GrepTool, FindTool):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
-        self.tools.register(SkillReadTool(self.context.skills))
-        self.tools.register(
+            register_builtin(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        register_builtin(SkillReadTool(self.context.skills))
+        register_builtin(
             ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
@@ -545,25 +550,29 @@ class AgentLoop:
                 executor=self._executor,
             )
         )
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
-        self.tools.register(WebFetchTool(api_key=self.jina_api_key, proxy=self.web_proxy))
-        self.tools.register(MessageTool())
-        self.tools.register(SpawnTool(manager=self.subagents))
+        register_builtin(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
+        register_builtin(WebFetchTool(api_key=self.jina_api_key, proxy=self.web_proxy))
+        register_builtin(MessageTool())
+        register_builtin(SpawnTool(manager=self.subagents))
         # QuestionBroker 按传输层为单例；当传输层（TUI RPC 服务器或网关 hub）存在后，
         # 通过 set_broker 延迟绑定。
-        self.tools.register(AskUserTool())
+        register_builtin(AskUserTool())
         if self.cron_service:
             # 延迟导入：CronTool 所在模块会导入 pico.agent.tools.base，触发 pico.agent.__init__，
             # 后者又导入当前循环模块。在函数作用域导入可打破循环，因为执行
             # _register_default_tools 时 loop.py 已完全加载。
             from pico.proactive_engine.schedulers.cron.tool import CronTool
 
-            self.tools.register(CronTool(self.cron_service))
+            register_builtin(CronTool(self.cron_service))
 
         # 插件贡献的工具最后注册，使插件在有意提供同名工具时能覆盖内置实现。
         # 随后仍会运行 ``_apply_disabled_tools``，因此任何工具都可被移除。
         for tool in self.plugin_tools:
-            self.tools.register(tool, replace=True)
+            self.tools.register(
+                tool,
+                replace=True,
+                source_kind=ToolSourceKind.PLUGIN,
+            )
 
         # 渐进式工具披露最后注册，使其搜索目录覆盖上方全部内置和插件工具。
         # MCP 工具稍后在 ``_connect_mcp`` 中加入；策略每个 Turn 都重读注册表，因此能自动获取。

@@ -16,9 +16,14 @@ Process-level 单槽缓存最近 Built Index，使 Resident Process 创建的多
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pico.agent.tools.discovery import ToolDiscoveryMetadata, ToolSourceKind
 from pico.utils.bm25 import BM25Okapi, tokenize
 
 if TYPE_CHECKING:
@@ -40,6 +45,47 @@ _BuiltIndex = tuple[list[str], BM25Okapi]
 _cache_lock = threading.Lock()
 _cached_sig: _Signature = frozenset()
 _cached_index: _BuiltIndex | None = None
+
+
+@dataclass(frozen=True)
+class ToolRetrievalHit:
+    rank: int
+    score: float
+    metadata: ToolDiscoveryMetadata
+
+
+@dataclass(frozen=True)
+class ToolRetrievalResult:
+    query: str
+    catalog_signature: str
+    total_searchable_tools: int
+    requested_k: int
+    effective_k: int
+    hits: tuple[ToolRetrievalHit, ...]
+
+    @property
+    def ranked_names(self) -> tuple[str, ...]:
+        return tuple(hit.metadata.name for hit in self.hits)
+
+    @property
+    def zero_hit(self) -> bool:
+        return not self.hits
+
+    def rank_of(self, target_name: str) -> int | None:
+        return next(
+            (hit.rank for hit in self.hits if hit.metadata.name == target_name),
+            None,
+        )
+
+    def recall_at(self, target_names: set[str] | frozenset[str], k: int) -> float | None:
+        if not target_names:
+            return None
+        visible = {hit.metadata.name for hit in self.hits[: max(k, 0)]}
+        return len(visible & target_names) / len(target_names)
+
+    def reciprocal_rank(self, target_name: str) -> float:
+        rank = self.rank_of(target_name)
+        return 0.0 if rank is None else 1.0 / rank
 
 
 def _schema_text(parameters: "dict[str, Any] | None") -> str:
@@ -122,8 +168,15 @@ class ToolIndex:
         self._names: list[str] = []
         self._sig: _Signature = frozenset()
         self._bm25: BM25Okapi | None = None
+        self._metadata: dict[str, ToolDiscoveryMetadata] = {}
+        self._catalog_signature = _catalog_signature(())
 
-    def ensure(self, tools: "list[Tool]") -> None:
+    def ensure(
+        self,
+        tools: "list[Tool]",
+        *,
+        metadata: list[ToolDiscoveryMetadata] | None = None,
+    ) -> None:
         """仅当 Tool ``(name, description, parameters)`` Set 变化时采用新 Shared Index。
 
         先 Flatten 当前 Tool 并计算 frozenset Signature；与实例现有 Signature 相同且 BM25 已存在
@@ -132,12 +185,40 @@ class ToolIndex:
         """
         items = [(t.name, _format_tool_text(t)) for t in tools]
         sig: _Signature = frozenset(items)
+        projected = (
+            metadata
+            if metadata is not None
+            else [
+                ToolDiscoveryMetadata(
+                    name=tool.name,
+                    description=tool.description,
+                    source_kind=getattr(tool, "discovery_source_kind", ToolSourceKind.UNKNOWN),
+                    source_id=getattr(tool, "discovery_source_id", None),
+                    category=getattr(tool, "discovery_category", None),
+                    effect=tool.capability.effect,
+                )
+                for tool in tools
+            ]
+        )
+        metadata_by_name = {item.name: item for item in projected}
+        if (
+            len(metadata_by_name) != len(projected)
+            or set(metadata_by_name) != {name for name, _ in items}
+        ):
+            raise ValueError("metadata must describe each indexed Tool exactly once")
+        catalog_signature = _catalog_signature(
+            (text, metadata_by_name[name]) for name, text in items
+        )
         with self._lock:
             if sig == self._sig and self._bm25 is not None:
+                self._metadata = metadata_by_name
+                self._catalog_signature = catalog_signature
                 return
         names, bm25 = _get_or_build(sig, items)
         with self._lock:
             self._names, self._bm25, self._sig = names, bm25, sig
+            self._metadata = metadata_by_name
+            self._catalog_signature = catalog_signature
 
     def search(self, query: str, limit: int) -> list[str]:
         """按 BM25 排名返回最多 ``limit`` 个 Tool names，并丢弃 zero-score hit。
@@ -146,11 +227,69 @@ class ToolIndex:
         只捕获 BM25/names 引用，评分与排序在锁外完成，按 Score 降序返回。结果不带 Description/
         Schema，Controller 会从 Live Registry 再组装。
         """
+        return list(self.retrieve(query, limit).ranked_names)
+
+    def retrieve(self, query: str, limit: int) -> ToolRetrievalResult:
+        """Return ranked scores and immutable catalogue metadata for diagnostics."""
         tokens = tokenize(query)
         with self._lock:
-            bm25, names = self._bm25, self._names
-        if bm25 is None or not tokens:
-            return []
+            bm25 = self._bm25
+            names = tuple(self._names)
+            metadata = dict(self._metadata)
+            catalog_signature = self._catalog_signature
+        requested_k = limit
+        effective_k = min(max(limit, 0), len(names))
+        if bm25 is None or not tokens or effective_k == 0:
+            return ToolRetrievalResult(
+                query=query,
+                catalog_signature=catalog_signature,
+                total_searchable_tools=len(names),
+                requested_k=requested_k,
+                effective_k=effective_k,
+                hits=(),
+            )
         scores = bm25.get_scores(tokens)
         ranked = sorted(zip(names, scores), key=lambda x: x[1], reverse=True)
-        return [name for name, score in ranked if score > 0.0][:limit]
+        positive = [(name, float(score)) for name, score in ranked if score > 0.0][:effective_k]
+        return ToolRetrievalResult(
+            query=query,
+            catalog_signature=catalog_signature,
+            total_searchable_tools=len(names),
+            requested_k=requested_k,
+            effective_k=effective_k,
+            hits=tuple(
+                ToolRetrievalHit(
+                    rank=rank,
+                    score=score,
+                    metadata=metadata[name],
+                )
+                for rank, (name, score) in enumerate(positive, start=1)
+            ),
+        )
+
+
+def _catalog_signature(
+    items: Iterable[tuple[str, ToolDiscoveryMetadata]],
+) -> str:
+    payload = [
+        {
+            "indexed_text": text,
+            "name": metadata.name,
+            "description": metadata.description,
+            "source_kind": metadata.source_kind.value,
+            "source_id": metadata.source_id,
+            "category": metadata.category,
+            "effect": metadata.effect.value,
+        }
+        for text, metadata in items
+    ]
+    encoded = json.dumps(
+        sorted(payload, key=lambda item: item["name"]),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+__all__ = ["ToolIndex", "ToolRetrievalHit", "ToolRetrievalResult"]

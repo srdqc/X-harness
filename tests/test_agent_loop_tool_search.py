@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from pico.agent.loop import AgentLoop
+from pico.agent.tools.discovery import ToolSourceKind
 from pico.config.schema import ToolSearchConfig
 from pico.providers.base import LLMProvider, LLMResponse
 from pico.token_wise.base import TokenStrategy
@@ -69,6 +70,10 @@ def test_enabled_registers_meta_tools(workspace) -> None:
     for name in ("tool_search", "tool_call"):
         assert loop.tools.has(name), f"{name} should be registered"
     assert loop.strategies.get("tool_search") is not None
+    builtin = loop.tools.discovery_metadata("read_file")
+    meta = loop.tools.discovery_metadata("tool_search")
+    assert builtin is not None and builtin.source_kind is ToolSourceKind.BUILTIN
+    assert meta is not None and meta.source_kind is ToolSourceKind.META
 
 
 def test_strategy_registered_first(workspace) -> None:

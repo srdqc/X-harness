@@ -13,6 +13,7 @@ from dataclasses import replace
 from typing import Any
 
 from pico.agent.tools.base import Tool, ToolResult
+from pico.agent.tools.discovery import ToolDiscoveryMetadata, ToolSourceKind
 from pico.agent.tools.execution import (
     ResolvedToolInvocation,
     ToolEffect,
@@ -47,9 +48,18 @@ class ToolRegistry:
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
         self._tools: dict[str, Tool] = {}
+        self._discovery: dict[str, ToolDiscoveryMetadata] = {}
         self._max_parallel = max_parallel
 
-    def register(self, tool: Tool, *, replace: bool = False) -> None:
+    def register(
+        self,
+        tool: Tool,
+        *,
+        replace: bool = False,
+        source_kind: ToolSourceKind | None = None,
+        source_id: str | None = None,
+        category: str | None = None,
+    ) -> None:
         """按稳定名称注册一个 Tool，并显式控制同名覆盖。
 
         名称已存在且 ``replace=False`` 时抛 `ValueError`，防止内置能力被意外替换；Plugin 等
@@ -59,6 +69,14 @@ class ToolRegistry:
         if tool.name in self._tools and not replace:
             raise ValueError(f"Tool '{tool.name}' is already registered")
         self._tools[tool.name] = tool
+        self._discovery[tool.name] = ToolDiscoveryMetadata(
+            name=tool.name,
+            description=tool.description,
+            source_kind=source_kind or tool.discovery_source_kind,
+            source_id=source_id if source_id is not None else tool.discovery_source_id,
+            category=category if category is not None else tool.discovery_category,
+            effect=tool.capability.effect,
+        )
 
     def unregister(self, name: str) -> None:
         """按 ``name`` 移除 Tool，名称不存在时保持 no-op。
@@ -67,6 +85,7 @@ class ToolRegistry:
         自有资源。该幂等语义使宽泛 disabled list 可以安全覆盖不同构建的注册表。
         """
         self._tools.pop(name, None)
+        self._discovery.pop(name, None)
 
     def get(self, name: str) -> Tool | None:
         """返回 ``name`` 对应的 Tool 实例，不存在时返回 ``None``。
@@ -83,6 +102,26 @@ class ToolRegistry:
         与 disabled 策略可能在更高层继续缩小模型可见集合。
         """
         return name in self._tools
+
+    def discovery_metadata(self, name: str) -> ToolDiscoveryMetadata | None:
+        """Project current descriptive metadata without granting execution authority."""
+        tool = self._tools.get(name)
+        registered = self._discovery.get(name)
+        if tool is None or registered is None:
+            return None
+        return replace(
+            registered,
+            description=tool.description,
+            effect=tool.capability.effect,
+        )
+
+    def discovery_catalog(self) -> tuple[ToolDiscoveryMetadata, ...]:
+        """Return an immutable, registration-ordered snapshot of discovery facts."""
+        return tuple(
+            metadata
+            for name in self._tools
+            if (metadata := self.discovery_metadata(name)) is not None
+        )
 
     def get_definitions(self) -> list[dict[str, Any]]:
         """按注册顺序返回全部 Tool 的 OpenAI function definitions。

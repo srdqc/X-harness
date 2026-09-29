@@ -20,8 +20,9 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from pico.agent.tools.base import Tool
+from pico.agent.tools.discovery import ToolSourceKind
 from pico.agent.tools.execution import ToolExecutionContext, ToolInvocation
-from pico.agent.tools.tool_index import ToolIndex
+from pico.agent.tools.tool_index import ToolIndex, ToolRetrievalResult
 from pico.token_wise.base import TokenStrategy
 
 if TYPE_CHECKING:
@@ -91,7 +92,9 @@ class ToolSearchController:
         每次大型 Catalog LLM call 前调用，确保 Plugin/MCP 热加入可搜索；昂贵 Rebuild 是否需要由
         ToolIndex.ensure 的 name/description/parameters Signature 决定。
         """
-        self._index.ensure(self._catalog_tools())
+        tools = self._catalog_tools()
+        metadata = [self._registry.discovery_metadata(tool.name) for tool in tools]
+        self._index.ensure(tools, metadata=[item for item in metadata if item is not None])
 
     def visible_names(self) -> set[str]:
         return self.always_visible
@@ -103,7 +106,7 @@ class ToolSearchController:
         Tool，已热删除项跳过；完整 Schema 让模型可直接进入 ``tool_call``，无需 separate describe
         round-trip。结果顺序沿用 BM25 rank，方法不把 Tool 加入 always-visible set。
         """
-        names = self._index.search(query, limit or self.search_result_limit)
+        names = self.retrieve(query, limit).ranked_names
         hits = []
         for name in names:
             tool = self._registry.get(name)
@@ -117,6 +120,10 @@ class ToolSearchController:
                 }
             )
         return hits
+
+    def retrieve(self, query: str, limit: int | None = None) -> ToolRetrievalResult:
+        """Return immutable ranking evidence without changing Tool visibility or authority."""
+        return self._index.retrieve(query, limit or self.search_result_limit)
 
     def resolve_invocation(
         self,
@@ -177,6 +184,8 @@ class ToolSearchTool(Tool):
     命中能力，也不改变 Visible Set。
     """
 
+    discovery_source_kind = ToolSourceKind.META
+
     def __init__(self, controller: ToolSearchController) -> None:
         self._ctrl = controller
 
@@ -227,6 +236,8 @@ class ToolCallTool(Tool):
     让 ToolEvent 显示实际目标。`resolve_invocation` 还使 execute_many 在并发判定前看到目标 Tool
     capability，而不是错误把 Meta Tool 当作安全 Read。
     """
+
+    discovery_source_kind = ToolSourceKind.META
 
     def __init__(self, controller: ToolSearchController) -> None:
         self._ctrl = controller
