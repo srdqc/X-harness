@@ -52,6 +52,7 @@ from pico.providers.base import ErrorClassification, LLMProvider, LLMResponse, T
 from pico.sandbox import SandboxConfig, SandboxExecutor, SandboxInitError, build_executor
 from pico.session.manager import Session, SessionManager
 from pico.spine.message import Media
+from pico.spine.runner import current_turn_id
 from pico.spine.turn import Origin
 from pico.tracing import semconv, trace
 from pico.utils.helpers import estimate_prompt_tokens
@@ -1853,7 +1854,7 @@ class AgentLoop:
                             "question": _question,
                             "domain": _recheck.get("domain", ""),
                         }
-                        self.sessions.save(session)
+                        self._persist_completed_session_turn(session)
                         logger.info(
                             "Personalization: asked clarification for new request, session {}",
                             session.key,
@@ -1901,7 +1902,7 @@ class AgentLoop:
                             "question": _question,
                             "domain": _classification.get("domain", ""),
                         }
-                        self.sessions.save(session)
+                        self._persist_completed_session_turn(session)
 
                         logger.info("Personalization: asked clarification for session {}", session.key)
                         return (_question, [])
@@ -1994,7 +1995,7 @@ class AgentLoop:
             turn_start_idx,
             origin,
         )
-        self.sessions.save(session)
+        self._persist_completed_session_turn(session)
         await self.context_engine.after_turn(
             key,
             {
@@ -2105,6 +2106,11 @@ class AgentLoop:
             persisted.append(entry)
         session.updated_at = self._now_fn()
         return persisted
+
+    def _persist_completed_session_turn(self, session: Session) -> None:
+        """Atomically save the current message tail with one independent-Turn boundary."""
+
+        self.sessions.commit_turn_boundary(session, turn_id=current_turn_id())
 
     async def run_turn(
         self,

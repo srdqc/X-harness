@@ -1,5 +1,6 @@
 """Tests for SessionManager."""
 
+import copy
 import json
 import multiprocessing
 import re
@@ -99,6 +100,129 @@ def test_roundtrip_load_from_nested_path(tmp_path: Path):
     assert [m["content"] for m in loaded.messages] == ["hello", "world"]
 
 
+def test_turn_boundaries_are_ordered_distinct_and_survive_reload(tmp_path: Path):
+    boundary_ids = iter(("boundary-1", "boundary-2"))
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(boundary_ids))
+    session = mgr.get_or_create("tui:bounded")
+
+    session.add_message("user", "q1")
+    session.add_message("assistant", "a1")
+    first = mgr.record_turn_boundary(session, turn_id="turn-1")
+    mgr.save(session)
+    session.add_message("user", "q2")
+    session.add_message("assistant", "a2")
+    second = mgr.record_turn_boundary(session, turn_id="turn-2")
+    mgr.save(session)
+
+    assert [first.message_count, second.message_count] == [2, 4]
+    loaded = SessionManager(tmp_path).get_or_create("tui:bounded")
+    assert [boundary.boundary_id for boundary in loaded.turn_boundaries] == ["boundary-1", "boundary-2"]
+    assert [boundary.turn_id for boundary in loaded.turn_boundaries] == ["turn-1", "turn-2"]
+    assert [boundary.message_count for boundary in loaded.turn_boundaries] == [2, 4]
+
+
+def test_legacy_session_without_turn_boundaries_loads_with_empty_topology(tmp_path: Path):
+    session_dir = tmp_path / "sessions" / "tui"
+    session_dir.mkdir(parents=True)
+    records = [
+        {"_type": "metadata", "key": "tui:legacy", "metadata": {}},
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "history"},
+    ]
+    (session_dir / "legacy.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    loaded = SessionManager(tmp_path).get_or_create("tui:legacy")
+
+    assert loaded.turn_boundaries == []
+    assert [message["content"] for message in loaded.messages] == ["old", "history"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("message_count", 99, "invalid message_count"),
+        ("history_digest", "0" * 64, "history digest does not match"),
+        ("turn_id", 7, "turn_id must be null or a non-empty string"),
+    ],
+)
+def test_malformed_turn_boundary_fails_closed(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    match: str,
+) -> None:
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: "boundary-1")
+    session = mgr.get_or_create("tui:bad-boundary")
+    session.add_message("user", "q")
+    mgr.record_turn_boundary(session, turn_id="turn-1")
+    mgr.save(session)
+    path = tmp_path / "sessions" / "tui" / "bad-boundary.jsonl"
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    records[0]["turn_boundaries"][0][field] = value
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    with pytest.raises(StorageCorruptionError, match=match):
+        SessionManager(tmp_path).get_or_create("tui:bad-boundary")
+
+
+def test_incomplete_trailing_boundary_metadata_is_not_fabricated(tmp_path: Path):
+    mgr = SessionManager(tmp_path)
+    session = mgr.get_or_create("tui:partial-boundary")
+    session.add_message("user", "legacy")
+    mgr.save(session)
+    path = tmp_path / "sessions" / "tui" / "partial-boundary.jsonl"
+    with path.open("a", encoding="utf-8") as file:
+        file.write('{"_type":"metadata","key":"tui:partial-boundary","turn_boundaries":[')
+
+    loaded = SessionManager(tmp_path).get_or_create("tui:partial-boundary")
+
+    assert loaded.turn_boundaries == []
+    assert loaded._requires_rewrite is True
+
+
+def test_turn_boundary_metadata_contains_only_conversation_topology(tmp_path: Path):
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: "boundary-1")
+    session = mgr.get_or_create("tui:boundary-shape")
+    session.add_message("user", "q")
+    mgr.record_turn_boundary(session, turn_id="turn-1")
+    mgr.save(session)
+    metadata = json.loads(
+        (tmp_path / "sessions" / "tui" / "boundary-shape.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+
+    assert set(metadata["turn_boundaries"][0]) == {
+        "version",
+        "boundary_id",
+        "message_count",
+        "history_digest",
+        "turn_id",
+    }
+    assert not ({"workspace", "workspace_id", "checkpoint", "checkpoint_id"} & set(metadata))
+
+
+def test_failed_boundary_commit_does_not_leave_phantom_in_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: "boundary-1")
+    session = mgr.get_or_create("tui:failed-boundary")
+    session.add_message("user", "q")
+
+    def fail_save(_session: Session) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mgr, "save", fail_save)
+
+    with pytest.raises(OSError, match="disk full"):
+        mgr.commit_turn_boundary(session, turn_id="turn-1")
+    assert session.turn_boundaries == []
+
+
 def test_record_stamps_timestamp_only(tmp_path: Path):
     """record() stamps a per-message timestamp and carries neither the
     dropped per-message received_at nor turn_id."""
@@ -148,7 +272,7 @@ def test_get_history_preserves_thinking_blocks_for_provider_replay():
 
 
 def test_save_reserves_metadata_keys(tmp_path: Path):
-    """Metadata reserves source/channel/chat_id/title/parent_session_id."""
+    """Metadata reserves identity, title, and parent-lineage slots."""
     mgr = SessionManager(tmp_path)
     session = mgr.get_or_create("tui:meta01")
     session.add_message("user", "x")
@@ -159,6 +283,7 @@ def test_save_reserves_metadata_keys(tmp_path: Path):
     assert meta["channel"] == "tui"
     assert meta["chat_id"] == "meta01"
     assert meta["parent_session_id"] is None
+    assert meta["parent_boundary_id"] is None
     assert "source" in meta
     assert "title" in meta
 
@@ -1303,6 +1428,21 @@ def test_undo_last_turn_drops_last_user_block():
     assert [m["content"] for m in s.messages] == ["q1", "a1"]
 
 
+def test_undo_last_turn_drops_boundaries_beyond_retained_prefix(tmp_path: Path):
+    ids = iter(("boundary-1", "boundary-2"))
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: next(ids))
+    session = mgr.get_or_create("tui:boundary-undo")
+    session.add_message("user", "q1")
+    session.add_message("assistant", "a1")
+    mgr.record_turn_boundary(session, turn_id="turn-1")
+    session.add_message("user", "q2")
+    session.add_message("assistant", "a2")
+    mgr.record_turn_boundary(session, turn_id="turn-2")
+
+    assert session.undo_last_turn() == 2
+    assert [boundary.boundary_id for boundary in session.turn_boundaries] == ["boundary-1"]
+
+
 def test_undo_last_turn_no_user_returns_zero():
     s = Session(key="tui:t1")
     s.messages = [_msg("assistant", "a1"), _msg("tool", "t1")]
@@ -1411,6 +1551,37 @@ def test_fork_sets_parent_session_id_to_full_source_key(tmp_path: Path):
     child = mgr.fork("cli:src02")
 
     assert child.metadata["parent_session_id"] == "cli:src02"
+
+
+def test_fork_preserves_boundaries_and_records_exact_parent_head(tmp_path: Path):
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: "boundary-1")
+    source = _seed(mgr, "cli:bounded-fork", ("user", "q1"), ("assistant", "a1"))
+    mgr.record_turn_boundary(source, turn_id="turn-1")
+    mgr.save(source)
+    source_messages = copy.deepcopy(source.messages)
+    source_boundaries = list(source.turn_boundaries)
+
+    child = mgr.fork(source.key)
+
+    assert child is not None
+    assert child.metadata["parent_session_id"] == source.key
+    assert child.metadata["parent_boundary_id"] == "boundary-1"
+    assert child.turn_boundaries == source_boundaries
+    assert source.messages == source_messages
+    assert source.turn_boundaries == source_boundaries
+
+
+def test_fork_does_not_claim_boundary_for_unbounded_parent_tail(tmp_path: Path):
+    mgr = SessionManager(tmp_path, boundary_id_factory=lambda: "boundary-1")
+    source = _seed(mgr, "cli:unbounded-fork", ("user", "q1"), ("assistant", "a1"))
+    mgr.record_turn_boundary(source, turn_id="turn-1")
+    mgr.save(source)
+    source.add_message("assistant", "unbounded tail")
+
+    child = mgr.fork(source.key)
+
+    assert child is not None
+    assert child.metadata["parent_boundary_id"] is None
 
 
 def test_fork_leaves_source_unchanged(tmp_path: Path):
