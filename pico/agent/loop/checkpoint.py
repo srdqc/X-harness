@@ -240,6 +240,12 @@ class CheckpointService:
         self._ready = False
         self._commit_count = 0
 
+    @property
+    def workspace_path(self) -> Path:
+        """Resolved live Workspace identity owned by this checkpoint service."""
+
+        return self._workspace
+
     @staticmethod
     def _optional_identity(value: Any, field: str) -> str | None:
         if value is None:
@@ -719,6 +725,18 @@ class CheckpointService:
             workspace_drifted=bool(drifted_paths),
             drifted_paths=drifted_paths,
         )
+
+    async def export_archive(self, checkpoint_id: str, destination: Path) -> tuple[bool, str]:
+        """Write one validated Git tree as a tar archive without touching either work-tree."""
+
+        rc, _, err = await self._git(
+            "archive",
+            "--format=tar",
+            "-o",
+            str(Path(destination).resolve()),
+            checkpoint_id,
+        )
+        return rc == 0, err.strip()
 
     async def _maybe_gc(self) -> None:
         """周期运行 ``git gc --auto``，避免 Long-lived Session 无限累积 Loose Objects。
