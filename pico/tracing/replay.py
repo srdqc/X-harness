@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -125,6 +125,36 @@ class TraceReplayResult:
     inconsistencies: tuple[str, ...]
     source_evidence_references: tuple[SourceEvidenceReference, ...]
     replay_digest: str
+
+
+def replay_structural_payload(result: TraceReplayResult) -> dict[str, Any]:
+    """Return the canonical, non-sensitive structure bound by ``replay_digest``."""
+
+    return {
+        "schema": result.schema,
+        "schema_version": result.schema_version,
+        "turn_id": result.turn_id,
+        "trace_id": result.trace_id,
+        "conversation_id": result.conversation_id,
+        "session_id": result.session_id,
+        "evidence_status": result.evidence_status.value,
+        "ordered_timeline": _canonical(result.ordered_timeline),
+        "provider_calls": _canonical(result.provider_calls),
+        "tool_executions": _canonical(result.tool_executions),
+        "runtime_outcome": _canonical(result.runtime_outcome),
+        "delivery_outcomes": _canonical(result.delivery_outcomes),
+        "session_boundary_ref": _canonical(result.session_boundary_ref),
+        "checkpoint_refs": _canonical(result.checkpoint_refs),
+        "warnings": list(result.warnings),
+        "inconsistencies": list(result.inconsistencies),
+        "source_evidence_references": _canonical(result.source_evidence_references),
+    }
+
+
+def compute_replay_digest(result: TraceReplayResult) -> str:
+    """Recompute the deterministic digest without loading or executing anything."""
+
+    return evidence.canonical_digest(replay_structural_payload(result))
 
 
 def _value(obj: object, name: str) -> Any:
@@ -534,26 +564,7 @@ def replay_turn(
     )
     deliveries = _delivery_outcomes(events)
 
-    structural = {
-        "schema": SCHEMA,
-        "schema_version": SCHEMA_VERSION,
-        "turn_id": turn_id,
-        "trace_id": trace_id,
-        "conversation_id": conversation_id,
-        "session_id": session_id,
-        "evidence_status": status.value,
-        "ordered_timeline": _canonical(timeline),
-        "provider_calls": _canonical(provider_calls),
-        "tool_executions": _canonical(tool_executions),
-        "runtime_outcome": _canonical(runtime_outcome),
-        "delivery_outcomes": _canonical(deliveries),
-        "session_boundary_ref": _canonical(session_ref),
-        "checkpoint_refs": _canonical(checkpoint_refs),
-        "warnings": warnings,
-        "inconsistencies": inconsistencies,
-        "source_evidence_references": _canonical(references),
-    }
-    return TraceReplayResult(
+    result = TraceReplayResult(
         schema=SCHEMA,
         schema_version=SCHEMA_VERSION,
         turn_id=turn_id,
@@ -571,8 +582,9 @@ def replay_turn(
         warnings=tuple(warnings),
         inconsistencies=tuple(inconsistencies),
         source_evidence_references=references,
-        replay_digest=evidence.canonical_digest(structural),
+        replay_digest="",
     )
+    return replace(result, replay_digest=compute_replay_digest(result))
 
 
 __all__ = [
@@ -589,5 +601,7 @@ __all__ = [
     "SessionBoundaryReference",
     "SourceEvidenceReference",
     "TraceReplayResult",
+    "compute_replay_digest",
+    "replay_structural_payload",
     "replay_turn",
 ]
