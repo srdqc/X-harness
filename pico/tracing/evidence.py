@@ -167,6 +167,12 @@ class ProviderAttemptEvidence:
     def complete(self) -> bool:
         return self.started_sequence is not None and self.completed_sequence is not None
 
+    @property
+    def completion_status(self) -> str:
+        """Explicit readback state; absence of completion is never failure or success."""
+
+        return "complete" if self.complete else "unknown"
+
 
 @dataclass(frozen=True)
 class ToolExecutionEvidence:
@@ -192,6 +198,12 @@ class ToolExecutionEvidence:
     @property
     def complete(self) -> bool:
         return self.started_sequence is not None and self.completed_sequence is not None
+
+    @property
+    def completion_status(self) -> str:
+        """Explicit readback state, including uncertain effectful execution."""
+
+        return "complete" if self.complete else "unknown"
 
 
 EvidenceWriter = Callable[[dict[str, Any]], bool]
