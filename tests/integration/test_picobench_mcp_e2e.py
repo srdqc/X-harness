@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from benchmarks.picobench.campaign import (
     DEFAULT_SUITE_PATH,
     load_campaign_suite,
@@ -90,11 +92,11 @@ class _InjectedProvider(LLMProvider):
         return "delegate-default"
 
 
-def _experiment(tmp_path: Path) -> ExperimentSpec:
+def _experiment(tmp_path: Path, pack_id: str = "tool-mcp") -> ExperimentSpec:
     return ExperimentSpec(
         suite="tool-mcp-e2e",
         repetitions=1,
-        pack_ids=("tool-mcp",),
+        pack_ids=(pack_id,),
         output_root=tmp_path,
         identity={
             "pico_commit": "0" * 40,
@@ -232,6 +234,92 @@ async def test_formal_task_runs_both_variants_through_runtime_host(
     assert retrieval["hits"][0]["metadata"]["source_kind"] == "mcp"
     assert retrieval["hits"][0]["metadata"]["source_id"] == "picobench"
     assert control.metrics["mcp_catalog_digest"] == treatment.metrics["mcp_catalog_digest"]
+
+
+@pytest.mark.parametrize("task_role", ["coder", "debugger", "researcher"])
+async def test_role_experiment_runs_four_reproducible_variants(
+    tmp_path: Path,
+    task_role: str,
+) -> None:
+    runner = DeterministicMCPTrialRunner()
+    pack = ToolMCPPack(ToolMCPTrack.ROLE_EXPERIMENT, runner=runner)
+    definition = pack.definition()
+    task = next(
+        candidate
+        for candidate in load_tool_mcp_tasks(ToolMCPTrack.ROLE_EXPERIMENT)
+        if candidate.role == task_role
+    )
+    task_spec = next(candidate for candidate in definition.tasks if candidate.task_id == task.task_id)
+    executions = {}
+
+    for variant in definition.variants:
+        context = TrialContext(
+            experiment_id="tool-mcp-role-e2e",
+            plan_digest="b" * 64,
+            key=TrialKey(
+                experiment_id="tool-mcp-role-e2e",
+                pack_id=definition.pack_id,
+                task_id=task.task_id,
+                variant_id=variant.variant_id,
+                repetition=0,
+            ),
+            block_attempt=1,
+            experiment=_experiment(tmp_path, definition.pack_id),
+            task=task_spec,
+            variant=variant,
+        )
+        executions[variant.variant_id] = await pack.run_trial(context)
+
+    for key, execution in executions.items():
+        assert execution.status is TrialStatus.PASSED, f"{key}: {execution.findings[-1]}"
+    full = executions["role-full"]
+    progressive = executions["role-prog"]
+    prompt = executions["role-prompt"]
+    aware = executions["role-aware"]
+    assert full.metrics["selected_role"] == progressive.metrics["selected_role"] == "general"
+    assert prompt.metrics["selected_role"] == aware.metrics["selected_role"] == task_role
+    assert full.metrics["cumulative_role_prompt_tokens"] == 0
+    assert progressive.metrics["cumulative_role_prompt_tokens"] == 0
+    assert prompt.metrics["cumulative_role_prompt_tokens"] > 0
+    assert aware.metrics["cumulative_role_prompt_tokens"] == prompt.metrics[
+        "cumulative_role_prompt_tokens"
+    ]
+    assert prompt.metrics["tool_retrieval_evidence"][0]["selected_role"] == task_role
+    assert aware.metrics["tool_retrieval_evidence"][0]["selected_role"] == task_role
+    aware_hits = aware.metrics["tool_retrieval_evidence"][0]["hits"]
+    target_hit = next(
+        hit for hit in aware_hits if hit["metadata"]["name"] == task.targets[0].runtime_name
+    )
+    assert target_hit["metadata"]["category"] == task_role, target_hit
+    assert all(
+        hit["role_prior"] == 0
+        for hit in prompt.metrics["tool_retrieval_evidence"][0]["hits"]
+    )
+    assert any(
+        hit["role_prior"] != 0
+        for hit in aware_hits
+    ), aware.metrics["tool_retrieval_evidence"][0]
+    assert progressive.metrics["irrelevant_ranked_before_target_count"] >= 1
+    assert prompt.metrics["irrelevant_ranked_before_target_count"] >= 1
+    assert aware.metrics["irrelevant_ranked_before_target_count"] == 0
+    assert progressive.metrics["first_target_retrieval_rank"] > 1
+    assert prompt.metrics["first_target_retrieval_rank"] > 1
+    assert aware.metrics["first_target_retrieval_rank"] == 1
+    assert aware.metrics["target_recall_at_1"] == 1.0
+    assert len(full.metrics["model_call_records"]) == 2
+    assert len(progressive.metrics["model_call_records"]) == 3
+    assert len(prompt.metrics["model_call_records"]) == 3
+    assert len(aware.metrics["model_call_records"]) == 3
+    assert aware.metrics["off_role_tool_selection_count"] == 0
+    assert aware.metrics["fallback_count"] == 0
+    if task_role == "coder":
+        assert aware.metrics["repository_inspection_before_edit"] is True
+        assert aware.metrics["verification_after_edit"] is True
+    elif task_role == "debugger":
+        assert aware.metrics["evidence_before_first_mutation"] is True
+        assert aware.metrics["verification_after_mutation"] is True
+    else:
+        assert aware.metrics["unnecessary_mutation_count"] == 0
 
 
 async def test_injected_provider_runner_records_real_decisions_and_full_usage(

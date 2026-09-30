@@ -52,6 +52,9 @@ class ToolRetrievalHit:
     rank: int
     score: float
     metadata: ToolDiscoveryMetadata
+    base_score: float
+    role_prior: float = 0.0
+    final_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,7 @@ class ToolRetrievalResult:
     requested_k: int
     effective_k: int
     hits: tuple[ToolRetrievalHit, ...]
+    selected_role: str = "general"
 
     @property
     def ranked_names(self) -> tuple[str, ...]:
@@ -262,6 +266,8 @@ class ToolIndex:
                     rank=rank,
                     score=score,
                     metadata=metadata[name],
+                    base_score=score,
+                    final_score=score,
                 )
                 for rank, (name, score) in enumerate(positive, start=1)
             ),

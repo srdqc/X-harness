@@ -32,6 +32,7 @@ from .runner import (
 from .tasks import (
     CALIBRATION_TOOL_MCP_TASK_COUNT,
     FORMAL_TOOL_MCP_TASK_COUNT,
+    ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT,
     load_tool_mcp_tasks,
     tool_mcp_task_set_digest,
 )
@@ -40,6 +41,7 @@ from .verifier import SealedMCPReceiptVerifier, mcp_verifier_code_digest
 __all__ = [
     "CALIBRATION_TOOL_MCP_TASK_COUNT",
     "FORMAL_TOOL_MCP_TASK_COUNT",
+    "ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT",
     "MCPTransportSmokeResult",
     "MCPRuntimeTrialRunner",
     "SealedMCPReceiptVerifier",

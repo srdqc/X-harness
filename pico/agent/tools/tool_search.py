@@ -17,12 +17,13 @@ prefix 的 System+Messages 之前，动态列表会使后续全部失效。代�
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Mapping
 
 from pico.agent.tools.base import Tool
 from pico.agent.tools.discovery import ToolSourceKind
 from pico.agent.tools.execution import ToolExecutionContext, ToolInvocation
+from pico.agent.tools.role_profile import RoleProfile, get_role_profile
 from pico.agent.tools.tool_index import ToolIndex, ToolRetrievalResult
 from pico.token_wise.base import TokenStrategy
 
@@ -189,11 +190,17 @@ class ToolSearchController:
         *,
         always_visible: set[str],
         search_result_limit: int = 10,
+        role_profile: RoleProfile | None = None,
+        role_prior_enabled: bool = False,
+        category_overrides: Mapping[str, str] | None = None,
     ) -> None:
         self._registry = registry
         self.always_visible = set(always_visible) | META_TOOL_NAMES
         self.search_result_limit = search_result_limit
         self._index = ToolIndex()
+        self._role_profile = role_profile or get_role_profile(None)
+        self._role_prior_enabled = role_prior_enabled
+        self._category_overrides = dict(category_overrides or {})
 
     def _catalog_tools(self) -> list[Tool]:
         """返回所有已注册但非 Meta 的 Tool，防止搜索与调用工具自我编目。
@@ -218,7 +225,12 @@ class ToolSearchController:
         """
         tools = self._catalog_tools()
         metadata = [self._registry.discovery_metadata(tool.name) for tool in tools]
-        self._index.ensure(tools, metadata=[item for item in metadata if item is not None])
+        projected = [item for item in metadata if item is not None]
+        projected = [
+            replace(item, category=self._category_overrides.get(item.name, item.category))
+            for item in projected
+        ]
+        self._index.ensure(tools, metadata=projected)
 
     def visible_names(self) -> set[str]:
         return self.always_visible
@@ -247,7 +259,42 @@ class ToolSearchController:
 
     def retrieve(self, query: str, limit: int | None = None) -> ToolRetrievalResult:
         """Return immutable ranking evidence without changing Tool visibility or authority."""
-        return self._index.retrieve(query, limit or self.search_result_limit)
+        requested_k = limit or self.search_result_limit
+        index_limit = 2**31 - 1 if self._role_prior_enabled else requested_k
+        result = self._index.retrieve(query, index_limit)
+        if not self._role_prior_enabled or self._role_profile.name.value == "general":
+            return replace(result, selected_role=self._role_profile.name.value)
+        ranked = sorted(
+            result.hits,
+            key=lambda hit: (
+                -(hit.base_score + self._role_profile.prior_for(hit.metadata)),
+                hit.rank,
+            ),
+        )
+        from pico.agent.tools.tool_index import ToolRetrievalHit
+
+        return ToolRetrievalResult(
+            query=result.query,
+            catalog_signature=result.catalog_signature,
+            total_searchable_tools=result.total_searchable_tools,
+            requested_k=requested_k,
+            effective_k=min(max(requested_k, 0), result.total_searchable_tools),
+            selected_role=self._role_profile.name.value,
+            hits=tuple(
+                ToolRetrievalHit(
+                    rank=rank,
+                    score=hit.base_score + self._role_profile.prior_for(hit.metadata),
+                    metadata=hit.metadata,
+                    base_score=hit.base_score,
+                    role_prior=self._role_profile.prior_for(hit.metadata),
+                    final_score=hit.base_score + self._role_profile.prior_for(hit.metadata),
+                )
+                for rank, hit in enumerate(
+                    ranked[: min(max(requested_k, 0), result.total_searchable_tools)],
+                    start=1,
+                )
+            ),
+        )
 
     def resolve_invocation(
         self,

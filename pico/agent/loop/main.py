@@ -348,6 +348,14 @@ class AgentLoop:
         self._disabled_tools = set(disabled_tools or [])
         self._tool_search_config = tool_search_config
         self._tool_search_strategy = None
+        from pico.agent.tools.role_profile import get_role_profile
+
+        self._role_profile = get_role_profile(
+            getattr(tool_search_config, "experimental_role", None)
+        )
+        self._role_prompt_enabled = bool(
+            getattr(tool_search_config, "experimental_role_prompt", False)
+        )
         self.tools = ToolRegistry()
 
         # Context Engine 是唯一的 ContextAssembler。在 self.tools 之后于此构建，使工厂能将
@@ -594,6 +602,9 @@ class AgentLoop:
                 self.tools,
                 always_visible=always,
                 search_result_limit=cfg.search_result_limit,
+                role_profile=self._role_profile,
+                role_prior_enabled=cfg.experimental_role_prior,
+                category_overrides=cfg.experimental_role_categories,
             )
             self.tools.register(ToolSearchTool(self.tool_search_controller))
             self.tools.register(ToolCallTool(self.tool_search_controller))
@@ -649,6 +660,9 @@ class AgentLoop:
             selected_skills,
             include_memory=self.memory_enabled,
         )
+        role_prompt = self._role_prompt_fragment()
+        if role_prompt:
+            system_prompt = f"{system_prompt}\n\n{role_prompt}"
         system_tokens = estimate_prompt_tokens([{"role": "system", "content": system_prompt}])
         available_history = max(
             0,
@@ -661,6 +675,28 @@ class AgentLoop:
             reserved_system=system_tokens,
             available_history=available_history,
         )
+
+    def _role_prompt_fragment(self) -> str:
+        if not self._role_prompt_enabled or not self._role_profile.prompt_fragment:
+            return ""
+        return (
+            f"[Experimental Role: {self._role_profile.name.value}]\n"
+            f"{self._role_profile.prompt_fragment}"
+        )
+
+    def _apply_role_prompt(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        fragment = self._role_prompt_fragment()
+        if not fragment:
+            return messages
+        updated = list(messages)
+        for index, message in enumerate(updated):
+            if message.get("role") != "system" or not isinstance(message.get("content"), str):
+                continue
+            amended = dict(message)
+            amended["content"] = f"{message['content']}\n\n{fragment}"
+            updated[index] = amended
+            return updated
+        return [{"role": "system", "content": fragment}, *updated]
 
     async def _select_skills_for_turn(
         self,
@@ -2091,6 +2127,14 @@ class AgentLoop:
             selected_skills=selected_skills or None,
             tool_definitions=disclosure_view.provider_tools(),
             metadata_sink=context_metadata,
+        )
+        initial_messages = self._apply_role_prompt(initial_messages)
+        role_prompt = self._role_prompt_fragment()
+        context_metadata["experimental_role"] = self._role_profile.name.value
+        context_metadata["role_prompt_tokens"] = (
+            estimate_prompt_tokens([{"role": "system", "content": role_prompt}])
+            if role_prompt
+            else 0
         )
         injected_skill_ids = list(
             context_metadata.get("injected_skill_ids") or self._collect_injected_skill_ids(selected_skills)

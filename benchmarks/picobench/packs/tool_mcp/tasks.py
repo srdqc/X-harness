@@ -12,10 +12,11 @@ from .models import ToolMCPTask, ToolMCPTrack, ToolTarget
 
 FORMAL_TOOL_MCP_TASK_COUNT = 8
 CALIBRATION_TOOL_MCP_TASK_COUNT = 4
+ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT = 3
 _TASK_ROOT = Path(__file__).resolve().parents[2] / "tasks" / "tool_mcp"
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=3)
 def load_tool_mcp_tasks(
     track: ToolMCPTrack,
 ) -> tuple[ToolMCPTask, ...]:
@@ -28,7 +29,11 @@ def load_tool_mcp_tasks(
     if not isinstance(entries, list):
         raise ValueError(f"Tool/MCP task list missing in {source_path}")
     tasks = tuple(_parse_task(track, entry) for entry in entries)
-    expected_count = FORMAL_TOOL_MCP_TASK_COUNT if track is ToolMCPTrack.FORMAL else CALIBRATION_TOOL_MCP_TASK_COUNT
+    expected_count = {
+        ToolMCPTrack.FORMAL: FORMAL_TOOL_MCP_TASK_COUNT,
+        ToolMCPTrack.CALIBRATION: CALIBRATION_TOOL_MCP_TASK_COUNT,
+        ToolMCPTrack.ROLE_EXPERIMENT: ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT,
+    }[track]
     if len(tasks) != expected_count:
         raise ValueError(f"{track.value} requires exactly {expected_count} Tool/MCP tasks")
     if len({task.task_id for task in tasks}) != len(tasks):
@@ -60,12 +65,31 @@ def _parse_task(track: ToolMCPTrack, raw: Any) -> ToolMCPTask:
         target = ToolTarget(tool_name=tool_name, arguments=arguments)
         target.expected_receipt
         targets.append(target)
+    role = "general"
+    search_query = None
+    relevant_tools: tuple[str, ...] = ()
+    irrelevant_tools: tuple[str, ...] = ()
+    if track is ToolMCPTrack.ROLE_EXPERIMENT:
+        role = _required_str(raw, "role")
+        if role not in {"coder", "debugger", "researcher"}:
+            raise ValueError(f"unsupported experimental Tool/MCP role: {role}")
+        search_query = _required_str(raw, "search_query")
+        relevant_tools = _tool_name_list(raw, "relevant_tools", catalog_names)
+        irrelevant_tools = _tool_name_list(raw, "irrelevant_tools", catalog_names)
+        if not {target.tool_name for target in targets} <= set(relevant_tools):
+            raise ValueError("all role-experiment targets must be relevant tools")
+        if set(relevant_tools) & set(irrelevant_tools):
+            raise ValueError("relevant and irrelevant tools must be disjoint")
     return ToolMCPTask(
         task_id=_required_str(raw, "task_id"),
         track=track,
         title=_required_str(raw, "title"),
         prompt=_required_str(raw, "prompt"),
         targets=tuple(targets),
+        role=role,
+        search_query=search_query,
+        relevant_tools=relevant_tools,
+        irrelevant_tools=irrelevant_tools,
     )
 
 
@@ -76,9 +100,24 @@ def _required_str(raw: dict[str, Any], key: str) -> str:
     return value
 
 
+def _tool_name_list(
+    raw: dict[str, Any],
+    key: str,
+    catalog_names: set[str],
+) -> tuple[str, ...]:
+    values = raw.get(key)
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"Tool/MCP task field {key!r} must be a non-empty list")
+    names = tuple(str(value) for value in values)
+    if len(set(names)) != len(names) or not set(names) <= catalog_names:
+        raise ValueError(f"Tool/MCP task field {key!r} contains invalid tools")
+    return names
+
+
 __all__ = [
     "CALIBRATION_TOOL_MCP_TASK_COUNT",
     "FORMAL_TOOL_MCP_TASK_COUNT",
+    "ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT",
     "load_tool_mcp_tasks",
     "tool_mcp_task_set_digest",
 ]

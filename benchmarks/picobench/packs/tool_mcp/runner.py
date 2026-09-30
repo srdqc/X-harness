@@ -54,6 +54,7 @@ from pico.spine import (
     ToolPhase,
     TurnRequest,
 )
+from pico.utils.helpers import estimate_prompt_tokens
 
 from .metrics import (
     TOOL_SCHEMA_ESTIMATOR_DIGEST,
@@ -62,7 +63,8 @@ from .metrics import (
     estimate_visible_tool_schema_tokens,
     normalize_target_calls,
 )
-from .models import MCPTransportSmokeResult, ToolMCPTask
+from .models import MCPTransportSmokeResult, TargetCallRecord, ToolMCPTask, ToolMCPTrack
+from .tasks import load_tool_mcp_tasks
 from .verifier import SealedMCPReceiptVerifier
 
 _DISABLED_DEFAULT_TOOLS = [
@@ -116,7 +118,7 @@ class _ScriptedToolMCPProvider(LLMProvider):
                         id=f"{self.task.task_id}-search",
                         name="tool_search",
                         arguments={
-                            "query": _search_query(first.tool_name),
+                            "query": self.task.search_query or _search_query(first.tool_name),
                             "limit": 5,
                         },
                     )
@@ -177,6 +179,7 @@ class _RecordingToolMCPProvider(LLMProvider):
         self._cumulative_tool_array_tokens = 0
         self._cumulative_in_band_tokens = 0
         self._cumulative_provider_visible_in_band_tokens = 0
+        self._cumulative_role_prompt_tokens = 0
 
     @staticmethod
     def _unwrap_tool_result(content: str, name: str) -> str:
@@ -269,9 +272,11 @@ class _RecordingToolMCPProvider(LLMProvider):
         disclosures = self._recognized_in_band_disclosures(messages)
         in_band_tokens = self._new_in_band_disclosure_tokens(disclosures)
         provider_visible_in_band_tokens = sum(tokens for _call_id, _payload, tokens in disclosures)
+        role_prompt_tokens = _role_prompt_tokens(messages)
         self._cumulative_tool_array_tokens += tool_array_tokens
         self._cumulative_in_band_tokens += in_band_tokens
         self._cumulative_provider_visible_in_band_tokens += provider_visible_in_band_tokens
+        self._cumulative_role_prompt_tokens += role_prompt_tokens
         visible_names = {definition["function"]["name"] for definition in tool_payload}
         has_meta = {"tool_search", "tool_call"}.issubset(visible_names)
         disclosure_mode = (
@@ -323,6 +328,8 @@ class _RecordingToolMCPProvider(LLMProvider):
                 self._cumulative_tool_array_tokens
                 + self._cumulative_provider_visible_in_band_tokens
             ),
+            "role_prompt_tokens": role_prompt_tokens,
+            "cumulative_role_prompt_tokens": self._cumulative_role_prompt_tokens,
             "disclosure_mode": disclosure_mode,
             "fallback_reason": (
                 self._fallback_reason_from_messages(messages)
@@ -471,6 +478,9 @@ async def _run_runtime_trial(
         receipt_path=receipt_path,
         provider=provider,
         progressive=disclosure == "progressive_disclosure",
+        role=task.role,
+        role_prompt=bool(context.variant.settings.get("role_prompt", False)),
+        role_prior=bool(context.variant.settings.get("role_prior", False)),
     )
     outlet = RecordingOutlet("picobench-tool-mcp")
     started = time.perf_counter()
@@ -538,6 +548,7 @@ async def _run_runtime_trial(
         int(record["provider_visible_in_band_disclosure_tokens"])
         for record in provider.call_records
     ]
+    role_prompt_tokens = [int(record["role_prompt_tokens"]) for record in provider.call_records]
     visible_counts = [int(record["visible_tool_count"]) for record in provider.call_records]
     usage = _aggregate_usage(provider.call_records)
     mcp_connected = catalog_names == _EXPECTED_CATALOG_NAMES
@@ -572,6 +583,7 @@ async def _run_runtime_trial(
         if observation.outcome is not None
         else None
     )
+    role_metrics = _role_metrics(task, normalized.records, retrieval_results)
     return TrialExecution(
         status=status,
         runtime_state=observation.runtime_state,
@@ -614,6 +626,14 @@ async def _run_runtime_trial(
             ),
             "provider_attempts_after_fallback": len(fallback_records),
             "success_after_fallback": bool(fallback_records and status is TrialStatus.PASSED),
+            "selected_role": (
+                task.role
+                if context.variant.settings.get("role_prompt")
+                or context.variant.settings.get("role_prior")
+                else "general"
+            ),
+            "role_prompt_tokens_per_call": role_prompt_tokens,
+            "cumulative_role_prompt_tokens": sum(role_prompt_tokens),
             "average_visible_tool_count": (
                 sum(visible_counts) / len(visible_counts) if visible_counts else 0.0
             ),
@@ -627,6 +647,7 @@ async def _run_runtime_trial(
             "exact_target_repeat_rate": normalized.exact_target_repeat_rate,
             "normalized_target_call_count": len(normalized.records),
             "target_call_records": [to_primitive(record) for record in normalized.records],
+            **role_metrics,
             **retrieval_metrics,
             "provider_model": provider.model,
             "actual_model_names": sorted(
@@ -738,6 +759,9 @@ def _runtime_config(
     receipt_path: Path,
     provider: LLMProvider,
     progressive: bool,
+    role: str = "general",
+    role_prompt: bool = False,
+    role_prior: bool = False,
 ) -> tuple[Config, PicoConfig]:
     config = Config()
     config.agents.defaults.workspace = str(workspace)
@@ -753,6 +777,11 @@ def _runtime_config(
     config.tools.tool_search.enabled = progressive
     config.tools.tool_search.compaction_threshold = 50
     config.tools.tool_search.search_result_limit = 5
+    config.tools.tool_search.experimental_role = role
+    config.tools.tool_search.experimental_role_prompt = role_prompt
+    config.tools.tool_search.experimental_role_prior = role_prior
+    if task_categories := _role_fixture_categories(role):
+        config.tools.tool_search.experimental_role_categories = task_categories
     pico_config = PicoConfig(base=config)
     pico_config.memory.backend = None
     pico_config.skill_forge.enabled = False
@@ -762,6 +791,102 @@ def _runtime_config(
     pico_config.token_wise.smart_routing.enabled = False
     pico_config.runtime.checkpoint.policy = "never"
     return config, pico_config
+
+
+def _role_prompt_tokens(messages: list[dict[str, Any]]) -> int:
+    marker = "[Experimental Role: "
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") != "system" or not isinstance(content, str):
+            continue
+        start = content.find(marker)
+        if start >= 0:
+            total += estimate_prompt_tokens(
+                [{"role": "system", "content": content[start:]}]
+            )
+    return total
+
+
+def _role_fixture_categories(role: str) -> dict[str, str]:
+    if role == "general":
+        return {}
+    task = next(
+        (
+            candidate
+            for candidate in load_tool_mcp_tasks(ToolMCPTrack.ROLE_EXPERIMENT)
+            if candidate.role == role
+        ),
+        None,
+    )
+    if task is None:
+        return {}
+    off_role = {
+        "coder": "researcher",
+        "debugger": "coder",
+        "researcher": "debugger",
+    }[role]
+    return {
+        **{f"mcp_picobench_{name}": role for name in task.relevant_tools},
+        **{f"mcp_picobench_{name}": off_role for name in task.irrelevant_tools},
+    }
+
+
+def _role_metrics(
+    task: ToolMCPTask,
+    records: tuple[TargetCallRecord, ...],
+    retrieval_results: list[ToolRetrievalResult],
+) -> dict[str, Any]:
+    irrelevant = {f"mcp_picobench_{name}" for name in task.irrelevant_tools}
+    relevant = {f"mcp_picobench_{name}" for name in task.relevant_tools}
+    off_role_count = sum(record.target_name in irrelevant for record in records)
+    operations = [str(record.arguments.get("operation") or "") for record in records]
+    mutation_indices = [index for index, operation in enumerate(operations) if operation == "transform"]
+    first_mutation = mutation_indices[0] if mutation_indices else None
+    evidence_before = (
+        any(operation == "inspect" for operation in operations[:first_mutation])
+        if first_mutation is not None
+        else None
+    )
+    verification_after = (
+        any(operation == "validate" for operation in operations[first_mutation + 1 :])
+        if first_mutation is not None
+        else None
+    )
+    irrelevant_before = 0
+    for result in retrieval_results:
+        target_ranks = [
+            hit.rank for hit in result.hits if hit.metadata.name in relevant
+        ]
+        if not target_ranks:
+            continue
+        target_rank = min(target_ranks)
+        irrelevant_before += sum(
+            hit.metadata.name in irrelevant and hit.rank < target_rank
+            for hit in result.hits
+        )
+    return {
+        "off_role_tool_selection_count": off_role_count,
+        "off_role_tool_selection_rate": (
+            off_role_count / len(records) if records else 0.0
+        ),
+        "irrelevant_ranked_before_target_count": irrelevant_before,
+        "evidence_before_first_mutation": (
+            evidence_before if task.role == "debugger" else None
+        ),
+        "verification_after_mutation": (
+            verification_after if task.role == "debugger" else None
+        ),
+        "repository_inspection_before_edit": (
+            evidence_before if task.role == "coder" else None
+        ),
+        "verification_after_edit": (
+            verification_after if task.role == "coder" else None
+        ),
+        "unnecessary_mutation_count": (
+            len(mutation_indices) if task.role == "researcher" else 0
+        ),
+    }
 
 
 def _mcp_server_config(receipt_path: Path) -> MCPServerConfig:

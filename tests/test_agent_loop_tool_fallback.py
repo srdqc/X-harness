@@ -69,14 +69,23 @@ def _response(name: str, arguments: dict, call_id: str) -> LLMResponse:
     )
 
 
-def _loop(tmp_path: Path, provider: LLMProvider, *, max_iterations: int = 6) -> AgentLoop:
+def _loop(
+    tmp_path: Path,
+    provider: LLMProvider,
+    *,
+    max_iterations: int = 6,
+    tool_search_config: ToolSearchConfig | None = None,
+) -> AgentLoop:
     return AgentLoop(
         provider=provider,
         workspace=tmp_path,
         model="stub",
         max_iterations=max_iterations,
         restrict_to_workspace=True,
-        tool_search_config=ToolSearchConfig(enabled=True, compaction_threshold=5),
+        tool_search_config=(
+            tool_search_config
+            or ToolSearchConfig(enabled=True, compaction_threshold=5)
+        ),
     )
 
 
@@ -162,6 +171,38 @@ async def test_zero_hit_fallback_is_once_sticky_full_and_resets_next_turn(tmp_pa
     _, second_evidence, second_fallback = await _run(loop)
     assert second_fallback.fallback_used is False
     assert second_evidence[0]["mode"] == "progressive"
+
+
+@pytest.mark.asyncio
+async def test_role_aware_search_preserves_bounded_fallback_semantics(tmp_path: Path) -> None:
+    provider = _ScriptProvider(
+        [
+            _response("tool_search", {"query": "zzzznomatch"}, "search-1"),
+            _response("tool_search", {"query": "zzzznomatch"}, "search-2"),
+            LLMResponse(content="done"),
+        ]
+    )
+    loop = _loop(
+        tmp_path,
+        provider,
+        tool_search_config=ToolSearchConfig(
+            enabled=True,
+            compaction_threshold=5,
+            experimental_role="debugger",
+            experimental_role_prompt=True,
+            experimental_role_prior=True,
+        ),
+    )
+
+    _, evidence, fallback = await _run(loop)
+
+    assert fallback.fallback_reason == "repeated_zero_hit_tool_search"
+    assert fallback.provider_calls_after_fallback == 1
+    assert [item["mode"] for item in evidence] == [
+        "progressive",
+        "progressive",
+        "fallback_full",
+    ]
 
 
 @pytest.mark.asyncio

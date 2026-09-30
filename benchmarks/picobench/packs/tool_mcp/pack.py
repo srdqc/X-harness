@@ -89,6 +89,17 @@ _REQUIRED_METRICS = frozenset(
         "usage_complete",
         "cost_complete",
         "end_to_end_latency_ms",
+        "selected_role",
+        "role_prompt_tokens_per_call",
+        "cumulative_role_prompt_tokens",
+        "off_role_tool_selection_count",
+        "off_role_tool_selection_rate",
+        "irrelevant_ranked_before_target_count",
+        "evidence_before_first_mutation",
+        "verification_after_mutation",
+        "repository_inspection_before_edit",
+        "verification_after_edit",
+        "unnecessary_mutation_count",
     }
 )
 
@@ -114,6 +125,8 @@ class ToolMCPPack:
         self._tasks = {task.task_id: task for task in load_tool_mcp_tasks(self.track)}
 
     def definition(self) -> PackDefinition:
+        if self.track is ToolMCPTrack.ROLE_EXPERIMENT:
+            return self._role_experiment_definition()
         pack_id = "tool-mcp" if self.track is ToolMCPTrack.FORMAL else "tool-mcp-calibration"
         return PackDefinition(
             pack_id=pack_id,
@@ -150,6 +163,76 @@ class ToolMCPPack:
                 "result_scope": (
                     "exploratory_eight_task_pack" if self.track is ToolMCPTrack.FORMAL else "calibration_only"
                 ),
+            },
+        )
+
+    def _role_experiment_definition(self) -> PackDefinition:
+        variants = (
+            VariantSpec(
+                variant_id="role-full",
+                settings={
+                    "tool_disclosure": "all_tools",
+                    "role_prompt": False,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="role-prog",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": False,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="role-prompt",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": True,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="role-aware",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": True,
+                    "role_prior": True,
+                },
+            ),
+        )
+        return PackDefinition(
+            pack_id="tool-mcp-role-experiment",
+            tasks=tuple(task.to_task_spec() for task in self._tasks.values()),
+            variants=variants,
+            pairs=(
+                PairSpec(
+                    treatment_axis="tool_disclosure",
+                    control_variant_id=variants[0].variant_id,
+                    treatment_variant_id=variants[1].variant_id,
+                ),
+                PairSpec(
+                    treatment_axis="role_prompt",
+                    control_variant_id=variants[1].variant_id,
+                    treatment_variant_id=variants[2].variant_id,
+                ),
+                PairSpec(
+                    treatment_axis="role_prior",
+                    control_variant_id=variants[2].variant_id,
+                    treatment_variant_id=variants[3].variant_id,
+                ),
+            ),
+            identity={
+                "claim_reducer": "experimental_role_v1",
+                "task_set_digest": tool_mcp_task_set_digest(self.track),
+                "mcp_catalog_digest": catalog_digest(),
+                "mcp_verifier_digest": mcp_verifier_code_digest(),
+                "mcp_catalog_size": MCP_CATALOG_SIZE,
+                "mcp_transport": "stdio",
+                "schema_estimator_id": TOOL_SCHEMA_ESTIMATOR_ID,
+                "schema_estimator_digest": TOOL_SCHEMA_ESTIMATOR_DIGEST,
+                "max_tool_iterations": TOOL_MCP_MAX_TOOL_ITERATIONS,
+                "result_scope": "experimental_role_comparison",
             },
         )
 

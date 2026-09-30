@@ -6,6 +6,7 @@ from pathlib import Path
 from benchmarks.picobench.packs.tool_mcp import (
     CALIBRATION_TOOL_MCP_TASK_COUNT,
     FORMAL_TOOL_MCP_TASK_COUNT,
+    ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT,
     SealedMCPReceiptVerifier,
     ToolMCPPack,
     ToolMCPPairMeasurement,
@@ -260,6 +261,36 @@ def test_tool_mcp_pack_freezes_catalog_tasks_and_single_axis(
     )
     assert len(plan.trials) == 8 * 2 * 3 == 48
     assert len(plan.pairs) == 8 * 3 == 24
+
+
+def test_role_experiment_pack_has_explicit_tasks_and_four_separable_variants(
+    tmp_path: Path,
+) -> None:
+    tasks = load_tool_mcp_tasks(ToolMCPTrack.ROLE_EXPERIMENT)
+    assert len(tasks) == ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT == 3
+    assert {task.role for task in tasks} == {"coder", "debugger", "researcher"}
+    assert all(task.search_query and task.relevant_tools and task.irrelevant_tools for task in tasks)
+
+    pack = ToolMCPPack(ToolMCPTrack.ROLE_EXPERIMENT)
+    definition = pack.definition()
+    assert definition.pack_id == "tool-mcp-role-experiment"
+    assert [variant.variant_id for variant in definition.variants] == [
+        "role-full",
+        "role-prog",
+        "role-prompt",
+        "role-aware",
+    ]
+    assert [pair.treatment_axis for pair in definition.pairs] == [
+        "tool_disclosure",
+        "role_prompt",
+        "role_prior",
+    ]
+    plan = compile_plan(
+        _experiment(tmp_path, pack_id=definition.pack_id),
+        (pack,),
+    )
+    assert len(plan.trials) == 3 * 4 * 3 == 36
+    assert len(plan.pairs) == 3 * 3 * 3 == 27
 
 
 def test_target_call_normalization_keeps_invalid_unknown_and_exact_repeats() -> None:

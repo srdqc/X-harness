@@ -13,6 +13,7 @@ from benchmarks.picobench.schema import TaskSpec
 class ToolMCPTrack(StrEnum):
     FORMAL = "formal"
     CALIBRATION = "calibration"
+    ROLE_EXPERIMENT = "role_experiment"
 
 
 @dataclass(frozen=True)
@@ -43,12 +44,26 @@ class ToolMCPTask:
     title: str
     prompt: str
     targets: tuple[ToolTarget, ...]
+    role: str = "general"
+    search_query: str | None = None
+    relevant_tools: tuple[str, ...] = ()
+    irrelevant_tools: tuple[str, ...] = ()
 
     @property
     def expected_receipts_digest(self) -> str:
         return canonical_digest([target.expected_receipt for target in self.targets])
 
     def to_task_spec(self) -> TaskSpec:
+        experimental = (
+            {
+                "role": self.role,
+                "search_query": self.search_query,
+                "relevant_tools": [f"mcp_picobench_{name}" for name in self.relevant_tools],
+                "irrelevant_tools": [f"mcp_picobench_{name}" for name in self.irrelevant_tools],
+            }
+            if self.track is ToolMCPTrack.ROLE_EXPERIMENT
+            else {}
+        )
         return TaskSpec(
             task_id=self.task_id,
             payload={
@@ -64,6 +79,7 @@ class ToolMCPTask:
                 ],
                 "expected_receipts_digest": self.expected_receipts_digest,
                 "verifier": "external_mcp_receipt",
+                **experimental,
             },
         )
 

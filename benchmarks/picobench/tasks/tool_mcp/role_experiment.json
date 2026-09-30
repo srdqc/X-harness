@@ -1,0 +1,46 @@
+{
+  "schema": "pico.picobench.tool-mcp-tasks.v1",
+  "tasks": [
+    {
+      "task_id": "tool-role-coder-01",
+      "title": "Inspect, edit, and verify a repository record",
+      "prompt": "Inspect repository-core, make the targeted transformation, and verify the resulting record.",
+      "role": "coder",
+      "search_query": "catalog slot 48 03",
+      "relevant_tools": ["catalog_probe_48", "catalog_probe_49", "catalog_probe_50"],
+      "irrelevant_tools": ["catalog_probe_03"],
+      "targets": [
+        {"tool": "catalog_probe_48", "arguments": {"resource": "repository-core", "operation": "inspect", "value": 148}},
+        {"tool": "catalog_probe_49", "arguments": {"resource": "repository-core", "operation": "transform", "value": 149}},
+        {"tool": "catalog_probe_50", "arguments": {"resource": "repository-core", "operation": "validate", "value": 150}}
+      ]
+    },
+    {
+      "task_id": "tool-role-debugger-01",
+      "title": "Diagnose, correct, and verify an incident record",
+      "prompt": "Inspect incident-kappa evidence, apply the narrow correction, and verify the incident record.",
+      "role": "debugger",
+      "search_query": "catalog slot 25 03",
+      "relevant_tools": ["catalog_probe_25", "catalog_probe_26", "catalog_probe_27"],
+      "irrelevant_tools": ["catalog_probe_03"],
+      "targets": [
+        {"tool": "catalog_probe_25", "arguments": {"resource": "incident-kappa", "operation": "inspect", "value": 225}},
+        {"tool": "catalog_probe_26", "arguments": {"resource": "incident-kappa", "operation": "transform", "value": 226}},
+        {"tool": "catalog_probe_27", "arguments": {"resource": "incident-kappa", "operation": "validate", "value": 227}}
+      ]
+    },
+    {
+      "task_id": "tool-role-researcher-01",
+      "title": "Gather and compare account evidence",
+      "prompt": "Inspect the account-alpha and account-beta records and report the evidence without mutation.",
+      "role": "researcher",
+      "search_query": "catalog slot 17 03",
+      "relevant_tools": ["catalog_probe_17", "catalog_probe_18"],
+      "irrelevant_tools": ["catalog_probe_03"],
+      "targets": [
+        {"tool": "catalog_probe_17", "arguments": {"resource": "account-alpha", "operation": "inspect", "value": 317}},
+        {"tool": "catalog_probe_18", "arguments": {"resource": "account-beta", "operation": "inspect", "value": 318}}
+      ]
+    }
+  ]
+}
