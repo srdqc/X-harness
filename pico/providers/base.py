@@ -9,6 +9,7 @@
 import asyncio
 import json
 import random
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from pico.tracing import semconv, trace
+from pico.tracing import evidence, semconv, trace
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,9 @@ class LLMResponse:
     model: str | None = None
     call_record: Any | None = None
     cache_policy: str | None = None
+    logical_call_id: str | None = None
+    attempt_id: str | None = None
+    attempt_ordinal: int | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -498,6 +502,7 @@ class LLMProvider(ABC):
         tool_choice: str | dict[str, Any] | None,
         response_observer: Callable[[LLMResponse, str | None], Awaitable[None]] | None = None,
         attempt_started: Callable[[str | None], None] | None = None,
+        evidence_call: evidence.ProviderCallEvidenceContext | None = None,
     ) -> LLMResponse:
         """让 Single Model 走完整 Retry Ladder，并为每次 Failure 建立 Classification。
 
@@ -512,6 +517,40 @@ class LLMProvider(ABC):
         total_attempts = len(self._CHAT_RETRY_DELAYS) + 1
         last_response: LLMResponse | None = None
         for attempt in range(1, total_attempts + 1):
+            receipt_started = time.perf_counter_ns()
+            attempt_id: str | None = None
+            attempt_ordinal: int | None = None
+            span_id = getattr(trace.current(), "parent_span_id", None)
+            if evidence_call is not None:
+                attempt_id, attempt_ordinal = evidence_call.next_attempt()
+                evidence_call.recorder.emit(
+                    evidence.PROVIDER_ATTEMPT_STARTED,
+                    span_id=span_id,
+                    correlations={
+                        "logical_call_id": evidence_call.logical_call_id,
+                        "attempt_id": attempt_id,
+                        "attempt_ordinal": attempt_ordinal,
+                    },
+                    metadata={
+                        "receipt_schema": evidence.PROVIDER_RECEIPT_SCHEMA,
+                        "provider": type(self).__name__,
+                        "requested_model": evidence_call.requested_model,
+                        "attempted_model": model,
+                        "request_digest": evidence.canonical_digest(
+                            {
+                                "messages": messages,
+                                "tools": tools,
+                                "model": model,
+                                "max_tokens": max_tokens,
+                                "temperature": temperature,
+                                "reasoning_effort": reasoning_effort,
+                                "tool_choice": tool_choice,
+                            }
+                        ),
+                        "message_count": len(messages),
+                        "tool_count": len(tools or ()),
+                    },
+                )
             exc: Exception | None = None
             try:
                 if attempt_started is not None:
@@ -526,6 +565,25 @@ class LLMProvider(ABC):
                     tool_choice=tool_choice,
                 )
             except asyncio.CancelledError:
+                if evidence_call is not None:
+                    evidence_call.recorder.emit(
+                        evidence.PROVIDER_ATTEMPT_COMPLETED,
+                        span_id=span_id,
+                        correlations={
+                            "logical_call_id": evidence_call.logical_call_id,
+                            "attempt_id": attempt_id,
+                            "attempt_ordinal": attempt_ordinal,
+                        },
+                        metadata={
+                            "receipt_schema": evidence.PROVIDER_RECEIPT_SCHEMA,
+                            "outcome": "cancelled",
+                            "finish_reason": None,
+                            "error_category": "cancelled",
+                            "usage_available": False,
+                            "usage": {},
+                            "duration_ms": int((time.perf_counter_ns() - receipt_started) / 1_000_000),
+                        },
+                    )
                 raise
             except Exception as e:
                 exc = e
@@ -533,8 +591,48 @@ class LLMProvider(ABC):
 
             if response.model is None:
                 response.model = model
+            response.logical_call_id = evidence_call.logical_call_id if evidence_call is not None else None
+            response.attempt_id = attempt_id
+            response.attempt_ordinal = attempt_ordinal
 
             if response.finish_reason != "error":
+                if evidence_call is not None:
+                    evidence_call.recorder.emit(
+                        evidence.PROVIDER_ATTEMPT_COMPLETED,
+                        span_id=span_id,
+                        correlations={
+                            "logical_call_id": evidence_call.logical_call_id,
+                            "attempt_id": attempt_id,
+                            "attempt_ordinal": attempt_ordinal,
+                        },
+                        metadata={
+                            "receipt_schema": evidence.PROVIDER_RECEIPT_SCHEMA,
+                            "outcome": "success",
+                            "finish_reason": response.finish_reason,
+                            "error_category": None,
+                            "actual_model": response.model,
+                            "response_digest": evidence.canonical_digest(
+                                {
+                                    "content": response.content,
+                                    "tool_calls": [item.to_openai_tool_call() for item in response.tool_calls],
+                                    "finish_reason": response.finish_reason,
+                                    "model": response.model,
+                                    "reasoning_content": response.reasoning_content,
+                                    "thinking_blocks": response.thinking_blocks,
+                                    "usage": response.usage,
+                                }
+                            ),
+                            "usage_available": bool(response.usage),
+                            "usage": {
+                                str(key): value
+                                for key, value in response.usage.items()
+                                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                            },
+                            "retryable": False,
+                            "will_retry_same_model": False,
+                            "duration_ms": int((time.perf_counter_ns() - receipt_started) / 1_000_000),
+                        },
+                    )
                 if response_observer is not None:
                     await response_observer(response, model)
                 return response
@@ -543,11 +641,49 @@ class LLMProvider(ABC):
             # 最后才根据字符串分类。
             classification = response.error_classification or self.classify_error(exc, response.content)
             response.error_classification = classification
+            will_retry = classification.retryable and attempt != total_attempts
+            if evidence_call is not None:
+                evidence_call.recorder.emit(
+                    evidence.PROVIDER_ATTEMPT_COMPLETED,
+                    span_id=span_id,
+                    correlations={
+                        "logical_call_id": evidence_call.logical_call_id,
+                        "attempt_id": attempt_id,
+                        "attempt_ordinal": attempt_ordinal,
+                    },
+                    metadata={
+                        "receipt_schema": evidence.PROVIDER_RECEIPT_SCHEMA,
+                        "outcome": "error",
+                        "finish_reason": response.finish_reason,
+                        "error_category": classification.category,
+                        "actual_model": response.model,
+                        "response_digest": evidence.canonical_digest(
+                            {
+                                "content": response.content,
+                                "tool_calls": [item.to_openai_tool_call() for item in response.tool_calls],
+                                "finish_reason": response.finish_reason,
+                                "model": response.model,
+                                "reasoning_content": response.reasoning_content,
+                                "thinking_blocks": response.thinking_blocks,
+                                "usage": response.usage,
+                            }
+                        ),
+                        "usage_available": bool(response.usage),
+                        "usage": {
+                            str(key): value
+                            for key, value in response.usage.items()
+                            if isinstance(value, (int, float)) and not isinstance(value, bool)
+                        },
+                        "retryable": classification.retryable,
+                        "will_retry_same_model": will_retry,
+                        "duration_ms": int((time.perf_counter_ns() - receipt_started) / 1_000_000),
+                    },
+                )
             if response_observer is not None:
                 await response_observer(response, model)
             last_response = response
 
-            if not classification.retryable or attempt == total_attempts:
+            if not will_retry:
                 return response
 
             delay = self._jittered(self._CHAT_RETRY_DELAYS[attempt - 1])
@@ -600,49 +736,51 @@ class LLMProvider(ABC):
         if reasoning_effort is self._SENTINEL:
             reasoning_effort = self.generation.reasoning_effort
 
-        model_chain = [model, *(fallback_models or [])]
-        response: LLMResponse | None = None
-        for idx, current_model in enumerate(model_chain):
-            attempt_messages = messages
-            attempt_tools = tools
-            attempt_model = current_model
-            if request_transform is not None:
-                attempt_messages, attempt_tools, attempt_model = request_transform(
-                    messages,
-                    tools,
-                    current_model,
+        with evidence.provider_call_scope(model) as evidence_call:
+            model_chain = [model, *(fallback_models or [])]
+            response: LLMResponse | None = None
+            for idx, current_model in enumerate(model_chain):
+                attempt_messages = messages
+                attempt_tools = tools
+                attempt_model = current_model
+                if request_transform is not None:
+                    attempt_messages, attempt_tools, attempt_model = request_transform(
+                        messages,
+                        tools,
+                        current_model,
+                    )
+                response = await self._chat_attempt_with_retry(
+                    messages=attempt_messages,
+                    tools=attempt_tools,
+                    model=attempt_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    tool_choice=tool_choice,
+                    response_observer=response_observer,
+                    attempt_started=attempt_started,
+                    evidence_call=evidence_call,
                 )
-            response = await self._chat_attempt_with_retry(
-                messages=attempt_messages,
-                tools=attempt_tools,
-                model=attempt_model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-                tool_choice=tool_choice,
-                response_observer=response_observer,
-                attempt_started=attempt_started,
-            )
-            if response.model is None:
-                response.model = attempt_model
-            if response.finish_reason != "error":
+                if response.model is None:
+                    response.model = attempt_model
+                if response.finish_reason != "error":
+                    return response
+
+                classification = response.error_classification or self.classify_error(content=response.content)
+                has_next = idx + 1 < len(model_chain)
+                if has_next and classification.should_fallback:
+                    next_model = model_chain[idx + 1]
+                    logger.warning(
+                        "LLM call failed on model={} [{}], falling back to {}: {}",
+                        attempt_model,
+                        classification.category,
+                        next_model,
+                        (response.content or "")[:120],
+                    )
+                    continue
                 return response
 
-            classification = response.error_classification or self.classify_error(content=response.content)
-            has_next = idx + 1 < len(model_chain)
-            if has_next and classification.should_fallback:
-                next_model = model_chain[idx + 1]
-                logger.warning(
-                    "LLM call failed on model={} [{}], falling back to {}: {}",
-                    attempt_model,
-                    classification.category,
-                    next_model,
-                    (response.content or "")[:120],
-                )
-                continue
-            return response
-
-        return response  # type: ignore[return-value]  # 调用链始终非空
+            return response  # type: ignore[return-value]  # 调用链始终非空
 
     @abstractmethod
     def get_default_model(self) -> str:

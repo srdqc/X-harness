@@ -55,6 +55,10 @@ class CallRecord:
     observed_at: str
     findings: tuple[str, ...] = field(default_factory=tuple)
     schema: str = CALL_RECORD_SCHEMA
+    turn_id: str | None = None
+    logical_call_id: str | None = None
+    attempt_id: str | None = None
+    attempt_ordinal: int | None = None
 
     @property
     def cost_complete(self) -> bool:
