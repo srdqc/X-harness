@@ -23,7 +23,9 @@ from benchmarks.picobench.fixtures.mcp import (
 )
 from benchmarks.picobench.fixtures.mcp.live_catalog import (
     live_catalog_definitions,
+    live_catalog_definitions_v2,
     live_catalog_digest,
+    live_catalog_digest_v2,
 )
 from benchmarks.picobench.host import RecordingOutlet, RuntimeTrialHost
 from benchmarks.picobench.isolation import TrialIsolation
@@ -61,6 +63,7 @@ from pico.spine import (
 from pico.utils.helpers import estimate_prompt_tokens
 
 from .live_verifier import SealedLiveStateVerifier
+from .live_verifier_v2 import SealedLiveStateVerifierV2
 from .metrics import (
     TOOL_SCHEMA_ESTIMATOR_DIGEST,
     TOOL_SCHEMA_ESTIMATOR_ID,
@@ -68,7 +71,13 @@ from .metrics import (
     estimate_visible_tool_schema_tokens,
     normalize_target_calls,
 )
-from .models import MCPTransportSmokeResult, TargetCallRecord, ToolMCPTask, ToolMCPTrack
+from .models import (
+    LIVE_SOLVABLE_TRACKS,
+    MCPTransportSmokeResult,
+    TargetCallRecord,
+    ToolMCPTask,
+    ToolMCPTrack,
+)
 from .tasks import load_tool_mcp_tasks
 from .verifier import SealedMCPReceiptVerifier
 
@@ -93,13 +102,21 @@ _MAX_OUTPUT_TOKENS = 1_500
 TOOL_MCP_MAX_TOOL_ITERATIONS = 6
 
 
+def _live_catalog_definitions(track: ToolMCPTrack) -> tuple[Any, ...]:
+    if track is ToolMCPTrack.LIVE_SOLVABLE_V2:
+        return live_catalog_definitions_v2()
+    return live_catalog_definitions()
+
+
 def _expected_catalog_names(track: ToolMCPTrack) -> frozenset[str]:
-    if track is ToolMCPTrack.LIVE_SOLVABLE_V1:
-        return frozenset(item.runtime_name for item in live_catalog_definitions())
+    if track in LIVE_SOLVABLE_TRACKS:
+        return frozenset(item.runtime_name for item in _live_catalog_definitions(track))
     return _EXPECTED_CATALOG_NAMES
 
 
 def _catalog_source_digest(track: ToolMCPTrack) -> str:
+    if track is ToolMCPTrack.LIVE_SOLVABLE_V2:
+        return live_catalog_digest_v2()
     if track is ToolMCPTrack.LIVE_SOLVABLE_V1:
         return live_catalog_digest()
     return catalog_digest()
@@ -456,7 +473,7 @@ class DeterministicMCPTrialRunner:
         context: TrialContext,
         task: ToolMCPTask,
     ) -> TrialExecution:
-        if task.track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+        if task.track in LIVE_SOLVABLE_TRACKS:
             raise RuntimeError("hidden-answer deterministic provider is forbidden for live-solvable tasks")
         disclosure = str(context.variant.settings["tool_disclosure"])
         delegate = _ScriptedToolMCPProvider(task, disclosure)
@@ -485,9 +502,13 @@ async def _run_runtime_trial(
     isolation.prepare()
     receipt_path = isolation.evidence_root / "receipts.jsonl"
     state_path = isolation.evidence_root / "fixture-state.json"
-    if task.track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+    if task.track in LIVE_SOLVABLE_TRACKS:
         state_path.write_text(json.dumps(dict(task.initial_state), sort_keys=True), encoding="utf-8")
-        verifier = SealedLiveStateVerifier.capture(task, state_path)
+        verifier = (
+            SealedLiveStateVerifierV2.capture(task, state_path)
+            if task.track is ToolMCPTrack.LIVE_SOLVABLE_V2
+            else SealedLiveStateVerifier.capture(task, state_path)
+        )
     else:
         verifier = SealedMCPReceiptVerifier.capture(task)
     expected_catalog_names = _expected_catalog_names(task.track)
@@ -803,8 +824,8 @@ def _role_prompt_tokens(messages: list[dict[str, Any]]) -> int:
 def _role_fixture_categories(role: str, track: ToolMCPTrack) -> dict[str, str]:
     if role == "general":
         return {}
-    if track is ToolMCPTrack.LIVE_SOLVABLE_V1:
-        return {item.runtime_name: item.category for item in live_catalog_definitions()}
+    if track in LIVE_SOLVABLE_TRACKS:
+        return {item.runtime_name: item.category for item in _live_catalog_definitions(track)}
     task = next(
         (candidate for candidate in load_tool_mcp_tasks(ToolMCPTrack.ROLE_EXPERIMENT) if candidate.role == role),
         None,
@@ -830,8 +851,10 @@ def _role_metrics(
     irrelevant = {f"mcp_picobench_{name}" for name in task.irrelevant_tools}
     relevant = {f"mcp_picobench_{name}" for name in task.relevant_tools}
     off_role_count = sum(record.target_name in irrelevant for record in records)
-    if task.track is ToolMCPTrack.LIVE_SOLVABLE_V1:
-        capability_by_name = {item.runtime_name: item.capability for item in live_catalog_definitions()}
+    if task.track in LIVE_SOLVABLE_TRACKS:
+        capability_by_name = {
+            item.runtime_name: item.capability for item in _live_catalog_definitions(task.track)
+        }
         operations = [capability_by_name.get(record.target_name, "") for record in records]
         mutation_indices = [index for index, operation in enumerate(operations) if operation.endswith(".mutate")]
         evidence_marker = ".read"
@@ -877,11 +900,12 @@ def _mcp_server_config(
     state_path: Path | None = None,
     track: ToolMCPTrack = ToolMCPTrack.FORMAL,
 ) -> MCPServerConfig:
-    server_name = "live_server.py" if track is ToolMCPTrack.LIVE_SOLVABLE_V1 else "server.py"
+    server_name = "live_server.py" if track in LIVE_SOLVABLE_TRACKS else "server.py"
     server_path = Path(__file__).resolve().parents[2] / "fixtures" / "mcp" / server_name
     environment = {"PICOBENCH_MCP_RECEIPTS": str(receipt_path)}
-    if state_path is not None and track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+    if state_path is not None and track in LIVE_SOLVABLE_TRACKS:
         environment["PICOBENCH_MCP_STATE"] = str(state_path)
+        environment["PICOBENCH_MCP_LIVE_CONTRACT"] = track.value
     return MCPServerConfig(
         type="stdio",
         command=sys.executable,

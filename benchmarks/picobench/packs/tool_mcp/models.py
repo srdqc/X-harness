@@ -15,6 +15,15 @@ class ToolMCPTrack(StrEnum):
     CALIBRATION = "calibration"
     ROLE_EXPERIMENT = "role_experiment"
     LIVE_SOLVABLE_V1 = "live_solvable_v1"
+    LIVE_SOLVABLE_V2 = "live_solvable_v2"
+
+
+LIVE_SOLVABLE_TRACKS = frozenset(
+    {
+        ToolMCPTrack.LIVE_SOLVABLE_V1,
+        ToolMCPTrack.LIVE_SOLVABLE_V2,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -68,7 +77,7 @@ class ToolMCPTask:
 
     @property
     def expected_receipts_digest(self) -> str:
-        if self.track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+        if self.track in LIVE_SOLVABLE_TRACKS:
             return canonical_digest(dict(self.expected_state))
         return canonical_digest([target.expected_receipt for target in self.targets])
 
@@ -89,9 +98,9 @@ class ToolMCPTask:
                 "relevant_tools": [f"mcp_picobench_{name}" for name in self.relevant_tools],
                 "irrelevant_tools": [f"mcp_picobench_{name}" for name in self.irrelevant_tools],
                 "expected_state_digest": canonical_digest(dict(self.expected_state)),
-                "verifier": "external_mcp_fixture_state_v1",
+                "verifier": f"external_mcp_fixture_state_{self.track.value.rsplit('_', 1)[-1]}",
             }
-            if self.track is ToolMCPTrack.LIVE_SOLVABLE_V1
+            if self.track in LIVE_SOLVABLE_TRACKS
             else {}
         )
         return TaskSpec(
@@ -112,7 +121,7 @@ class ToolMCPTask:
                         "expected_receipts_digest": self.expected_receipts_digest,
                         "verifier": "external_mcp_receipt",
                     }
-                    if self.track is not ToolMCPTrack.LIVE_SOLVABLE_V1
+                    if self.track not in LIVE_SOLVABLE_TRACKS
                     else {}
                 ),
                 **experimental,
@@ -155,6 +164,7 @@ class MCPTransportSmokeResult:
 
 __all__ = [
     "ArgumentSource",
+    "LIVE_SOLVABLE_TRACKS",
     "MCPTransportSmokeResult",
     "TargetCallRecord",
     "TargetCallSummary",

@@ -5,12 +5,26 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from live_catalog import LiveFixtureEngine, live_catalog_definitions
+from live_catalog import (
+    LiveFixtureEngine,
+    live_catalog_definitions,
+    live_catalog_definitions_v2,
+)
 
 from mcp.server.fastmcp import FastMCP
 
 _EVENT_ENV = "PICOBENCH_MCP_RECEIPTS"
 _STATE_ENV = "PICOBENCH_MCP_STATE"
+_CONTRACT_ENV = "PICOBENCH_MCP_LIVE_CONTRACT"
+_V2_CONTRACT = "live_solvable_v2"
+
+
+def _definitions():
+    return (
+        live_catalog_definitions_v2()
+        if os.environ.get(_CONTRACT_ENV) == _V2_CONTRACT
+        else live_catalog_definitions()
+    )
 
 
 def _engine() -> LiveFixtureEngine:
@@ -18,7 +32,11 @@ def _engine() -> LiveFixtureEngine:
     event_path = os.environ.get(_EVENT_ENV)
     if not state_path or not event_path:
         raise RuntimeError("live Tool/MCP fixture paths are not configured")
-    return LiveFixtureEngine(Path(state_path), Path(event_path))
+    return LiveFixtureEngine(
+        Path(state_path),
+        Path(event_path),
+        definitions=_definitions(),
+    )
 
 
 def _encoded(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -100,6 +118,26 @@ def _research_report(tool_name: str) -> Callable[..., Any]:
     return handler
 
 
+def _research_report_v2(tool_name: str) -> Callable[..., Any]:
+    async def handler(
+        topic: str,
+        winning_entity: str,
+        explanation: str,
+        evidence_ids: list[str],
+    ) -> str:
+        return _encoded(
+            tool_name,
+            {
+                "topic": topic,
+                "winning_entity": winning_entity,
+                "explanation": explanation,
+                "evidence_ids": evidence_ids,
+            },
+        )
+
+    return handler
+
+
 def _generic_read(tool_name: str) -> Callable[..., Any]:
     async def handler(query: str) -> str:
         return _encoded(tool_name, {"query": query})
@@ -123,6 +161,7 @@ _HANDLERS = {
     "incident_verify": _incident_verify,
     "knowledge_read": _knowledge_read,
     "research_report": _research_report,
+    "research_report_v2": _research_report_v2,
     "generic_read": _generic_read,
     "generic_mutation": _generic_mutation,
 }
@@ -130,7 +169,7 @@ _HANDLERS = {
 
 def main() -> None:
     server = FastMCP("PicoBench live-solvable semantic catalogue")
-    for tool in live_catalog_definitions():
+    for tool in _definitions():
         server.add_tool(
             _HANDLERS[tool.handler_kind](tool.name),
             name=tool.name,

@@ -5,6 +5,7 @@ from typing import Protocol
 from benchmarks.picobench.fixtures.mcp import (
     MCP_CATALOG_SIZE,
     catalog_digest,
+    live_catalog_digest_v2,
 )
 from benchmarks.picobench.fixtures.mcp.live_catalog import (
     LIVE_MCP_CATALOG_SIZE,
@@ -19,6 +20,7 @@ from benchmarks.picobench.records import (
 from benchmarks.picobench.schema import PackDefinition, PairSpec, VariantSpec
 
 from .live_verifier import live_verifier_code_digest
+from .live_verifier_v2 import live_verifier_v2_code_digest
 from .metrics import (
     TOOL_SCHEMA_ESTIMATOR_DIGEST,
     TOOL_SCHEMA_ESTIMATOR_ID,
@@ -130,7 +132,10 @@ class ToolMCPPack:
         self._tasks = {task.task_id: task for task in load_tool_mcp_tasks(self.track)}
 
     def definition(self) -> PackDefinition:
-        if self.track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+        if self.track in {
+            ToolMCPTrack.LIVE_SOLVABLE_V1,
+            ToolMCPTrack.LIVE_SOLVABLE_V2,
+        }:
             return self._live_solvable_definition()
         if self.track is ToolMCPTrack.ROLE_EXPERIMENT:
             return self._role_experiment_definition()
@@ -244,6 +249,7 @@ class ToolMCPPack:
         )
 
     def _live_solvable_definition(self) -> PackDefinition:
+        version = "v2" if self.track is ToolMCPTrack.LIVE_SOLVABLE_V2 else "v1"
         variants = (
             VariantSpec(
                 variant_id="live-full",
@@ -271,7 +277,7 @@ class ToolMCPPack:
             ),
         )
         return PackDefinition(
-            pack_id="tool-mcp-live-solvable-v1",
+            pack_id=f"tool-mcp-live-solvable-{version}",
             tasks=tuple(task.to_task_spec() for task in self._tasks.values()),
             variants=variants,
             pairs=(
@@ -287,16 +293,24 @@ class ToolMCPPack:
                 ),
             ),
             identity={
-                "claim_reducer": "live_solvable_v1",
+                "claim_reducer": f"live_solvable_{version}",
                 "task_set_digest": tool_mcp_task_set_digest(self.track),
-                "mcp_catalog_digest": live_catalog_digest(),
-                "mcp_verifier_digest": live_verifier_code_digest(),
+                "mcp_catalog_digest": (
+                    live_catalog_digest_v2()
+                    if self.track is ToolMCPTrack.LIVE_SOLVABLE_V2
+                    else live_catalog_digest()
+                ),
+                "mcp_verifier_digest": (
+                    live_verifier_v2_code_digest()
+                    if self.track is ToolMCPTrack.LIVE_SOLVABLE_V2
+                    else live_verifier_code_digest()
+                ),
                 "mcp_catalog_size": LIVE_MCP_CATALOG_SIZE,
                 "mcp_transport": "stdio",
                 "schema_estimator_id": TOOL_SCHEMA_ESTIMATOR_ID,
                 "schema_estimator_digest": TOOL_SCHEMA_ESTIMATOR_DIGEST,
                 "max_tool_iterations": TOOL_MCP_MAX_TOOL_ITERATIONS,
-                "result_scope": "live_model_acceptance_v1",
+                "result_scope": f"live_model_acceptance_{version}",
             },
         )
 

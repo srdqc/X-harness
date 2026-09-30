@@ -110,6 +110,37 @@ _TARGETS = (
     ),
 )
 
+_RESEARCH_REPORT_V2 = LiveToolDefinition(
+    "research_report_submit",
+    (
+        "Submit a structured comparison report: winning_entity is the exact selected name, "
+        "explanation is a non-empty natural-language rationale, and evidence_ids contains the "
+        "supporting record identifiers; source records are not mutated."
+    ),
+    _object_schema(
+        {
+            "topic": {**_TEXT, "description": "The requested report topic."},
+            "winning_entity": {
+                **_TEXT,
+                "description": "The exact name of the entity selected from the observed evidence.",
+            },
+            "explanation": {
+                **_TEXT,
+                "description": "A non-empty natural-language explanation of the evidence comparison.",
+            },
+            "evidence_ids": {
+                "type": "array",
+                "items": _TEXT,
+                "minItems": 1,
+                "description": "The evidence record identifiers supporting the selection.",
+            },
+        }
+    ),
+    "researcher",
+    "research.report",
+    "research_report_v2",
+)
+
 
 _DISTRACTOR_NAMES = (
     "repository_symbol_search",
@@ -227,7 +258,25 @@ def live_catalog_definitions() -> tuple[LiveToolDefinition, ...]:
     return definitions
 
 
+@lru_cache(maxsize=1)
+def live_catalog_definitions_v2() -> tuple[LiveToolDefinition, ...]:
+    definitions = (*_TARGETS[:-1], _RESEARCH_REPORT_V2) + tuple(
+        _distractor(name) for name in _DISTRACTOR_NAMES
+    )
+    if len(definitions) != LIVE_MCP_CATALOG_SIZE:
+        raise RuntimeError("live Tool/MCP V2 catalogue size drift")
+    return definitions
+
+
 def live_catalog_digest() -> str:
+    return _live_catalog_digest(live_catalog_definitions())
+
+
+def live_catalog_digest_v2() -> str:
+    return _live_catalog_digest(live_catalog_definitions_v2())
+
+
+def _live_catalog_digest(definitions: tuple[LiveToolDefinition, ...]) -> str:
     payload = [
         {
             "name": item.name,
@@ -236,7 +285,7 @@ def live_catalog_digest() -> str:
             "category": item.category,
             "capability": item.capability,
         }
-        for item in live_catalog_definitions()
+        for item in definitions
     ]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -244,10 +293,18 @@ def live_catalog_digest() -> str:
 class LiveFixtureEngine:
     """Small deterministic state machine owned only by the live benchmark fixture."""
 
-    def __init__(self, state_path: Path, event_path: Path) -> None:
+    def __init__(
+        self,
+        state_path: Path,
+        event_path: Path,
+        *,
+        definitions: tuple[LiveToolDefinition, ...] | None = None,
+    ) -> None:
         self.state_path = state_path
         self.event_path = event_path
-        self._definitions = {item.name: item for item in live_catalog_definitions()}
+        self._definitions = {
+            item.name: item for item in (definitions or live_catalog_definitions())
+        }
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         definition = self._definitions[tool_name]
@@ -257,6 +314,7 @@ class LiveFixtureEngine:
             "repository_patch",
             "incident_update",
             "research_report",
+            "research_report_v2",
             "generic_mutation",
         }:
             self._write_state(state)
@@ -326,6 +384,18 @@ class LiveFixtureEngine:
             }
             state["report"] = report
             return {"accepted": True, **report}
+        if kind == "research_report_v2":
+            evidence_ids = arguments["evidence_ids"]
+            if any(record_id not in state["records"] for record_id in evidence_ids):
+                raise ValueError("report cites unknown evidence")
+            report = {
+                "topic": arguments["topic"],
+                "winning_entity": arguments["winning_entity"],
+                "explanation": arguments["explanation"],
+                "evidence_ids": evidence_ids,
+            }
+            state["report"] = report
+            return {"accepted": True, **report}
         if kind == "generic_mutation":
             state.setdefault("distractor_mutations", []).append(dict(arguments))
             return {"updated": True}
@@ -352,5 +422,7 @@ __all__ = [
     "LiveFixtureEngine",
     "LiveToolDefinition",
     "live_catalog_definitions",
+    "live_catalog_definitions_v2",
     "live_catalog_digest",
+    "live_catalog_digest_v2",
 ]

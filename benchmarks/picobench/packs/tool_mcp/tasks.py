@@ -7,18 +7,22 @@ from typing import Any
 
 from benchmarks.picobench.canonical import canonical_digest
 from benchmarks.picobench.fixtures.mcp import catalog_definitions
-from benchmarks.picobench.fixtures.mcp.live_catalog import live_catalog_definitions
+from benchmarks.picobench.fixtures.mcp.live_catalog import (
+    live_catalog_definitions,
+    live_catalog_definitions_v2,
+)
 
-from .models import ArgumentSource, ToolMCPTask, ToolMCPTrack, ToolTarget
+from .models import LIVE_SOLVABLE_TRACKS, ArgumentSource, ToolMCPTask, ToolMCPTrack, ToolTarget
 
 FORMAL_TOOL_MCP_TASK_COUNT = 8
 CALIBRATION_TOOL_MCP_TASK_COUNT = 4
 ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT = 3
 LIVE_SOLVABLE_V1_TOOL_MCP_TASK_COUNT = 12
+LIVE_SOLVABLE_V2_TOOL_MCP_TASK_COUNT = 12
 _TASK_ROOT = Path(__file__).resolve().parents[2] / "tasks" / "tool_mcp"
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=5)
 def load_tool_mcp_tasks(
     track: ToolMCPTrack,
 ) -> tuple[ToolMCPTask, ...]:
@@ -30,21 +34,29 @@ def load_tool_mcp_tasks(
     entries = raw.get("tasks")
     if not isinstance(entries, list):
         raise ValueError(f"Tool/MCP task list missing in {source_path}")
+    if track is ToolMCPTrack.LIVE_SOLVABLE_V2:
+        base_path = _TASK_ROOT / f"{ToolMCPTrack.LIVE_SOLVABLE_V1.value}.json"
+        base_raw = json.loads(base_path.read_text(encoding="utf-8"))
+        base_entries = base_raw.get("tasks")
+        if not isinstance(base_entries, list):
+            raise ValueError(f"Tool/MCP task list missing in {base_path}")
+        entries = [entry for entry in base_entries if entry.get("role") != "researcher"] + entries
     tasks = tuple(_parse_task(track, entry) for entry in entries)
     expected_count = {
         ToolMCPTrack.FORMAL: FORMAL_TOOL_MCP_TASK_COUNT,
         ToolMCPTrack.CALIBRATION: CALIBRATION_TOOL_MCP_TASK_COUNT,
         ToolMCPTrack.ROLE_EXPERIMENT: ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT,
         ToolMCPTrack.LIVE_SOLVABLE_V1: LIVE_SOLVABLE_V1_TOOL_MCP_TASK_COUNT,
+        ToolMCPTrack.LIVE_SOLVABLE_V2: LIVE_SOLVABLE_V2_TOOL_MCP_TASK_COUNT,
     }[track]
     if len(tasks) != expected_count:
         raise ValueError(f"{track.value} requires exactly {expected_count} Tool/MCP tasks")
     if len({task.task_id for task in tasks}) != len(tasks):
         raise ValueError(f"duplicate Tool/MCP task id in {source_path}")
-    if track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+    if track in LIVE_SOLVABLE_TRACKS:
         from .contract import validate_live_task_set
 
-        validate_live_task_set(tasks, live_catalog_definitions())
+        validate_live_task_set(tasks, _live_catalog_definitions(track))
     return tasks
 
 
@@ -60,7 +72,7 @@ def _parse_task(track: ToolMCPTrack, raw: Any) -> ToolMCPTask:
         raise ValueError("Tool/MCP task requires one to three targets")
     catalog_names = {
         tool.name
-        for tool in (live_catalog_definitions() if track is ToolMCPTrack.LIVE_SOLVABLE_V1 else catalog_definitions())
+        for tool in (_live_catalog_definitions(track) if track in LIVE_SOLVABLE_TRACKS else catalog_definitions())
     }
     targets: list[ToolTarget] = []
     for entry in target_entries:
@@ -81,14 +93,14 @@ def _parse_task(track: ToolMCPTrack, raw: Any) -> ToolMCPTask:
             arguments=arguments,
             argument_sources=sources,
         )
-        if track is not ToolMCPTrack.LIVE_SOLVABLE_V1:
+        if track not in LIVE_SOLVABLE_TRACKS:
             target.expected_receipt
         targets.append(target)
     role = "general"
     search_query = None
     relevant_tools: tuple[str, ...] = ()
     irrelevant_tools: tuple[str, ...] = ()
-    if track in {ToolMCPTrack.ROLE_EXPERIMENT, ToolMCPTrack.LIVE_SOLVABLE_V1}:
+    if track is ToolMCPTrack.ROLE_EXPERIMENT or track in LIVE_SOLVABLE_TRACKS:
         role = _required_str(raw, "role")
         if role not in {"coder", "debugger", "researcher"}:
             raise ValueError(f"unsupported experimental Tool/MCP role: {role}")
@@ -103,7 +115,7 @@ def _parse_task(track: ToolMCPTrack, raw: Any) -> ToolMCPTask:
     expected_state: dict[str, Any] = {}
     required_capabilities: tuple[str, ...] = ()
     prohibited_capabilities: tuple[str, ...] = ()
-    if track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+    if track in LIVE_SOLVABLE_TRACKS:
         initial_state = _required_object(raw, "initial_state")
         expected_state = _required_object(raw, "expected_state")
         required_capabilities = _required_str_list(raw, "required_capabilities")
@@ -123,6 +135,12 @@ def _parse_task(track: ToolMCPTrack, raw: Any) -> ToolMCPTask:
         required_capabilities=required_capabilities,
         prohibited_capabilities=prohibited_capabilities,
     )
+
+
+def _live_catalog_definitions(track: ToolMCPTrack) -> tuple[Any, ...]:
+    if track is ToolMCPTrack.LIVE_SOLVABLE_V2:
+        return live_catalog_definitions_v2()
+    return live_catalog_definitions()
 
 
 def _parse_argument_source(raw: Any) -> ArgumentSource:
@@ -175,6 +193,7 @@ __all__ = [
     "FORMAL_TOOL_MCP_TASK_COUNT",
     "ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT",
     "LIVE_SOLVABLE_V1_TOOL_MCP_TASK_COUNT",
+    "LIVE_SOLVABLE_V2_TOOL_MCP_TASK_COUNT",
     "load_tool_mcp_tasks",
     "tool_mcp_task_set_digest",
 ]

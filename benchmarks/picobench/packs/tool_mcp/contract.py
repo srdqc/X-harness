@@ -6,14 +6,14 @@ from typing import Any, Iterable
 
 from benchmarks.picobench.fixtures.mcp.live_catalog import LiveToolDefinition
 
-from .models import ToolMCPTask, ToolMCPTrack
+from .models import LIVE_SOLVABLE_TRACKS, ToolMCPTask, ToolMCPTrack
 
 
 def validate_live_task_contract(
     task: ToolMCPTask,
     catalog: Iterable[LiveToolDefinition],
 ) -> tuple[str, ...]:
-    if task.track is not ToolMCPTrack.LIVE_SOLVABLE_V1:
+    if task.track not in LIVE_SOLVABLE_TRACKS:
         return ("wrong_live_contract_track",)
     definitions = {item.name: item for item in catalog}
     findings: list[str] = []
@@ -43,6 +43,11 @@ def validate_live_task_contract(
                 else:
                     if observed != value:
                         findings.append(f"target_{target_index}:{name}:observation_value_mismatch")
+            elif source.kind == "free_text" and task.track is ToolMCPTrack.LIVE_SOLVABLE_V2:
+                if not isinstance(value, str) or not value.strip():
+                    findings.append(f"target_{target_index}:{name}:free_text_value_missing")
+                if name.casefold() not in prompt:
+                    findings.append(f"target_{target_index}:{name}:free_text_field_undocumented")
             else:
                 findings.append(f"target_{target_index}:{name}:unknown_argument_source")
         definition = definitions.get(target.tool_name)
@@ -65,7 +70,39 @@ def validate_live_task_contract(
         findings.append("missing_required_capabilities")
     if not set(task.relevant_tools).issuperset(target.tool_name for target in task.targets):
         findings.append("targets_missing_from_relevant_tools")
+    if task.track is ToolMCPTrack.LIVE_SOLVABLE_V2 and task.role == "researcher":
+        findings.extend(_validate_v2_research_contract(task, definitions))
     return tuple(dict.fromkeys(findings))
+
+
+def _validate_v2_research_contract(
+    task: ToolMCPTask,
+    definitions: dict[str, LiveToolDefinition],
+) -> tuple[str, ...]:
+    findings: list[str] = []
+    report_targets = [target for target in task.targets if target.tool_name == "research_report_submit"]
+    if len(report_targets) != 1:
+        return ("v2_research_report_target_missing",)
+    report_target = report_targets[0]
+    required_fields = {"topic", "winning_entity", "explanation", "evidence_ids"}
+    definition = definitions.get(report_target.tool_name)
+    parameters = definition.parameters if definition is not None else {}
+    properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+    required = set(parameters.get("required", ())) if isinstance(parameters, dict) else set()
+    if not required_fields <= set(properties) or not required_fields <= required:
+        findings.append("v2_research_report_schema_incomplete")
+    prompt = task.prompt.casefold()
+    for field_name in required_fields:
+        if field_name not in prompt:
+            findings.append(f"v2_research_prompt_field_missing:{field_name}")
+    expected_report = task.expected_state.get("report")
+    if not isinstance(expected_report, dict) or "winning_entity" not in expected_report:
+        findings.append("v2_research_expected_winning_entity_missing")
+    elif "explanation" in expected_report:
+        findings.append("v2_research_explanation_must_not_be_exact")
+    if set(report_target.arguments) != required_fields:
+        findings.append("v2_research_report_arguments_incomplete")
+    return tuple(findings)
 
 
 def validate_live_task_set(

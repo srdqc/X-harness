@@ -5,6 +5,7 @@ from benchmarks.picobench.fixtures.mcp import (
 
 from .contract import validate_live_task_contract, validate_live_task_set
 from .live_verifier import SealedLiveStateVerifier, live_verifier_code_digest
+from .live_verifier_v2 import SealedLiveStateVerifierV2, live_verifier_v2_code_digest
 from .metrics import (
     TOOL_SCHEMA_ESTIMATOR_DIGEST,
     TOOL_SCHEMA_ESTIMATOR_ID,
@@ -36,6 +37,7 @@ from .tasks import (
     CALIBRATION_TOOL_MCP_TASK_COUNT,
     FORMAL_TOOL_MCP_TASK_COUNT,
     LIVE_SOLVABLE_V1_TOOL_MCP_TASK_COUNT,
+    LIVE_SOLVABLE_V2_TOOL_MCP_TASK_COUNT,
     ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT,
     load_tool_mcp_tasks,
     tool_mcp_task_set_digest,
@@ -48,10 +50,12 @@ __all__ = [
     "FORMAL_TOOL_MCP_TASK_COUNT",
     "ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT",
     "LIVE_SOLVABLE_V1_TOOL_MCP_TASK_COUNT",
+    "LIVE_SOLVABLE_V2_TOOL_MCP_TASK_COUNT",
     "MCPTransportSmokeResult",
     "MCPRuntimeTrialRunner",
     "SealedMCPReceiptVerifier",
     "SealedLiveStateVerifier",
+    "SealedLiveStateVerifierV2",
     "TOOL_SCHEMA_ESTIMATOR_DIGEST",
     "TOOL_SCHEMA_ESTIMATOR_ID",
     "TOOL_MCP_MAX_TOOL_ITERATIONS",
@@ -72,6 +76,7 @@ __all__ = [
     "estimate_visible_tool_schema_tokens",
     "load_tool_mcp_tasks",
     "live_verifier_code_digest",
+    "live_verifier_v2_code_digest",
     "mcp_verifier_code_digest",
     "normalize_target_calls",
     "reduce_tool_mcp_claim_from_artifacts",

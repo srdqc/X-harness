@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -93,11 +95,16 @@ class _InjectedProvider(LLMProvider):
 
 
 def _experiment(tmp_path: Path, pack_id: str = "tool-mcp") -> ExperimentSpec:
+    output_root = tmp_path
+    if os.name == "nt":
+        output_root = Path(".pico/picobench-tests") / sha256(
+            str(tmp_path).encode()
+        ).hexdigest()[:12]
     return ExperimentSpec(
         suite="tool-mcp-e2e",
         repetitions=1,
         pack_ids=(pack_id,),
-        output_root=tmp_path,
+        output_root=output_root,
         identity={
             "pico_commit": "0" * 40,
             "model": "scripted/tool-mcp",
