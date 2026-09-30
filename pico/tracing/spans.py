@@ -88,6 +88,17 @@ def emit(span: dict[str, Any]) -> None:
         pass
 
 
+def emit_event(record: dict[str, Any]) -> bool:
+    """Best-effort durable event append with an observable success result."""
+
+    try:
+        if not config.enabled():
+            return False
+        return _get_store().append_event(record)
+    except Exception:  # noqa: BLE001 -- tracing must never affect the host
+        return False
+
+
 def persist_artifact(kind: str, meta: dict[str, Any], payload: Any, *, label: str | None = None):
     try:
         return _get_store().persist_artifact(kind, meta, payload, label=label, preview_length=config.preview_len())

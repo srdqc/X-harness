@@ -55,7 +55,7 @@ from pico.session.manager import Session, SessionManager, SessionTurnBoundary
 from pico.spine.message import Media
 from pico.spine.runner import current_turn_id
 from pico.spine.turn import Origin
-from pico.tracing import semconv, trace
+from pico.tracing import evidence, semconv, trace
 from pico.utils.helpers import estimate_prompt_tokens, estimate_prompt_tokens_chain
 from pico.utils.persisted_payload import sanitize_persisted_payload
 
@@ -2199,13 +2199,37 @@ class AgentLoop:
             origin,
         )
         boundary = self._persist_completed_session_turn(session)
+        evidence.emit_current(
+            evidence.SESSION_BOUNDARY,
+            correlations={"session_id": key, "boundary_id": boundary.boundary_id},
+            metadata={
+                "boundary_version": boundary.version,
+                "message_count": boundary.message_count,
+                "history_digest": boundary.history_digest,
+            },
+        )
         if self._checkpoint is not None and outcome.checkpoint_record_id is not None:
-            self._checkpoint.correlate(
+            checkpoint_record = self._checkpoint.correlate(
                 outcome.checkpoint_record_id,
                 session_id=key,
                 boundary_id=boundary.boundary_id,
                 turn_id=boundary.turn_id,
             )
+            if checkpoint_record is not None:
+                evidence.emit_current(
+                    evidence.CHECKPOINT_REFERENCE,
+                    correlations={
+                        "session_id": key,
+                        "boundary_id": boundary.boundary_id,
+                        "checkpoint_record_id": checkpoint_record.record_id,
+                        "checkpoint_id": checkpoint_record.checkpoint_id,
+                    },
+                    metadata={
+                        "checkpoint_status": checkpoint_record.status.value,
+                        "checkpoint_revision": checkpoint_record.revision,
+                        "checkpoint_schema_version": checkpoint_record.schema_version,
+                    },
+                )
         await self.context_engine.after_turn(
             key,
             {

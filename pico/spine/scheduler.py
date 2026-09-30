@@ -26,7 +26,7 @@ from pico.spine._barrier import finish_barrier
 from pico.spine.events import RunnerEvent, TurnEnded, TurnEvent, TurnFailed, TurnStarted
 from pico.spine.runner import Emit, TurnOutcome, TurnRunner, turn_identity_scope
 from pico.spine.turn import BusyPolicy, Origin, TurnRequest
-from pico.tracing import semconv, trace
+from pico.tracing import evidence, semconv, trace
 
 EventSink = Callable[[TurnEvent], Awaitable[None]]
 
@@ -406,58 +406,97 @@ class Lane:
             channel=req.source.channel,
             chat_id=req.source.chat_id,
         ) as turn_span:
-            try:
-                async with self._pools.for_origin(req.origin):
-                    await self._sink(TurnStarted(conversation_id=self._conversation_id, turn_id=turn_id))
-                    started = True
-                    run_start = time.monotonic()
-                    with turn_identity_scope(turn_id):
-                        outcome = await self._runner.run(req, self._make_emit(req, turn_id), drain)
-            except asyncio.CancelledError:
-                turn_span.set(semconv.spine_turn_cancelled(started=started))
-                if started:  # 只与 TurnStarted 配对；启动前取消不发出事件
-                    await self._emit_terminal(
-                        TurnFailed(
-                            error="cancelled",
-                            cancelled=True,
-                            conversation_id=self._conversation_id,
-                            turn_id=turn_id,
-                        )
-                    )
-                raise
-            except Exception as exc:
-                turn_span.set(semconv.spine_turn_failed(exc, started=started))
-                turn_span.error(exc)
-                if started:
-                    await self._emit_terminal(
-                        TurnFailed(
-                            error=str(exc),
-                            cancelled=False,
-                            conversation_id=self._conversation_id,
-                            turn_id=turn_id,
-                        )
-                    )
-                return None
-            finally:
-                # 已 drain 的 inject 共享当前 Turn 的 outcome，取消/失败时为 None；
-                # 由合并它的 Turn 在此完成，而不是由 worker 完成。
-                for inject_fut in chained:
-                    if not inject_fut.done():
-                        inject_fut.set_result(outcome)
-            latency_ms = (time.monotonic() - run_start) * 1000
-            turn_span.set(semconv.spine_turn_ended(outcome, latency_ms))
-            await self._emit_terminal(
-                TurnEnded(
-                    usage=outcome.usage,
-                    latency_ms=latency_ms,
-                    explicit_reply=outcome.explicit_reply,
-                    conversation_id=self._conversation_id,
-                    tool_calls=outcome.tool_calls,
-                    tool_failures=outcome.tool_failures,
-                    turn_id=turn_id,
-                )
+            recorder = evidence.TurnEvidenceRecorder(
+                turn_id=turn_id,
+                conversation_id=self._conversation_id,
+                trace_id=turn_span.trace_id or None,
+                root_span_id=turn_span.span_id or None,
             )
-            return outcome
+            with evidence.turn_scope(recorder):
+                try:
+                    async with self._pools.for_origin(req.origin):
+                        await self._sink(TurnStarted(conversation_id=self._conversation_id, turn_id=turn_id))
+                        started = True
+                        recorder.emit(
+                            evidence.TURN_STARTED,
+                            metadata={"origin": req.origin.value, "channel": req.source.channel},
+                        )
+                        run_start = time.monotonic()
+                        with turn_identity_scope(turn_id):
+                            outcome = await self._runner.run(req, self._make_emit(req, turn_id), drain)
+                except asyncio.CancelledError:
+                    terminal = semconv.spine_turn_cancelled(started=started)
+                    turn_span.set(terminal)
+                    if started:  # 只与 TurnStarted 配对；启动前取消不发出事件
+                        recorder.emit(
+                            evidence.TURN_TERMINAL,
+                            metadata={
+                                "outcome": terminal["spine.outcome"],
+                                "lifecycle_event": terminal["spine.terminal_event"],
+                            },
+                        )
+                        await self._emit_terminal(
+                            TurnFailed(
+                                error="cancelled",
+                                cancelled=True,
+                                conversation_id=self._conversation_id,
+                                turn_id=turn_id,
+                            )
+                        )
+                    raise
+                except Exception as exc:
+                    terminal = semconv.spine_turn_failed(exc, started=started)
+                    turn_span.set(terminal)
+                    turn_span.error(exc)
+                    if started:
+                        metadata = {
+                            "outcome": terminal["spine.outcome"],
+                            "lifecycle_event": terminal["spine.terminal_event"],
+                            "error_class": terminal["spine.error_class"],
+                        }
+                        if "spine.provider_error_category" in terminal:
+                            metadata["provider_error_category"] = terminal["spine.provider_error_category"]
+                        recorder.emit(evidence.TURN_TERMINAL, metadata=metadata)
+                        await self._emit_terminal(
+                            TurnFailed(
+                                error=str(exc),
+                                cancelled=False,
+                                conversation_id=self._conversation_id,
+                                turn_id=turn_id,
+                            )
+                        )
+                    return None
+                finally:
+                    # 已 drain 的 inject 共享当前 Turn 的 outcome，取消/失败时为 None；
+                    # 由合并它的 Turn 在此完成，而不是由 worker 完成。
+                    for inject_fut in chained:
+                        if not inject_fut.done():
+                            inject_fut.set_result(outcome)
+                latency_ms = (time.monotonic() - run_start) * 1000
+                terminal = semconv.spine_turn_ended(outcome, latency_ms)
+                turn_span.set(terminal)
+                recorder.emit(
+                    evidence.TURN_TERMINAL,
+                    metadata={
+                        "outcome": terminal["spine.outcome"],
+                        "lifecycle_event": terminal["spine.terminal_event"],
+                        "tool_calls": terminal["spine.tool_calls"],
+                        "tool_failures": terminal["spine.tool_failures"],
+                    },
+                )
+                await self._emit_terminal(
+                    TurnEnded(
+                        usage=outcome.usage,
+                        latency_ms=latency_ms,
+                        explicit_reply=outcome.explicit_reply,
+                        conversation_id=self._conversation_id,
+                        tool_calls=outcome.tool_calls,
+                        tool_failures=outcome.tool_failures,
+                        turn_id=turn_id,
+                    )
+                )
+                turn_span.set({"spine.evidence_write_failures": recorder.write_failures})
+                return outcome
 
 
 class TurnHandle:
