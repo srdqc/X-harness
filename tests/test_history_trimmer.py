@@ -8,6 +8,11 @@ class _CountingProvider:
         return len(messages) * 100, "test"
 
 
+class _ToolAwareProvider:
+    def estimate_prompt_tokens(self, messages, tools, model):
+        return len(messages) * 50 + len(tools or []) * 100, "test"
+
+
 def test_history_from_ids_preserves_reasoning_fields():
     messages = [
         {"role": "user", "content": "hi"},
@@ -95,3 +100,39 @@ def test_trim_never_orphans_tool_results():
 
     assert outcome.included_ids == [4, 5]
     assert trimmer.structural_errors(built) == []
+
+
+def test_trim_uses_explicit_effective_tools_instead_of_full_catalog():
+    messages = [
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    full_tools = [{"function": {"name": str(index)}} for index in range(4)]
+    trimmer = HistoryTrimmer(_ToolAwareProvider(), "test", lambda: full_tools, 500)
+
+    _, reduced = trimmer.trim(
+        session_messages=messages,
+        ids=[0, 1],
+        protected_ids=set(),
+        reserved_output=50,
+        build_messages=lambda history: [
+            {"role": "system", "content": "system"},
+            *history,
+            {"role": "user", "content": "current"},
+        ],
+        tool_definitions=[full_tools[0]],
+    )
+    _, full = trimmer.trim(
+        session_messages=messages,
+        ids=[0, 1],
+        protected_ids=set(),
+        reserved_output=50,
+        build_messages=lambda history: [
+            {"role": "system", "content": "system"},
+            *history,
+            {"role": "user", "content": "current"},
+        ],
+    )
+
+    assert reduced.included_ids == [0, 1]
+    assert full.included_ids == []

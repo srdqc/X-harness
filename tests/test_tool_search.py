@@ -1,12 +1,21 @@
 """Tests for progressive tool disclosure (tool_index + tool_search)."""
 
 import json
+from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
 
 from pico.agent.tools.base import Tool
-from pico.agent.tools.execution import ToolExecutionContext
+from pico.agent.tools.discovery import ToolSourceKind
+from pico.agent.tools.execution import (
+    ResolvedToolInvocation,
+    ToolCapability,
+    ToolEffect,
+    ToolExecution,
+    ToolExecutionContext,
+    ToolInvocation,
+)
 from pico.agent.tools.registry import ToolRegistry
 from pico.agent.tools.tool_index import ToolIndex, _schema_text
 from pico.agent.tools.tool_search import (
@@ -56,6 +65,36 @@ class _ContextTool(_FakeTool):
     async def execute_with_context(self, context: ToolExecutionContext, **kwargs: Any) -> str:
         self.context = context
         return f"ran {self.name}"
+
+
+class _ResolvedProbeRegistry(ToolRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resolved_calls: list[ResolvedToolInvocation] = []
+
+    async def execute_resolved(self, resolved: ResolvedToolInvocation) -> ToolExecution:
+        self.resolved_calls.append(resolved)
+        return await super().execute_resolved(resolved)
+
+
+class _WriteTarget(_FakeTool):
+    capability = ToolCapability(effect=ToolEffect.WRITE)
+
+    def __init__(self) -> None:
+        super().__init__(
+            "create_issue",
+            "open a github issue",
+            parameters={
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+            },
+        )
+        self.execution_count = 0
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.execution_count += 1
+        return f"created {kwargs['title']}"
 
 
 def test_index_ranks_name_match_first() -> None:
@@ -201,6 +240,99 @@ def test_controller_search_includes_parameters() -> None:
     assert hits[0]["parameters"] == schema
 
 
+def test_registry_projects_immutable_builtin_and_unknown_discovery_metadata() -> None:
+    builtin = _WriteTarget()
+    unknown = _FakeTool("custom", "custom capability")
+    reg = ToolRegistry()
+    reg.register(builtin, source_kind=ToolSourceKind.BUILTIN)
+    reg.register(unknown)
+
+    builtin_metadata = reg.discovery_metadata(builtin.name)
+    unknown_metadata = reg.discovery_metadata(unknown.name)
+
+    assert builtin_metadata is not None
+    assert builtin_metadata.source_kind is ToolSourceKind.BUILTIN
+    assert builtin_metadata.effect is ToolEffect.WRITE
+    assert builtin_metadata.source_id is None
+    assert builtin_metadata.category is None
+    assert unknown_metadata is not None
+    assert unknown_metadata.source_kind is ToolSourceKind.UNKNOWN
+    with pytest.raises(FrozenInstanceError):
+        builtin_metadata.description = "changed"  # type: ignore[misc]
+
+
+def test_retrieval_evidence_is_stable_ranked_and_supports_recall_metrics() -> None:
+    reg = ToolRegistry()
+    reg.register(_FakeTool("create_issue", "open a github issue"))
+    reg.register(_FakeTool("send_message", "post to a slack channel"))
+    ctrl = _controller(reg)
+    ctrl.refresh()
+
+    first = ctrl.retrieve("github issue", 5)
+    second = ctrl.retrieve("github issue", 5)
+
+    assert first == second
+    assert len(first.catalog_signature) == 64
+    assert first.total_searchable_tools == 2
+    assert first.requested_k == 5
+    assert first.effective_k == 2
+    assert first.ranked_names[0] == "create_issue"
+    assert first.hits[0].rank == 1
+    assert first.hits[0].score > 0
+    assert first.hits[0].metadata.name == "create_issue"
+    assert first.recall_at({"create_issue"}, 1) == 1.0
+    assert first.recall_at({"create_issue", "send_message"}, 1) == 0.5
+    assert first.rank_of("create_issue") == 1
+    assert first.rank_of("missing") is None
+    assert first.reciprocal_rank("create_issue") == 1.0
+    assert first.reciprocal_rank("missing") == 0.0
+    assert first.zero_hit is False
+
+    multi = ctrl.retrieve("github issue slack channel", 5)
+    assert multi.ranked_names == ("create_issue", "send_message")
+    assert multi.rank_of("send_message") == 2
+    assert multi.reciprocal_rank("send_message") == 0.5
+    assert multi.recall_at({"create_issue", "send_message"}, 1) == 0.5
+    assert multi.recall_at({"create_issue", "send_message"}, 3) == 1.0
+
+
+def test_zero_hit_retrieval_is_explicit() -> None:
+    reg = ToolRegistry()
+    reg.register(_FakeTool("create_issue", "open a github issue"))
+    ctrl = _controller(reg)
+    ctrl.refresh()
+
+    result = ctrl.retrieve("zzzznomatch", 3)
+
+    assert result.zero_hit is True
+    assert result.hits == ()
+    assert result.ranked_names == ()
+    assert result.total_searchable_tools == 1
+    assert result.recall_at({"create_issue"}, 3) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_registry_refresh_adds_removes_and_does_not_authorize_stale_hits() -> None:
+    tool = _FakeTool("create_issue", "open a github issue")
+    reg = ToolRegistry()
+    ctrl = _controller(reg)
+    ctrl.refresh()
+    assert ctrl.retrieve("github issue", 5).zero_hit is True
+
+    reg.register(tool)
+    ctrl.refresh()
+    evidence = ctrl.retrieve("github issue", 5)
+    assert evidence.ranked_names == (tool.name,)
+
+    reg.unregister(tool.name)
+    ctrl.refresh()
+    assert tool.name not in ctrl.retrieve("github issue", 5).ranked_names
+    result = await reg.execute(tool.name, {})
+    assert result.failed is True
+    assert "not found" in result
+    assert evidence.hits[0].metadata.name == tool.name
+
+
 def test_meta_includes_tool_call() -> None:
     assert TOOL_CALL_NAME in META_TOOL_NAMES
 
@@ -304,6 +436,79 @@ async def test_tool_call_preserves_parent_call_identity_for_target_execution() -
 
 
 @pytest.mark.asyncio
+async def test_direct_and_tool_call_targets_cross_same_resolved_execution_seam() -> None:
+    target = _WriteTarget()
+    reg = _ResolvedProbeRegistry()
+    reg.register(target)
+    ctrl = _controller(reg)
+    reg.register(ToolCallTool(ctrl))
+
+    direct = await reg.execute_many(
+        [
+            ToolInvocation(
+                target.name,
+                {"title": "direct"},
+                ToolExecutionContext(call_id="direct-call"),
+            )
+        ]
+    )
+    routed = await reg.execute_many(
+        [
+            ToolInvocation(
+                TOOL_CALL_NAME,
+                {"name": target.name, "arguments": {"title": "routed"}},
+                ToolExecutionContext(call_id="outer-call"),
+            )
+        ]
+    )
+
+    target_resolutions = [item for item in reg.resolved_calls if item.invocation.name == target.name]
+    assert [item.routed_via for item in target_resolutions] == [None, TOOL_CALL_NAME]
+    assert [item.effect for item in target_resolutions] == [ToolEffect.WRITE, ToolEffect.WRITE]
+    assert target_resolutions[0].tool is target
+    assert target_resolutions[1].tool is target
+    assert target_resolutions[1].invocation.context == ToolExecutionContext(
+        call_id="outer-call:create_issue",
+        parent_call_id="outer-call",
+    )
+    assert target.execution_count == 2
+    assert direct[0].resolved is target_resolutions[0]
+    assert routed[0].resolved is not None
+    assert routed[0].resolved.tool is target
+    assert routed[0].resolved.routed_via == TOOL_CALL_NAME
+    assert routed[0].invocation.name == target.name
+    assert [str(direct[0].result), str(routed[0].result)] == ["created direct", "created routed"]
+
+
+@pytest.mark.asyncio
+async def test_tool_call_target_schema_validation_occurs_at_resolved_seam() -> None:
+    target = _WriteTarget()
+    reg = _ResolvedProbeRegistry()
+    reg.register(target)
+    ctrl = _controller(reg)
+    reg.register(ToolCallTool(ctrl))
+
+    execution = (
+        await reg.execute_many(
+            [
+                ToolInvocation(
+                    TOOL_CALL_NAME,
+                    {"name": target.name, "arguments": {}},
+                    ToolExecutionContext(call_id="invalid-outer"),
+                )
+            ]
+        )
+    )[0]
+
+    assert execution.result.failed is True
+    assert "Invalid parameters for tool 'create_issue'" in execution.result
+    assert execution.resolved is not None
+    assert execution.resolved.effect is ToolEffect.WRITE
+    assert execution.resolved.routed_via == TOOL_CALL_NAME
+    assert target.execution_count == 0
+
+
+@pytest.mark.asyncio
 async def test_tool_call_rejects_meta_and_missing() -> None:
     ctrl = _controller(ToolRegistry())
     assert "cannot be invoked" in await ctrl.call("tool_search", {})
@@ -404,6 +609,23 @@ async def test_strategy_passthrough_when_meta_tools_absent() -> None:
     tools = reg.get_definitions()
     _, out, _ = await strat.before_llm_call([], tools, "m")
     assert {t["function"]["name"] for t in out} == {t["function"]["name"] for t in tools}
+
+
+def test_disclosure_view_is_immutable_and_fail_open_is_explicit() -> None:
+    reg, ctrl = _registry_with_n(40)
+    reg.unregister("tool_search")
+    reg.unregister(TOOL_CALL_NAME)
+    strategy = ToolSearchStrategy(ctrl, compaction_threshold=25)
+
+    view = strategy.disclosure_view(reg.get_definitions())
+    projected = view.provider_tools()
+    assert view.mode == "fail_open_full"
+    assert projected is not None and len(projected) == 40
+
+    projected.clear()
+    assert len(view.provider_tools() or []) == 40
+    with pytest.raises(FrozenInstanceError):
+        view.mode = "progressive"  # type: ignore[misc]
 
 
 def test_registry_register_first_runs_before_others() -> None:

@@ -8,6 +8,7 @@ Tool 是模型与文件、Shell、Web、Channel 等环境能力之间的受控�
 from abc import ABC, abstractmethod
 from typing import Any
 
+from pico.agent.tools.discovery import ToolSourceKind
 from pico.agent.tools.execution import ToolCapability, ToolExecutionContext, ToolInvocation
 
 
@@ -50,6 +51,9 @@ class Tool(ABC):
     # 而不是在等待中途被终止。
     blocking_interaction: bool = False
     capability = ToolCapability()
+    discovery_source_kind = ToolSourceKind.UNKNOWN
+    discovery_source_id: str | None = None
+    discovery_category: str | None = None
 
     _TYPE_MAP = {
         "string": str,

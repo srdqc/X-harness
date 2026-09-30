@@ -376,6 +376,12 @@ class ToolSearchConfig(Base):
     """``tool_search`` 每 Query 返回的 Default Hit Count。"""
     always_visible: list[str] = Field(default_factory=list)
     """除 Core Set 外，每 Turn 仍 Direct Exposed 的 Extra Tool Names。"""
+    experimental_role: Literal["general", "coder", "debugger", "researcher"] = "general"
+    """显式实验 Role；仅影响提示与检索先验，不拥有 Tool 执行权限。"""
+    experimental_role_prompt: bool = False
+    experimental_role_prior: bool = False
+    experimental_role_categories: dict[str, str] = Field(default_factory=dict)
+    """Benchmark-only stable Tool-name to discovery-category projection."""
 
 
 class ToolsConfig(Base):

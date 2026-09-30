@@ -79,13 +79,18 @@ class StrategyRegistry:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         model: str,
+        *,
+        skip: tuple[TokenStrategy, ...] = (),
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, str]:
         """按顺序运行每个 Strategy 的 Before-call Hook，Errors 向上传播。
 
         每轮把上一策略返回的 ``messages``、``tools``、``model`` 交给下一策略，最终返回完整三元组。
         任一策略抛错都会停止 Chain，确保 Agent 不发送只完成了一部分预处理的请求。
         """
+        skipped = {id(strategy) for strategy in skip}
         for s in self._strategies:
+            if id(s) in skipped:
+                continue
             messages, tools, model = await s.before_llm_call(messages, tools, model)
         return messages, tools, model
 

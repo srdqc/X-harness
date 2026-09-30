@@ -69,6 +69,13 @@ class TurnOutcome:
     context_path: str | None = None
     context_fallback_reason: str | None = None
     skill_source_failures: tuple[str, ...] = ()
+    tool_disclosure_fallback_used: bool = False
+    tool_disclosure_fallback_reason: str | None = None
+    tool_disclosure_fallback_iteration: int | None = None
+    tool_disclosure_zero_hits_before_fallback: int = 0
+    tool_disclosure_provider_calls_before_fallback: int = 0
+    tool_disclosure_provider_calls_after_fallback: int = 0
+    tool_disclosure_recovery_succeeded: bool | None = None
 
 
 @runtime_checkable

@@ -1,0 +1,74 @@
+{
+  "schema": "pico.picobench.tool-mcp-tasks.v1",
+  "base_track": "live_solvable_v1",
+  "tasks": [
+    {
+      "task_id": "live-researcher-01",
+      "title": "Compare checkout latency evidence",
+      "prompt": "Read evidence records LAT-A and LAT-B for checkout latency and determine which named service has the lower value. Submit a structured report for topic checkout-latency with evidence_ids containing both record IDs, winning_entity containing the exact selected service name, and explanation containing a non-empty rationale.",
+      "role": "researcher",
+      "relevant_tools": ["knowledge_record_read", "research_report_submit"],
+      "irrelevant_tools": ["documentation_search", "metrics_query", "documentation_page_update"],
+      "initial_state": {"records": {"LAT-A": {"metric": "checkout latency", "value": 240, "unit": "ms", "label": "service-orchid", "source": "load-test-17"}, "LAT-B": {"metric": "checkout latency", "value": 180, "unit": "ms", "label": "service-lotus", "source": "load-test-18"}}},
+      "expected_state": {"report": {"topic": "checkout-latency", "winning_entity": "service-lotus", "evidence_ids": ["LAT-A", "LAT-B"]}},
+      "required_capabilities": ["research.read", "research.read", "research.report"],
+      "prohibited_capabilities": ["*.mutate"],
+      "targets": [
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "LAT-A"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "LAT-B"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "research_report_submit", "arguments": {"topic": "checkout-latency", "winning_entity": "service-lotus", "explanation": "The cited values show that service-lotus has lower checkout latency.", "evidence_ids": ["LAT-A", "LAT-B"]}, "argument_sources": {"topic": {"kind": "prompt"}, "winning_entity": {"kind": "observation", "state_path": "records.LAT-B.label"}, "explanation": {"kind": "free_text"}, "evidence_ids": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-researcher-02",
+      "title": "Compare indexing throughput evidence",
+      "prompt": "Read records TPS-C and TPS-D for indexing throughput and determine which named engine has the higher value. Submit a structured report for topic indexing-throughput with evidence_ids containing both record IDs, winning_entity containing the exact selected engine name, and explanation containing a non-empty rationale.",
+      "role": "researcher",
+      "relevant_tools": ["knowledge_record_read", "research_report_submit"],
+      "irrelevant_tools": ["knowledge_index_search", "dashboard_read", "issue_comment_add"],
+      "initial_state": {"records": {"TPS-C": {"metric": "indexing throughput", "value": 810, "unit": "docs/s", "label": "engine-cobalt", "source": "benchmark-31"}, "TPS-D": {"metric": "indexing throughput", "value": 940, "unit": "docs/s", "label": "engine-ember", "source": "benchmark-32"}}},
+      "expected_state": {"report": {"topic": "indexing-throughput", "winning_entity": "engine-ember", "evidence_ids": ["TPS-C", "TPS-D"]}},
+      "required_capabilities": ["research.read", "research.read", "research.report"],
+      "prohibited_capabilities": ["*.mutate"],
+      "targets": [
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "TPS-C"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "TPS-D"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "research_report_submit", "arguments": {"topic": "indexing-throughput", "winning_entity": "engine-ember", "explanation": "The cited values show that engine-ember has higher indexing throughput.", "evidence_ids": ["TPS-C", "TPS-D"]}, "argument_sources": {"topic": {"kind": "prompt"}, "winning_entity": {"kind": "observation", "state_path": "records.TPS-D.label"}, "explanation": {"kind": "free_text"}, "evidence_ids": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-researcher-03",
+      "title": "Compare recovery time evidence",
+      "prompt": "Read recovery records RTO-E and RTO-F and identify which named region has the shorter recovery time. Submit a structured report for topic recovery-time with evidence_ids containing both record IDs, winning_entity containing the exact selected region name, and explanation containing a non-empty rationale.",
+      "role": "researcher",
+      "relevant_tools": ["knowledge_record_read", "research_report_submit"],
+      "irrelevant_tools": ["source_freshness_check", "deployment_start", "message_send"],
+      "initial_state": {"records": {"RTO-E": {"metric": "recovery time", "value": 19, "unit": "min", "label": "region-east", "source": "drill-44"}, "RTO-F": {"metric": "recovery time", "value": 11, "unit": "min", "label": "region-west", "source": "drill-45"}}},
+      "expected_state": {"report": {"topic": "recovery-time", "winning_entity": "region-west", "evidence_ids": ["RTO-E", "RTO-F"]}},
+      "required_capabilities": ["research.read", "research.read", "research.report"],
+      "prohibited_capabilities": ["*.mutate"],
+      "targets": [
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "RTO-E"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "RTO-F"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "research_report_submit", "arguments": {"topic": "recovery-time", "winning_entity": "region-west", "explanation": "The cited values show that region-west has shorter recovery time.", "evidence_ids": ["RTO-E", "RTO-F"]}, "argument_sources": {"topic": {"kind": "prompt"}, "winning_entity": {"kind": "observation", "state_path": "records.RTO-F.label"}, "explanation": {"kind": "free_text"}, "evidence_ids": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-researcher-04",
+      "title": "Compare error-rate evidence",
+      "prompt": "Read records ERR-G and ERR-H for API error rate and determine which named gateway has the lower percentage. Submit a structured report for topic api-error-rate with evidence_ids containing both record IDs, winning_entity containing the exact selected gateway name, and explanation containing a non-empty rationale.",
+      "role": "researcher",
+      "relevant_tools": ["knowledge_record_read", "research_report_submit"],
+      "irrelevant_tools": ["error_budget_read", "audit_event_search", "alert_rule_update"],
+      "initial_state": {"records": {"ERR-G": {"metric": "API error rate", "value": 1.8, "unit": "%", "label": "gateway-garnet", "source": "telemetry-52"}, "ERR-H": {"metric": "API error rate", "value": 0.7, "unit": "%", "label": "gateway-harbor", "source": "telemetry-53"}}},
+      "expected_state": {"report": {"topic": "api-error-rate", "winning_entity": "gateway-harbor", "evidence_ids": ["ERR-G", "ERR-H"]}},
+      "required_capabilities": ["research.read", "research.read", "research.report"],
+      "prohibited_capabilities": ["*.mutate"],
+      "targets": [
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "ERR-G"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "ERR-H"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "research_report_submit", "arguments": {"topic": "api-error-rate", "winning_entity": "gateway-harbor", "explanation": "The cited values show that gateway-harbor has the lower API error rate.", "evidence_ids": ["ERR-G", "ERR-H"]}, "argument_sources": {"topic": {"kind": "prompt"}, "winning_entity": {"kind": "observation", "state_path": "records.ERR-H.label"}, "explanation": {"kind": "free_text"}, "evidence_ids": {"kind": "prompt"}}}
+      ]
+    }
+  ]
+}

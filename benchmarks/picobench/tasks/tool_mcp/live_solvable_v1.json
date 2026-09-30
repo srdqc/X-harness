@@ -1,0 +1,201 @@
+{
+  "schema": "pico.picobench.tool-mcp-tasks.v1",
+  "tasks": [
+    {
+      "task_id": "live-coder-01",
+      "title": "Update cache lifetime and verify",
+      "prompt": "In repository atlas, inspect src/cache.py, change the exact text `CACHE_TTL = 30` to `CACHE_TTL = 60`, and verify with suite cache-unit.",
+      "role": "coder",
+      "relevant_tools": ["repository_file_inspect", "repository_file_patch", "repository_test_verify"],
+      "irrelevant_tools": ["repository_diff_read", "repository_file_create", "documentation_page_update"],
+      "initial_state": {"repository": "atlas", "path": "src/cache.py", "content": "CACHE_TTL = 30", "expected_content": "CACHE_TTL = 60", "suite": "cache-unit"},
+      "expected_state": {"content": "CACHE_TTL = 60"},
+      "required_capabilities": ["repository.read", "repository.mutate", "repository.verify"],
+      "targets": [
+        {"tool": "repository_file_inspect", "arguments": {"repository": "atlas", "path": "src/cache.py"}, "argument_sources": {"repository": {"kind": "prompt"}, "path": {"kind": "prompt"}}},
+        {"tool": "repository_file_patch", "arguments": {"repository": "atlas", "path": "src/cache.py", "old_text": "CACHE_TTL = 30", "new_text": "CACHE_TTL = 60"}, "argument_sources": {"repository": {"kind": "prompt"}, "path": {"kind": "prompt"}, "old_text": {"kind": "prompt"}, "new_text": {"kind": "prompt"}}},
+        {"tool": "repository_test_verify", "arguments": {"repository": "atlas", "suite": "cache-unit"}, "argument_sources": {"repository": {"kind": "prompt"}, "suite": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-coder-02",
+      "title": "Enable guarded parser and verify",
+      "prompt": "In repository nova, inspect config/parser.toml, replace the exact text `guarded = false` with `guarded = true`, then run verification suite parser-contract.",
+      "role": "coder",
+      "relevant_tools": ["repository_file_inspect", "repository_file_patch", "repository_test_verify"],
+      "irrelevant_tools": ["repository_format_check", "repository_commit_prepare", "issue_label_update"],
+      "initial_state": {"repository": "nova", "path": "config/parser.toml", "content": "guarded = false", "expected_content": "guarded = true", "suite": "parser-contract"},
+      "expected_state": {"content": "guarded = true"},
+      "required_capabilities": ["repository.read", "repository.mutate", "repository.verify"],
+      "targets": [
+        {"tool": "repository_file_inspect", "arguments": {"repository": "nova", "path": "config/parser.toml"}, "argument_sources": {"repository": {"kind": "prompt"}, "path": {"kind": "prompt"}}},
+        {"tool": "repository_file_patch", "arguments": {"repository": "nova", "path": "config/parser.toml", "old_text": "guarded = false", "new_text": "guarded = true"}, "argument_sources": {"repository": {"kind": "prompt"}, "path": {"kind": "prompt"}, "old_text": {"kind": "prompt"}, "new_text": {"kind": "prompt"}}},
+        {"tool": "repository_test_verify", "arguments": {"repository": "nova", "suite": "parser-contract"}, "argument_sources": {"repository": {"kind": "prompt"}, "suite": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-coder-03",
+      "title": "Adjust request timeout and verify",
+      "prompt": "In repository orbit, inspect app/network.cfg, replace the exact text `request_timeout = 5` with `request_timeout = 8`, and verify using suite network-unit.",
+      "role": "coder",
+      "relevant_tools": ["repository_file_inspect", "repository_file_patch", "repository_test_verify"],
+      "irrelevant_tools": ["repository_dependency_audit", "deployment_status_read", "metrics_query"],
+      "initial_state": {"repository": "orbit", "path": "app/network.cfg", "content": "request_timeout = 5", "expected_content": "request_timeout = 8", "suite": "network-unit"},
+      "expected_state": {"content": "request_timeout = 8"},
+      "required_capabilities": ["repository.read", "repository.mutate", "repository.verify"],
+      "targets": [
+        {"tool": "repository_file_inspect", "arguments": {"repository": "orbit", "path": "app/network.cfg"}, "argument_sources": {"repository": {"kind": "prompt"}, "path": {"kind": "prompt"}}},
+        {"tool": "repository_file_patch", "arguments": {"repository": "orbit", "path": "app/network.cfg", "old_text": "request_timeout = 5", "new_text": "request_timeout = 8"}, "argument_sources": {"repository": {"kind": "prompt"}, "path": {"kind": "prompt"}, "old_text": {"kind": "prompt"}, "new_text": {"kind": "prompt"}}},
+        {"tool": "repository_test_verify", "arguments": {"repository": "orbit", "suite": "network-unit"}, "argument_sources": {"repository": {"kind": "prompt"}, "suite": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-coder-04",
+      "title": "Increase retry limit and verify",
+      "prompt": "In repository zenith, inspect lib/retry.ini, change the exact text `max_retries = 2` to `max_retries = 4`, then verify with suite retry-spec.",
+      "role": "coder",
+      "relevant_tools": ["repository_file_inspect", "repository_file_patch", "repository_test_verify"],
+      "irrelevant_tools": ["repository_symbol_search", "repository_branch_inspect", "error_budget_read"],
+      "initial_state": {"repository": "zenith", "path": "lib/retry.ini", "content": "max_retries = 2", "expected_content": "max_retries = 4", "suite": "retry-spec"},
+      "expected_state": {"content": "max_retries = 4"},
+      "required_capabilities": ["repository.read", "repository.mutate", "repository.verify"],
+      "targets": [
+        {"tool": "repository_file_inspect", "arguments": {"repository": "zenith", "path": "lib/retry.ini"}, "argument_sources": {"repository": {"kind": "prompt"}, "path": {"kind": "prompt"}}},
+        {"tool": "repository_file_patch", "arguments": {"repository": "zenith", "path": "lib/retry.ini", "old_text": "max_retries = 2", "new_text": "max_retries = 4"}, "argument_sources": {"repository": {"kind": "prompt"}, "path": {"kind": "prompt"}, "old_text": {"kind": "prompt"}, "new_text": {"kind": "prompt"}}},
+        {"tool": "repository_test_verify", "arguments": {"repository": "zenith", "suite": "retry-spec"}, "argument_sources": {"repository": {"kind": "prompt"}, "suite": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-debugger-01",
+      "title": "Correct payments incident severity",
+      "prompt": "Incident INC-148 in payments-service is incorrectly marked P3. Inspect its diagnostic evidence, correct the severity to P1, and verify the incident.",
+      "role": "debugger",
+      "relevant_tools": ["incident_evidence_read", "incident_severity_update", "incident_resolution_verify"],
+      "irrelevant_tools": ["incident_priority_update", "incident_note_add", "service_health_read"],
+      "initial_state": {"incident_id": "INC-148", "service": "payments-service", "severity": "P3", "evidence": "checkout failures exceed the critical threshold"},
+      "expected_state": {"severity": "P1"},
+      "required_capabilities": ["incident.read", "incident.mutate", "incident.verify"],
+      "targets": [
+        {"tool": "incident_evidence_read", "arguments": {"incident_id": "INC-148"}, "argument_sources": {"incident_id": {"kind": "prompt"}}},
+        {"tool": "incident_severity_update", "arguments": {"incident_id": "INC-148", "severity": "P1"}, "argument_sources": {"incident_id": {"kind": "prompt"}, "severity": {"kind": "prompt"}}},
+        {"tool": "incident_resolution_verify", "arguments": {"incident_id": "INC-148", "expected_severity": "P1"}, "argument_sources": {"incident_id": {"kind": "prompt"}, "expected_severity": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-debugger-02",
+      "title": "Correct search incident severity",
+      "prompt": "Incident INC-209 in search-service is marked P4 despite sustained query failures. Inspect the evidence, change severity to P2, and verify the incident state.",
+      "role": "debugger",
+      "relevant_tools": ["incident_evidence_read", "incident_severity_update", "incident_resolution_verify"],
+      "irrelevant_tools": ["incident_status_update", "incident_metric_query", "alert_rule_update"],
+      "initial_state": {"incident_id": "INC-209", "service": "search-service", "severity": "P4", "evidence": "query failure rate is sustained above the major threshold"},
+      "expected_state": {"severity": "P2"},
+      "required_capabilities": ["incident.read", "incident.mutate", "incident.verify"],
+      "targets": [
+        {"tool": "incident_evidence_read", "arguments": {"incident_id": "INC-209"}, "argument_sources": {"incident_id": {"kind": "prompt"}}},
+        {"tool": "incident_severity_update", "arguments": {"incident_id": "INC-209", "severity": "P2"}, "argument_sources": {"incident_id": {"kind": "prompt"}, "severity": {"kind": "prompt"}}},
+        {"tool": "incident_resolution_verify", "arguments": {"incident_id": "INC-209", "expected_severity": "P2"}, "argument_sources": {"incident_id": {"kind": "prompt"}, "expected_severity": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-debugger-03",
+      "title": "Correct identity incident severity",
+      "prompt": "Incident INC-377 in identity-service is marked P2, but the evidence shows only a minor delayed batch. Inspect the evidence, set severity to P3, and verify.",
+      "role": "debugger",
+      "relevant_tools": ["incident_evidence_read", "incident_severity_update", "incident_resolution_verify"],
+      "irrelevant_tools": ["incident_timeline_read", "incident_alert_acknowledge", "deployment_log_read"],
+      "initial_state": {"incident_id": "INC-377", "service": "identity-service", "severity": "P2", "evidence": "one non-interactive batch is delayed with no user impact"},
+      "expected_state": {"severity": "P3"},
+      "required_capabilities": ["incident.read", "incident.mutate", "incident.verify"],
+      "targets": [
+        {"tool": "incident_evidence_read", "arguments": {"incident_id": "INC-377"}, "argument_sources": {"incident_id": {"kind": "prompt"}}},
+        {"tool": "incident_severity_update", "arguments": {"incident_id": "INC-377", "severity": "P3"}, "argument_sources": {"incident_id": {"kind": "prompt"}, "severity": {"kind": "prompt"}}},
+        {"tool": "incident_resolution_verify", "arguments": {"incident_id": "INC-377", "expected_severity": "P3"}, "argument_sources": {"incident_id": {"kind": "prompt"}, "expected_severity": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-debugger-04",
+      "title": "Correct ledger incident severity",
+      "prompt": "Incident INC-512 in ledger-service is marked P3 although reconciliation is blocked globally. Inspect the evidence, set severity to P1, and verify the correction.",
+      "role": "debugger",
+      "relevant_tools": ["incident_evidence_read", "incident_severity_update", "incident_resolution_verify"],
+      "irrelevant_tools": ["incident_owner_lookup", "incident_trace_search", "deployment_cancel"],
+      "initial_state": {"incident_id": "INC-512", "service": "ledger-service", "severity": "P3", "evidence": "global reconciliation cannot complete and balances are stale"},
+      "expected_state": {"severity": "P1"},
+      "required_capabilities": ["incident.read", "incident.mutate", "incident.verify"],
+      "targets": [
+        {"tool": "incident_evidence_read", "arguments": {"incident_id": "INC-512"}, "argument_sources": {"incident_id": {"kind": "prompt"}}},
+        {"tool": "incident_severity_update", "arguments": {"incident_id": "INC-512", "severity": "P1"}, "argument_sources": {"incident_id": {"kind": "prompt"}, "severity": {"kind": "prompt"}}},
+        {"tool": "incident_resolution_verify", "arguments": {"incident_id": "INC-512", "expected_severity": "P1"}, "argument_sources": {"incident_id": {"kind": "prompt"}, "expected_severity": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-researcher-01",
+      "title": "Compare checkout latency evidence",
+      "prompt": "Read evidence records LAT-A and LAT-B for checkout latency, determine which named service has the lower value, and submit a report for topic checkout-latency citing both record IDs.",
+      "role": "researcher",
+      "relevant_tools": ["knowledge_record_read", "research_report_submit"],
+      "irrelevant_tools": ["documentation_search", "metrics_query", "documentation_page_update"],
+      "initial_state": {"records": {"LAT-A": {"metric": "checkout latency", "value": 240, "unit": "ms", "label": "service-orchid", "source": "load-test-17"}, "LAT-B": {"metric": "checkout latency", "value": 180, "unit": "ms", "label": "service-lotus", "source": "load-test-18"}}},
+      "expected_state": {"report": {"topic": "checkout-latency", "conclusion": "service-lotus", "evidence_ids": ["LAT-A", "LAT-B"]}},
+      "required_capabilities": ["research.read", "research.read", "research.report"],
+      "prohibited_capabilities": ["*.mutate"],
+      "targets": [
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "LAT-A"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "LAT-B"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "research_report_submit", "arguments": {"topic": "checkout-latency", "conclusion": "service-lotus", "evidence_ids": ["LAT-A", "LAT-B"]}, "argument_sources": {"topic": {"kind": "prompt"}, "conclusion": {"kind": "observation", "state_path": "records.LAT-B.label"}, "evidence_ids": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-researcher-02",
+      "title": "Compare indexing throughput evidence",
+      "prompt": "Read records TPS-C and TPS-D for indexing throughput, determine which named engine has the higher value, and submit a report for topic indexing-throughput citing both IDs.",
+      "role": "researcher",
+      "relevant_tools": ["knowledge_record_read", "research_report_submit"],
+      "irrelevant_tools": ["knowledge_index_search", "dashboard_read", "issue_comment_add"],
+      "initial_state": {"records": {"TPS-C": {"metric": "indexing throughput", "value": 810, "unit": "docs/s", "label": "engine-cobalt", "source": "benchmark-31"}, "TPS-D": {"metric": "indexing throughput", "value": 940, "unit": "docs/s", "label": "engine-ember", "source": "benchmark-32"}}},
+      "expected_state": {"report": {"topic": "indexing-throughput", "conclusion": "engine-ember", "evidence_ids": ["TPS-C", "TPS-D"]}},
+      "required_capabilities": ["research.read", "research.read", "research.report"],
+      "prohibited_capabilities": ["*.mutate"],
+      "targets": [
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "TPS-C"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "TPS-D"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "research_report_submit", "arguments": {"topic": "indexing-throughput", "conclusion": "engine-ember", "evidence_ids": ["TPS-C", "TPS-D"]}, "argument_sources": {"topic": {"kind": "prompt"}, "conclusion": {"kind": "observation", "state_path": "records.TPS-D.label"}, "evidence_ids": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-researcher-03",
+      "title": "Compare recovery time evidence",
+      "prompt": "Read recovery records RTO-E and RTO-F, identify which named region has the shorter recovery time, and submit a report for topic recovery-time citing both records.",
+      "role": "researcher",
+      "relevant_tools": ["knowledge_record_read", "research_report_submit"],
+      "irrelevant_tools": ["source_freshness_check", "deployment_start", "message_send"],
+      "initial_state": {"records": {"RTO-E": {"metric": "recovery time", "value": 19, "unit": "min", "label": "region-east", "source": "drill-44"}, "RTO-F": {"metric": "recovery time", "value": 11, "unit": "min", "label": "region-west", "source": "drill-45"}}},
+      "expected_state": {"report": {"topic": "recovery-time", "conclusion": "region-west", "evidence_ids": ["RTO-E", "RTO-F"]}},
+      "required_capabilities": ["research.read", "research.read", "research.report"],
+      "prohibited_capabilities": ["*.mutate"],
+      "targets": [
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "RTO-E"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "RTO-F"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "research_report_submit", "arguments": {"topic": "recovery-time", "conclusion": "region-west", "evidence_ids": ["RTO-E", "RTO-F"]}, "argument_sources": {"topic": {"kind": "prompt"}, "conclusion": {"kind": "observation", "state_path": "records.RTO-F.label"}, "evidence_ids": {"kind": "prompt"}}}
+      ]
+    },
+    {
+      "task_id": "live-researcher-04",
+      "title": "Compare error-rate evidence",
+      "prompt": "Read records ERR-G and ERR-H for API error rate, determine which named gateway has the lower percentage, and submit a report for topic api-error-rate citing both IDs.",
+      "role": "researcher",
+      "relevant_tools": ["knowledge_record_read", "research_report_submit"],
+      "irrelevant_tools": ["error_budget_read", "audit_event_search", "alert_rule_update"],
+      "initial_state": {"records": {"ERR-G": {"metric": "API error rate", "value": 1.8, "unit": "%", "label": "gateway-garnet", "source": "telemetry-52"}, "ERR-H": {"metric": "API error rate", "value": 0.7, "unit": "%", "label": "gateway-harbor", "source": "telemetry-53"}}},
+      "expected_state": {"report": {"topic": "api-error-rate", "conclusion": "gateway-harbor", "evidence_ids": ["ERR-G", "ERR-H"]}},
+      "required_capabilities": ["research.read", "research.read", "research.report"],
+      "prohibited_capabilities": ["*.mutate"],
+      "targets": [
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "ERR-G"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "knowledge_record_read", "arguments": {"record_id": "ERR-H"}, "argument_sources": {"record_id": {"kind": "prompt"}}},
+        {"tool": "research_report_submit", "arguments": {"topic": "api-error-rate", "conclusion": "gateway-harbor", "evidence_ids": ["ERR-G", "ERR-H"]}, "argument_sources": {"topic": {"kind": "prompt"}, "conclusion": {"kind": "observation", "state_path": "records.ERR-H.label"}, "evidence_ids": {"kind": "prompt"}}}
+      ]
+    }
+  ]
+}

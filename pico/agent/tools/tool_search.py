@@ -17,11 +17,14 @@ prefix 的 System+Messages 之前，动态列表会使后续全部失效。代�
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Mapping
 
 from pico.agent.tools.base import Tool
+from pico.agent.tools.discovery import ToolSourceKind
 from pico.agent.tools.execution import ToolExecutionContext, ToolInvocation
-from pico.agent.tools.tool_index import ToolIndex
+from pico.agent.tools.role_profile import RoleProfile, get_role_profile
+from pico.agent.tools.tool_index import ToolIndex, ToolRetrievalResult
 from pico.token_wise.base import TokenStrategy
 
 if TYPE_CHECKING:
@@ -47,6 +50,129 @@ DEFAULT_ALWAYS_VISIBLE: tuple[str, ...] = (
 TOOL_CALL_NAME: str = "tool_call"
 # 元工具在功能开启时始终注册，但绝不进入目录。
 META_TOOL_NAMES: frozenset[str] = frozenset({"tool_search", TOOL_CALL_NAME})
+ZERO_HIT_FALLBACK_THRESHOLD = 2
+ZERO_HIT_FALLBACK_REASON = "repeated_zero_hit_tool_search"
+UNKNOWN_TARGET_FALLBACK_REASON = "unknown_tool_call_target"
+
+
+@dataclass(frozen=True)
+class ToolDisclosureView:
+    """Immutable evidence for the Tool schemas visible to one Provider call.
+
+    The serialized payload is captured once so budgeting and request construction
+    cannot independently filter the registry.  ``provider_tools`` returns a fresh
+    mutable projection because Provider adapters may annotate definitions in place;
+    those annotations cannot mutate this visibility snapshot.
+    """
+
+    mode: str
+    _payload: str
+    visible_names: tuple[str, ...]
+    _is_none: bool = False
+
+    @classmethod
+    def capture(
+        cls,
+        tools: list[dict[str, Any]] | None,
+        *,
+        mode: str,
+    ) -> "ToolDisclosureView":
+        definitions = tools or []
+        return cls(
+            mode=mode,
+            _payload=json.dumps(definitions, ensure_ascii=False),
+            visible_names=tuple(definition["function"]["name"] for definition in definitions),
+            _is_none=tools is None,
+        )
+
+    @property
+    def visible_count(self) -> int:
+        return len(self.visible_names)
+
+    def provider_tools(self) -> list[dict[str, Any]] | None:
+        return None if self._is_none else json.loads(self._payload)
+
+
+@dataclass(frozen=True)
+class ToolDisclosureFallbackEvidence:
+    fallback_used: bool
+    fallback_reason: str | None
+    activation_iteration: int | None
+    zero_hits_before_fallback: int
+    provider_calls_before_fallback: int
+    provider_calls_after_fallback: int
+    recovery_succeeded: bool | None
+
+
+@dataclass
+class TurnToolDisclosureState:
+    """Ephemeral bounded fallback state for one independent Runtime Turn."""
+
+    progressive_enabled: bool
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    activation_iteration: int | None = None
+    zero_hit_searches: int = 0
+    consecutive_zero_hits: int = 0
+    zero_hits_before_fallback: int = 0
+    provider_calls_before_fallback: int = 0
+    provider_calls_after_fallback: int = 0
+
+    def provider_view(
+        self,
+        normal_view: ToolDisclosureView,
+        full_tools: list[dict[str, Any]],
+    ) -> ToolDisclosureView:
+        if self.fallback_used:
+            return ToolDisclosureView.capture(full_tools, mode="fallback_full")
+        return normal_view
+
+    def record_provider_call(self, mode: str) -> None:
+        if mode == "fallback_full":
+            self.provider_calls_after_fallback += 1
+        else:
+            self.provider_calls_before_fallback += 1
+
+    def observe_search_result(self, *, zero_hit: bool, iteration: int, mode: str) -> bool:
+        if not self.progressive_enabled or self.fallback_used or mode != "progressive":
+            return False
+        if not zero_hit:
+            self.consecutive_zero_hits = 0
+            return False
+        self.zero_hit_searches += 1
+        self.consecutive_zero_hits += 1
+        if self.consecutive_zero_hits < ZERO_HIT_FALLBACK_THRESHOLD:
+            return False
+        return self._activate(ZERO_HIT_FALLBACK_REASON, iteration)
+
+    def observe_unknown_target(self, *, iteration: int, mode: str) -> bool:
+        if not self.progressive_enabled or self.fallback_used or mode != "progressive":
+            return False
+        return self._activate(UNKNOWN_TARGET_FALLBACK_REASON, iteration)
+
+    def _activate(self, reason: str, iteration: int) -> bool:
+        if self.fallback_used:
+            return False
+        self.fallback_used = True
+        self.fallback_reason = reason
+        self.activation_iteration = iteration
+        self.zero_hits_before_fallback = self.zero_hit_searches
+        return True
+
+    def evidence(self, *, recovery_succeeded: bool | None) -> ToolDisclosureFallbackEvidence:
+        return ToolDisclosureFallbackEvidence(
+            fallback_used=self.fallback_used,
+            fallback_reason=self.fallback_reason,
+            activation_iteration=self.activation_iteration,
+            zero_hits_before_fallback=self.zero_hits_before_fallback,
+            provider_calls_before_fallback=self.provider_calls_before_fallback,
+            provider_calls_after_fallback=self.provider_calls_after_fallback,
+            recovery_succeeded=recovery_succeeded,
+        )
+
+
+def is_zero_hit_tool_search_result(result: object) -> bool:
+    return str(result).startswith("No tools matched '")
 
 
 class ToolSearchController:
@@ -64,11 +190,17 @@ class ToolSearchController:
         *,
         always_visible: set[str],
         search_result_limit: int = 10,
+        role_profile: RoleProfile | None = None,
+        role_prior_enabled: bool = False,
+        category_overrides: Mapping[str, str] | None = None,
     ) -> None:
         self._registry = registry
         self.always_visible = set(always_visible) | META_TOOL_NAMES
         self.search_result_limit = search_result_limit
         self._index = ToolIndex()
+        self._role_profile = role_profile or get_role_profile(None)
+        self._role_prior_enabled = role_prior_enabled
+        self._category_overrides = dict(category_overrides or {})
 
     def _catalog_tools(self) -> list[Tool]:
         """返回所有已注册但非 Meta 的 Tool，防止搜索与调用工具自我编目。
@@ -91,7 +223,14 @@ class ToolSearchController:
         每次大型 Catalog LLM call 前调用，确保 Plugin/MCP 热加入可搜索；昂贵 Rebuild 是否需要由
         ToolIndex.ensure 的 name/description/parameters Signature 决定。
         """
-        self._index.ensure(self._catalog_tools())
+        tools = self._catalog_tools()
+        metadata = [self._registry.discovery_metadata(tool.name) for tool in tools]
+        projected = [item for item in metadata if item is not None]
+        projected = [
+            replace(item, category=self._category_overrides.get(item.name, item.category))
+            for item in projected
+        ]
+        self._index.ensure(tools, metadata=projected)
 
     def visible_names(self) -> set[str]:
         return self.always_visible
@@ -103,7 +242,7 @@ class ToolSearchController:
         Tool，已热删除项跳过；完整 Schema 让模型可直接进入 ``tool_call``，无需 separate describe
         round-trip。结果顺序沿用 BM25 rank，方法不把 Tool 加入 always-visible set。
         """
-        names = self._index.search(query, limit or self.search_result_limit)
+        names = self.retrieve(query, limit).ranked_names
         hits = []
         for name in names:
             tool = self._registry.get(name)
@@ -117,6 +256,45 @@ class ToolSearchController:
                 }
             )
         return hits
+
+    def retrieve(self, query: str, limit: int | None = None) -> ToolRetrievalResult:
+        """Return immutable ranking evidence without changing Tool visibility or authority."""
+        requested_k = limit or self.search_result_limit
+        index_limit = 2**31 - 1 if self._role_prior_enabled else requested_k
+        result = self._index.retrieve(query, index_limit)
+        if not self._role_prior_enabled or self._role_profile.name.value == "general":
+            return replace(result, selected_role=self._role_profile.name.value)
+        ranked = sorted(
+            result.hits,
+            key=lambda hit: (
+                -(hit.base_score + self._role_profile.prior_for(hit.metadata)),
+                hit.rank,
+            ),
+        )
+        from pico.agent.tools.tool_index import ToolRetrievalHit
+
+        return ToolRetrievalResult(
+            query=result.query,
+            catalog_signature=result.catalog_signature,
+            total_searchable_tools=result.total_searchable_tools,
+            requested_k=requested_k,
+            effective_k=min(max(requested_k, 0), result.total_searchable_tools),
+            selected_role=self._role_profile.name.value,
+            hits=tuple(
+                ToolRetrievalHit(
+                    rank=rank,
+                    score=hit.base_score + self._role_profile.prior_for(hit.metadata),
+                    metadata=hit.metadata,
+                    base_score=hit.base_score,
+                    role_prior=self._role_profile.prior_for(hit.metadata),
+                    final_score=hit.base_score + self._role_profile.prior_for(hit.metadata),
+                )
+                for rank, hit in enumerate(
+                    ranked[: min(max(requested_k, 0), result.total_searchable_tools)],
+                    start=1,
+                )
+            ),
+        )
 
     def resolve_invocation(
         self,
@@ -165,7 +343,7 @@ class ToolSearchController:
         invocation = self.resolve_invocation(name, arguments, context or ToolExecutionContext())
         if invocation is None:
             return "Error: 'arguments' must be a JSON object."
-        execution = await self._registry.execute_invocation(invocation)
+        execution = await self._registry.execute_target(invocation, routed_via=TOOL_CALL_NAME)
         return execution.result
 
 
@@ -176,6 +354,8 @@ class ToolSearchTool(Tool):
     可交给 `tool_call`。无命中返回提示扩大关键词的普通文本。Tool 只搜索本地 Index，不执行
     命中能力，也不改变 Visible Set。
     """
+
+    discovery_source_kind = ToolSourceKind.META
 
     def __init__(self, controller: ToolSearchController) -> None:
         self._ctrl = controller
@@ -227,6 +407,8 @@ class ToolCallTool(Tool):
     让 ToolEvent 显示实际目标。`resolve_invocation` 还使 execute_many 在并发判定前看到目标 Tool
     capability，而不是错误把 Meta Tool 当作安全 Read。
     """
+
+    discovery_source_kind = ToolSourceKind.META
 
     def __init__(self, controller: ToolSearchController) -> None:
         self._ctrl = controller
@@ -302,24 +484,36 @@ class ToolSearchStrategy(TokenStrategy):
     def name(self) -> str:
         return "tool_search"
 
+    def disclosure_view(
+        self,
+        tools: list[dict[str, Any]] | None,
+    ) -> ToolDisclosureView:
+        """Select the exact Provider-visible schemas and record why.
+
+        This is the sole filtering implementation.  AgentLoop captures this view
+        before context assembly and skips this strategy when later applying the
+        remaining request decorators, while direct callers of ``before_llm_call``
+        retain the historical behavior below.
+        """
+        if not tools:
+            return ToolDisclosureView.capture(tools, mode="full")
+        self._ctrl.refresh()
+        catalog_size = sum(1 for t in tools if t["function"]["name"] not in META_TOOL_NAMES)
+        if catalog_size <= self._compaction_threshold:
+            out = [t for t in tools if t["function"]["name"] not in META_TOOL_NAMES]
+            return ToolDisclosureView.capture(out, mode="full")
+        present = {t["function"]["name"] for t in tools}
+        if not META_TOOL_NAMES.issubset(present):
+            return ToolDisclosureView.capture(tools, mode="fail_open_full")
+        visible = self._ctrl.visible_names()
+        out = [t for t in tools if t["function"]["name"] in visible]
+        return ToolDisclosureView.capture(out, mode="progressive")
+
     async def before_llm_call(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         model: str,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, str]:
-        if not tools:
-            return messages, tools, model
-        self._ctrl.refresh()
-        catalog_size = sum(1 for t in tools if t["function"]["name"] not in META_TOOL_NAMES)
-        if catalog_size <= self._compaction_threshold:
-            out = [t for t in tools if t["function"]["name"] not in META_TOOL_NAMES]
-            return messages, out, model
-        present = {t["function"]["name"] for t in tools}
-        if not META_TOOL_NAMES.issubset(present):
-            # 元工具不可用时，例如被 disabled_tools 移除，直接暴露全部工具；
-            # 不要将已编目的工具困在模型无法调用的搜索之后。
-            return messages, tools, model
-        visible = self._ctrl.visible_names()
-        out = [t for t in tools if t["function"]["name"] in visible]
-        return messages, out, model
+        view = self.disclosure_view(tools)
+        return messages, view.provider_tools(), model

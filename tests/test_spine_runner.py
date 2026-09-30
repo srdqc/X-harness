@@ -52,6 +52,13 @@ def test_turn_outcome_is_frozen_with_usage_reply_and_tool_evidence():
         "context_path",
         "context_fallback_reason",
         "skill_source_failures",
+        "tool_disclosure_fallback_used",
+        "tool_disclosure_fallback_reason",
+        "tool_disclosure_fallback_iteration",
+        "tool_disclosure_zero_hits_before_fallback",
+        "tool_disclosure_provider_calls_before_fallback",
+        "tool_disclosure_provider_calls_after_fallback",
+        "tool_disclosure_recovery_succeeded",
     }
     with pytest.raises(dataclasses.FrozenInstanceError):
         o.explicit_reply = False

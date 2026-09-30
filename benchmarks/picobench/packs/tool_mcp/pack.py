@@ -5,6 +5,11 @@ from typing import Protocol
 from benchmarks.picobench.fixtures.mcp import (
     MCP_CATALOG_SIZE,
     catalog_digest,
+    live_catalog_digest_v2,
+)
+from benchmarks.picobench.fixtures.mcp.live_catalog import (
+    LIVE_MCP_CATALOG_SIZE,
+    live_catalog_digest,
 )
 from benchmarks.picobench.protocol import TrialContext, TrialExecution
 from benchmarks.picobench.records import (
@@ -14,6 +19,8 @@ from benchmarks.picobench.records import (
 )
 from benchmarks.picobench.schema import PackDefinition, PairSpec, VariantSpec
 
+from .live_verifier import live_verifier_code_digest
+from .live_verifier_v2 import live_verifier_v2_code_digest
 from .metrics import (
     TOOL_SCHEMA_ESTIMATOR_DIGEST,
     TOOL_SCHEMA_ESTIMATOR_ID,
@@ -36,6 +43,24 @@ _REQUIRED_METRICS = frozenset(
         "initial_visible_catalog_tool_count",
         "visible_tool_schema_tokens_per_call",
         "trial_total_estimated_visible_tool_schema_tokens",
+        "tool_array_schema_tokens_per_call",
+        "cumulative_tool_array_schema_tokens",
+        "in_band_disclosure_tokens_per_call",
+        "cumulative_in_band_disclosure_tokens",
+        "total_disclosure_proxy",
+        "unique_in_band_disclosure_tokens_per_call",
+        "cumulative_unique_in_band_disclosure_tokens",
+        "provider_visible_in_band_disclosure_tokens_per_call",
+        "cumulative_provider_visible_in_band_disclosure_tokens",
+        "cumulative_provider_visible_disclosure_tokens",
+        "fallback_count",
+        "fallback_rate",
+        "fallback_reason_counts",
+        "provider_attempts_before_fallback",
+        "provider_attempts_after_fallback",
+        "success_after_fallback",
+        "average_visible_tool_count",
+        "peak_visible_tool_count",
         "schema_estimator_id",
         "schema_estimator_digest",
         "meta_tool_invocations",
@@ -45,6 +70,16 @@ _REQUIRED_METRICS = frozenset(
         "exact_target_repeat_rate",
         "normalized_target_call_count",
         "target_call_records",
+        "tool_retrieval_query_count",
+        "tool_retrieval_evidence",
+        "target_recall_at_1",
+        "target_recall_at_3",
+        "target_recall_at_5",
+        "first_target_retrieval_rank",
+        "target_retrieval_mrr",
+        "zero_hit_count",
+        "zero_hit_rate",
+        "wrong_target_ranking_evidence",
         "provider_model",
         "actual_model_names",
         "generation_settings",
@@ -61,6 +96,17 @@ _REQUIRED_METRICS = frozenset(
         "usage_complete",
         "cost_complete",
         "end_to_end_latency_ms",
+        "selected_role",
+        "role_prompt_tokens_per_call",
+        "cumulative_role_prompt_tokens",
+        "off_role_tool_selection_count",
+        "off_role_tool_selection_rate",
+        "irrelevant_ranked_before_target_count",
+        "evidence_before_first_mutation",
+        "verification_after_mutation",
+        "repository_inspection_before_edit",
+        "verification_after_edit",
+        "unnecessary_mutation_count",
     }
 )
 
@@ -86,6 +132,13 @@ class ToolMCPPack:
         self._tasks = {task.task_id: task for task in load_tool_mcp_tasks(self.track)}
 
     def definition(self) -> PackDefinition:
+        if self.track in {
+            ToolMCPTrack.LIVE_SOLVABLE_V1,
+            ToolMCPTrack.LIVE_SOLVABLE_V2,
+        }:
+            return self._live_solvable_definition()
+        if self.track is ToolMCPTrack.ROLE_EXPERIMENT:
+            return self._role_experiment_definition()
         pack_id = "tool-mcp" if self.track is ToolMCPTrack.FORMAL else "tool-mcp-calibration"
         return PackDefinition(
             pack_id=pack_id,
@@ -122,6 +175,142 @@ class ToolMCPPack:
                 "result_scope": (
                     "exploratory_eight_task_pack" if self.track is ToolMCPTrack.FORMAL else "calibration_only"
                 ),
+            },
+        )
+
+    def _role_experiment_definition(self) -> PackDefinition:
+        variants = (
+            VariantSpec(
+                variant_id="role-full",
+                settings={
+                    "tool_disclosure": "all_tools",
+                    "role_prompt": False,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="role-prog",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": False,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="role-prompt",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": True,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="role-aware",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": True,
+                    "role_prior": True,
+                },
+            ),
+        )
+        return PackDefinition(
+            pack_id="tool-mcp-role-experiment",
+            tasks=tuple(task.to_task_spec() for task in self._tasks.values()),
+            variants=variants,
+            pairs=(
+                PairSpec(
+                    treatment_axis="tool_disclosure",
+                    control_variant_id=variants[0].variant_id,
+                    treatment_variant_id=variants[1].variant_id,
+                ),
+                PairSpec(
+                    treatment_axis="role_prompt",
+                    control_variant_id=variants[1].variant_id,
+                    treatment_variant_id=variants[2].variant_id,
+                ),
+                PairSpec(
+                    treatment_axis="role_prior",
+                    control_variant_id=variants[2].variant_id,
+                    treatment_variant_id=variants[3].variant_id,
+                ),
+            ),
+            identity={
+                "claim_reducer": "experimental_role_v1",
+                "task_set_digest": tool_mcp_task_set_digest(self.track),
+                "mcp_catalog_digest": catalog_digest(),
+                "mcp_verifier_digest": mcp_verifier_code_digest(),
+                "mcp_catalog_size": MCP_CATALOG_SIZE,
+                "mcp_transport": "stdio",
+                "schema_estimator_id": TOOL_SCHEMA_ESTIMATOR_ID,
+                "schema_estimator_digest": TOOL_SCHEMA_ESTIMATOR_DIGEST,
+                "max_tool_iterations": TOOL_MCP_MAX_TOOL_ITERATIONS,
+                "result_scope": "experimental_role_comparison",
+            },
+        )
+
+    def _live_solvable_definition(self) -> PackDefinition:
+        version = "v2" if self.track is ToolMCPTrack.LIVE_SOLVABLE_V2 else "v1"
+        variants = (
+            VariantSpec(
+                variant_id="live-full",
+                settings={
+                    "tool_disclosure": "all_tools",
+                    "role_prompt": False,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="live-progressive",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": False,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="live-role-aware",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": True,
+                    "role_prior": True,
+                },
+            ),
+        )
+        return PackDefinition(
+            pack_id=f"tool-mcp-live-solvable-{version}",
+            tasks=tuple(task.to_task_spec() for task in self._tasks.values()),
+            variants=variants,
+            pairs=(
+                PairSpec(
+                    treatment_axis="tool_disclosure",
+                    control_variant_id=variants[0].variant_id,
+                    treatment_variant_id=variants[1].variant_id,
+                ),
+                PairSpec(
+                    treatment_axis="role_guidance",
+                    control_variant_id=variants[1].variant_id,
+                    treatment_variant_id=variants[2].variant_id,
+                ),
+            ),
+            identity={
+                "claim_reducer": f"live_solvable_{version}",
+                "task_set_digest": tool_mcp_task_set_digest(self.track),
+                "mcp_catalog_digest": (
+                    live_catalog_digest_v2()
+                    if self.track is ToolMCPTrack.LIVE_SOLVABLE_V2
+                    else live_catalog_digest()
+                ),
+                "mcp_verifier_digest": (
+                    live_verifier_v2_code_digest()
+                    if self.track is ToolMCPTrack.LIVE_SOLVABLE_V2
+                    else live_verifier_code_digest()
+                ),
+                "mcp_catalog_size": LIVE_MCP_CATALOG_SIZE,
+                "mcp_transport": "stdio",
+                "schema_estimator_id": TOOL_SCHEMA_ESTIMATOR_ID,
+                "schema_estimator_digest": TOOL_SCHEMA_ESTIMATOR_DIGEST,
+                "max_tool_iterations": TOOL_MCP_MAX_TOOL_ITERATIONS,
+                "result_scope": f"live_model_acceptance_{version}",
             },
         )
 

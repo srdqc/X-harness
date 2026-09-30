@@ -30,6 +30,12 @@ def estimate_visible_tool_schema_tokens(
     return len(encoding.encode(canonical_json(tools)))
 
 
+def estimate_in_band_disclosure_tokens(payload: str) -> int:
+    """Count the exact model-visible Tool Search result payload."""
+    encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(payload))
+
+
 def normalize_target_calls(
     events: tuple[ToolEvent, ...],
     *,
@@ -280,5 +286,6 @@ __all__ = [
     "ToolMCPPairMeasurement",
     "assess_tool_mcp_claim",
     "estimate_visible_tool_schema_tokens",
+    "estimate_in_band_disclosure_tokens",
     "normalize_target_calls",
 ]

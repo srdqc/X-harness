@@ -19,7 +19,7 @@ import asyncio
 import json
 import re
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -36,6 +36,7 @@ from pico.agent.loop.recovery import (
 from pico.agent.subagent import SubagentManager
 from pico.agent.tools.ask_user import AskUserTool
 from pico.agent.tools.base import ToolResult
+from pico.agent.tools.discovery import ToolSourceKind
 from pico.agent.tools.execution import ToolExecution, ToolExecutionContext, ToolInvocation
 from pico.agent.tools.file_search import FindTool, GrepTool
 from pico.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -55,7 +56,7 @@ from pico.spine.message import Media
 from pico.spine.runner import current_turn_id
 from pico.spine.turn import Origin
 from pico.tracing import semconv, trace
-from pico.utils.helpers import estimate_prompt_tokens
+from pico.utils.helpers import estimate_prompt_tokens, estimate_prompt_tokens_chain
 from pico.utils.persisted_payload import sanitize_persisted_payload
 
 # 刻意在 ``__init__`` 和 ``_assemble_context_messages`` 内延迟导入 ``pico.context_engine``，以打破运行时
@@ -66,6 +67,7 @@ from pico.utils.persisted_payload import sanitize_persisted_payload
 if TYPE_CHECKING:
     from pico.agent.hook import CompositeHook
     from pico.agent.tools.base import Tool
+    from pico.agent.tools.tool_search import ToolDisclosureFallbackEvidence, ToolDisclosureView
     from pico.call_efficiency import CallEfficiency
     from pico.config.pico import (
         ContextConfig,
@@ -112,6 +114,7 @@ class TurnOutcome:
     checkpoint_status: str | None = None
     edited_files: list[str] = field(default_factory=list)
     error_category: str | None = None
+    tool_disclosure_fallback: "ToolDisclosureFallbackEvidence | None" = None
 
 
 class ProviderTurnError(RuntimeError):
@@ -344,6 +347,15 @@ class AgentLoop:
         # 供 BCP 等需要严格工具子集的评测框架使用。
         self._disabled_tools = set(disabled_tools or [])
         self._tool_search_config = tool_search_config
+        self._tool_search_strategy = None
+        from pico.agent.tools.role_profile import get_role_profile
+
+        self._role_profile = get_role_profile(
+            getattr(tool_search_config, "experimental_role", None)
+        )
+        self._role_prompt_enabled = bool(
+            getattr(tool_search_config, "experimental_role_prompt", False)
+        )
         self.tools = ToolRegistry()
 
         # Context Engine 是唯一的 ContextAssembler。在 self.tools 之后于此构建，使工厂能将
@@ -533,10 +545,14 @@ class AgentLoop:
         函数内延迟导入是为避开 `pico.agent.__init__` 的循环导入边界。
         """
         allowed_dir = self.workspace if self.restrict_to_workspace else None
+
+        def register_builtin(tool: Tool) -> None:
+            self.tools.register(tool, source_kind=ToolSourceKind.BUILTIN)
+
         for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, GrepTool, FindTool):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
-        self.tools.register(SkillReadTool(self.context.skills))
-        self.tools.register(
+            register_builtin(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        register_builtin(SkillReadTool(self.context.skills))
+        register_builtin(
             ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
@@ -545,25 +561,29 @@ class AgentLoop:
                 executor=self._executor,
             )
         )
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
-        self.tools.register(WebFetchTool(api_key=self.jina_api_key, proxy=self.web_proxy))
-        self.tools.register(MessageTool())
-        self.tools.register(SpawnTool(manager=self.subagents))
+        register_builtin(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
+        register_builtin(WebFetchTool(api_key=self.jina_api_key, proxy=self.web_proxy))
+        register_builtin(MessageTool())
+        register_builtin(SpawnTool(manager=self.subagents))
         # QuestionBroker 按传输层为单例；当传输层（TUI RPC 服务器或网关 hub）存在后，
         # 通过 set_broker 延迟绑定。
-        self.tools.register(AskUserTool())
+        register_builtin(AskUserTool())
         if self.cron_service:
             # 延迟导入：CronTool 所在模块会导入 pico.agent.tools.base，触发 pico.agent.__init__，
             # 后者又导入当前循环模块。在函数作用域导入可打破循环，因为执行
             # _register_default_tools 时 loop.py 已完全加载。
             from pico.proactive_engine.schedulers.cron.tool import CronTool
 
-            self.tools.register(CronTool(self.cron_service))
+            register_builtin(CronTool(self.cron_service))
 
         # 插件贡献的工具最后注册，使插件在有意提供同名工具时能覆盖内置实现。
         # 随后仍会运行 ``_apply_disabled_tools``，因此任何工具都可被移除。
         for tool in self.plugin_tools:
-            self.tools.register(tool, replace=True)
+            self.tools.register(
+                tool,
+                replace=True,
+                source_kind=ToolSourceKind.PLUGIN,
+            )
 
         # 渐进式工具披露最后注册，使其搜索目录覆盖上方全部内置和插件工具。
         # MCP 工具稍后在 ``_connect_mcp`` 中加入；策略每个 Turn 都重读注册表，因此能自动获取。
@@ -582,18 +602,19 @@ class AgentLoop:
                 self.tools,
                 always_visible=always,
                 search_result_limit=cfg.search_result_limit,
+                role_profile=self._role_profile,
+                role_prior_enabled=cfg.experimental_role_prior,
+                category_overrides=cfg.experimental_role_categories,
             )
             self.tools.register(ToolSearchTool(self.tool_search_controller))
             self.tools.register(ToolCallTool(self.tool_search_controller))
             # ``first=True`` 表示在 CacheOptimizer 用 ``cache_control`` 标记最后一个工具前先过滤列表；
             # 否则已标记的工具可能被过滤，导致缓存断点丢失。
-            self.strategies.register(
-                ToolSearchStrategy(
-                    self.tool_search_controller,
-                    compaction_threshold=cfg.compaction_threshold,
-                ),
-                first=True,
+            self._tool_search_strategy = ToolSearchStrategy(
+                self.tool_search_controller,
+                compaction_threshold=cfg.compaction_threshold,
             )
+            self.strategies.register(self._tool_search_strategy, first=True)
 
     # ── 上下文引擎辅助方法 ─────────────────────────────────────────────
 
@@ -609,7 +630,21 @@ class AgentLoop:
             return list(session.messages)
         return session.get_history(max_messages=0)
 
-    def _make_token_budget(self, selected_skills: list[Any] | None = None) -> TokenBudget:
+    def _effective_tool_disclosure_view(self) -> "ToolDisclosureView":
+        """Capture the one Tool visibility decision shared by budget and call."""
+        from pico.agent.tools.tool_search import ToolDisclosureView
+
+        definitions = self.tools.get_definitions()
+        if self._tool_search_strategy is not None:
+            return self._tool_search_strategy.disclosure_view(definitions)
+        return ToolDisclosureView.capture(definitions, mode="full")
+
+    def _make_token_budget(
+        self,
+        selected_skills: list[Any] | None = None,
+        *,
+        tool_definitions: list[dict[str, Any]] | None = None,
+    ) -> TokenBudget:
         """为当前 Context Engine 计算一份保守的单 Turn Prompt 预算。
 
         预算从 `context_window_tokens` 总窗口中依次预留模型最大输出、当前 Tool definitions
@@ -619,11 +654,15 @@ class AgentLoop:
         成可用历史。返回 `TokenBudget`，不裁剪消息本身。
         """
         reserved_output = int(getattr(getattr(self.provider, "generation", None), "max_tokens", 4096) or 4096)
-        tool_tokens = estimate_prompt_tokens([], self.tools.get_definitions())
+        effective_tools = self.tools.get_definitions() if tool_definitions is None else tool_definitions
+        tool_tokens = estimate_prompt_tokens([], effective_tools)
         system_prompt = self.context.build_system_prompt(
             selected_skills,
             include_memory=self.memory_enabled,
         )
+        role_prompt = self._role_prompt_fragment()
+        if role_prompt:
+            system_prompt = f"{system_prompt}\n\n{role_prompt}"
         system_tokens = estimate_prompt_tokens([{"role": "system", "content": system_prompt}])
         available_history = max(
             0,
@@ -636,6 +675,28 @@ class AgentLoop:
             reserved_system=system_tokens,
             available_history=available_history,
         )
+
+    def _role_prompt_fragment(self) -> str:
+        if not self._role_prompt_enabled or not self._role_profile.prompt_fragment:
+            return ""
+        return (
+            f"[Experimental Role: {self._role_profile.name.value}]\n"
+            f"{self._role_profile.prompt_fragment}"
+        )
+
+    def _apply_role_prompt(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        fragment = self._role_prompt_fragment()
+        if not fragment:
+            return messages
+        updated = list(messages)
+        for index, message in enumerate(updated):
+            if message.get("role") != "system" or not isinstance(message.get("content"), str):
+                continue
+            amended = dict(message)
+            amended["content"] = f"{message['content']}\n\n{fragment}"
+            updated[index] = amended
+            return updated
+        return [{"role": "system", "content": fragment}, *updated]
 
     async def _select_skills_for_turn(
         self,
@@ -662,6 +723,7 @@ class AgentLoop:
         channel: str | None = None,
         chat_id: str | None = None,
         selected_skills: list[Any] | None = None,
+        tool_definitions: list[dict[str, Any]] | None = None,
         metadata_sink: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """请求当前 Context Engine 组装主 Agent 本轮实际可见的消息窗口。
@@ -681,13 +743,14 @@ class AgentLoop:
         assembled = await self.context_engine.assemble(
             session_key,
             session_messages,
-            self._make_token_budget(selected_skills),
+            self._make_token_budget(selected_skills, tool_definitions=tool_definitions),
             turn=TurnContext(
                 current_message=current_message,
                 media=media,
                 channel=channel,
                 chat_id=chat_id,
                 selected_skills=selected_skills,
+                tool_definitions=tool_definitions,
             ),
         )
         if metadata_sink is not None:
@@ -1213,6 +1276,41 @@ class AgentLoop:
             await on_token_delta(fallback)
         return fallback
 
+    def _fit_provider_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str,
+        *,
+        protected_start: int,
+    ) -> list[dict[str, Any]]:
+        """Trim old user-led history groups against the exact call payload."""
+        fitted = list(messages)
+        protected_start = min(max(protected_start, 1), len(fitted))
+        reserved_output = int(getattr(getattr(self.provider, "generation", None), "max_tokens", 4096) or 4096)
+        max_prompt = max(1, self.context_window_tokens - reserved_output)
+        while protected_start > 1:
+            estimated, _ = estimate_prompt_tokens_chain(self.provider, model, fitted, tools)
+            if estimated <= max_prompt:
+                break
+            first_user = next(
+                (index for index in range(1, protected_start) if fitted[index].get("role") == "user"),
+                None,
+            )
+            if first_user is None:
+                break
+            next_user = next(
+                (
+                    index
+                    for index in range(first_user + 1, protected_start)
+                    if fitted[index].get("role") == "user"
+                ),
+                protected_start,
+            )
+            del fitted[first_user:next_user]
+            protected_start -= next_user - first_user
+        return fitted
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -1227,6 +1325,9 @@ class AgentLoop:
         usage_sink: dict[str, Any] | None = None,
         drain: Drain | None = None,
         origin: Origin | None = None,
+        initial_disclosure_view: "ToolDisclosureView | None" = None,
+        disclosure_evidence_sink: list[dict[str, Any]] | None = None,
+        fallback_evidence_sink: list["ToolDisclosureFallbackEvidence"] | None = None,
     ) -> tuple[str | None, list[str], list[dict], TurnOutcome]:
         """执行一次有预算的模型—Tool 迭代，并返回回复、证据与明确终态。
 
@@ -1251,6 +1352,18 @@ class AgentLoop:
         tools_used: list[str] = []
         session_key = session_key or ""
         effective_model = model or self.model
+        protected_start = max(1, len(initial_messages) - 1)
+        cumulative_tool_array_tokens = 0
+        from pico.agent.tools.tool_search import (
+            TOOL_CALL_NAME,
+            TurnToolDisclosureState,
+            is_zero_hit_tool_search_result,
+        )
+
+        first_disclosure_view = initial_disclosure_view or self._effective_tool_disclosure_view()
+        disclosure_state = TurnToolDisclosureState(
+            progressive_enabled=first_disclosure_view.mode == "progressive"
+        )
 
         # 记录 Turn 是正常退出还是因迭代上限中断。下游只读取 ``status``，
         # 用于标记影子 Git 提交并写入 ``TurnOutcome``。
@@ -1293,14 +1406,50 @@ class AgentLoop:
                         messages.append({"role": "user", "content": inj_text})
                         logger.info("inject: merged a mid-turn user message")
 
-            tool_defs = self.tools.get_definitions()
+            normal_disclosure_view = (
+                first_disclosure_view if iteration == 1 else self._effective_tool_disclosure_view()
+            )
+            disclosure_view = disclosure_state.provider_view(
+                normal_disclosure_view,
+                self.tools.get_definitions(),
+            )
+            tool_defs = disclosure_view.provider_tools()
 
-            # 先运行历史策略，使工具过滤先于缓存规划。
+            # Tool Search 已在 Context assembly 前形成 immutable view；这里跳过同一
+            # strategy，避免第二次独立过滤。其余策略仍可添加 Provider cache metadata。
             call_messages, call_tools, call_model = await self.strategies.before_llm_call(
                 messages,
                 tool_defs,
                 effective_model,
+                skip=((self._tool_search_strategy,) if self._tool_search_strategy is not None else ()),
             )
+            call_messages = self._fit_provider_messages(
+                call_messages,
+                call_tools,
+                call_model,
+                protected_start=protected_start,
+            )
+            tool_array_tokens = estimate_prompt_tokens([], call_tools)
+            cumulative_tool_array_tokens += tool_array_tokens
+            disclosure_state.record_provider_call(disclosure_view.mode)
+            iteration_budget = self._make_token_budget(tool_definitions=call_tools)
+            if disclosure_evidence_sink is not None:
+                disclosure_evidence_sink.append(
+                    {
+                        "iteration": iteration,
+                        "mode": disclosure_view.mode,
+                        "visible_tool_names": disclosure_view.visible_names,
+                        "visible_tool_count": disclosure_view.visible_count,
+                        "tool_array_schema_tokens": tool_array_tokens,
+                        "cumulative_tool_array_schema_tokens": cumulative_tool_array_tokens,
+                        "available_history_tokens": iteration_budget.available_history,
+                        "fallback_used": disclosure_state.fallback_used,
+                        "fallback_reason": disclosure_state.fallback_reason,
+                        "fallback_activation_iteration": disclosure_state.activation_iteration,
+                        "zero_hit_searches": disclosure_state.zero_hit_searches,
+                        "provider_calls_after_fallback": disclosure_state.provider_calls_after_fallback,
+                    }
+                )
             if on_token_delta is not None or on_reasoning_delta is not None:
                 response = await self._llm_call_stream(
                     messages=call_messages,
@@ -1479,6 +1628,27 @@ class AgentLoop:
                 for tool_call, execution in zip(response.tool_calls, executions, strict=True):
                     result = execution.result
                     messages = self.context.add_tool_result(messages, tool_call.id, tool_call.name, result)
+                    if tool_call.name == "tool_search":
+                        activated = disclosure_state.observe_search_result(
+                            zero_hit=is_zero_hit_tool_search_result(result),
+                            iteration=iteration,
+                            mode=disclosure_view.mode,
+                        )
+                        if activated:
+                            logger.info("Tool disclosure fallback activated: {}", disclosure_state.fallback_reason)
+                    elif tool_call.name == TOOL_CALL_NAME:
+                        target_name = tool_call.arguments.get("name")
+                        if isinstance(target_name, str) and not self.tools.has(target_name):
+                            activated = disclosure_state.observe_unknown_target(
+                                iteration=iteration,
+                                mode=disclosure_view.mode,
+                            )
+                            if activated:
+                                logger.info(
+                                    "Tool disclosure fallback activated: {} target={}",
+                                    disclosure_state.fallback_reason,
+                                    target_name,
+                                )
                     # 跟踪同一工具的连续确定性失败；排除可通过重试清除的短暂错误。
                     if _is_hard_tool_failure(result):
                         if tool_call.name == loop_fail_tool:
@@ -1606,9 +1776,19 @@ class AgentLoop:
         if any(m.get("_recovery_synthetic") for m in messages):
             messages = [m for m in messages if not m.get("_recovery_synthetic")]
 
+        fallback_evidence = disclosure_state.evidence(
+            recovery_succeeded=(
+                disclosure_state.fallback_used
+                and status == "completed"
+                and final_content is not None
+            )
+        )
+        if fallback_evidence_sink is not None:
+            fallback_evidence_sink.append(fallback_evidence)
         outcome = TurnOutcome(
             status=status,
             error_category=error_category,
+            tool_disclosure_fallback=fallback_evidence,
         )
         if self._checkpoint is not None:
             # 每轮快照：一次提交覆盖本轮全部编辑，正常退出和中断退出均如此
@@ -1936,6 +2116,7 @@ class AgentLoop:
             context_messages,
         )
         context_metadata = context_metadata_sink if context_metadata_sink is not None else {}
+        disclosure_view = self._effective_tool_disclosure_view()
         initial_messages = await self._assemble_context_messages(
             session=session,
             session_key=key,
@@ -1944,7 +2125,16 @@ class AgentLoop:
             channel=channel,
             chat_id=chat_id,
             selected_skills=selected_skills or None,
+            tool_definitions=disclosure_view.provider_tools(),
             metadata_sink=context_metadata,
+        )
+        initial_messages = self._apply_role_prompt(initial_messages)
+        role_prompt = self._role_prompt_fragment()
+        context_metadata["experimental_role"] = self._role_profile.name.value
+        context_metadata["role_prompt_tokens"] = (
+            estimate_prompt_tokens([{"role": "system", "content": role_prompt}])
+            if role_prompt
+            else 0
         )
         injected_skill_ids = list(
             context_metadata.get("injected_skill_ids") or self._collect_injected_skill_ids(selected_skills)
@@ -1974,7 +2164,11 @@ class AgentLoop:
             usage_sink=usage_sink,
             drain=drain,
             origin=origin,
+            initial_disclosure_view=disclosure_view,
+            disclosure_evidence_sink=context_metadata.setdefault("tool_disclosure_iterations", []),
         )
+        if outcome.tool_disclosure_fallback is not None:
+            context_metadata["tool_disclosure_fallback"] = asdict(outcome.tool_disclosure_fallback)
         self._stash_recovery(key, outcome)
         if outcome.status == "error":
             raise ProviderTurnError(outcome.error_category or "unknown")
@@ -2319,6 +2513,7 @@ class AgentLoop:
         # message 工具回复虽会让 _process_message 返回 None，但确实已回复，
         # 因此也计作显式回复。
         replied_via_tool = isinstance(message_tool, MessageTool) and message_tool.sent_in_turn
+        fallback_evidence = context_metadata.get("tool_disclosure_fallback") or {}
         return TurnOutcome(
             usage=usage,
             explicit_reply=out is not None or replied_via_tool,
@@ -2329,6 +2524,19 @@ class AgentLoop:
             context_path=context_metadata.get("path"),
             context_fallback_reason=context_metadata.get("fallback_reason"),
             skill_source_failures=tuple(context_metadata.get("skill_source_failures") or ()),
+            tool_disclosure_fallback_used=bool(fallback_evidence.get("fallback_used", False)),
+            tool_disclosure_fallback_reason=fallback_evidence.get("fallback_reason"),
+            tool_disclosure_fallback_iteration=fallback_evidence.get("activation_iteration"),
+            tool_disclosure_zero_hits_before_fallback=int(
+                fallback_evidence.get("zero_hits_before_fallback", 0) or 0
+            ),
+            tool_disclosure_provider_calls_before_fallback=int(
+                fallback_evidence.get("provider_calls_before_fallback", 0) or 0
+            ),
+            tool_disclosure_provider_calls_after_fallback=int(
+                fallback_evidence.get("provider_calls_after_fallback", 0) or 0
+            ),
+            tool_disclosure_recovery_succeeded=fallback_evidence.get("recovery_succeeded"),
         )
 
 

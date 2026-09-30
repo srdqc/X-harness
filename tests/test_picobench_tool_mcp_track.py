@@ -6,12 +6,15 @@ from pathlib import Path
 from benchmarks.picobench.packs.tool_mcp import (
     CALIBRATION_TOOL_MCP_TASK_COUNT,
     FORMAL_TOOL_MCP_TASK_COUNT,
+    ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT,
     SealedMCPReceiptVerifier,
     ToolMCPPack,
     ToolMCPPairMeasurement,
     ToolMCPTrack,
     assess_tool_mcp_claim,
     catalog_definitions,
+    estimate_in_band_disclosure_tokens,
+    estimate_visible_tool_schema_tokens,
     load_tool_mcp_tasks,
     normalize_target_calls,
     reduce_tool_mcp_claim_from_artifacts,
@@ -120,6 +123,89 @@ async def test_tool_mcp_provider_wrapper_does_not_invent_actual_model() -> None:
     assert provider.call_records[0]["model"] is None
 
 
+async def test_tool_mcp_provider_accounts_native_and_new_in_band_disclosure() -> None:
+    class Delegate:
+        async def chat(self, **kwargs):
+            del kwargs
+            return LLMResponse(content="done", model="exact", usage={})
+
+        def classify_error(self, exc=None, content=None):
+            del exc, content
+            return ErrorClassification("unknown")
+
+    provider = _RecordingToolMCPProvider(
+        Delegate(),
+        model="provider/exact-model",
+        generation=GenerationSettings(),
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_search",
+                "description": "search",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_call",
+                "description": "call",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+    payload = json.dumps(
+        [
+            {
+                "name": "hidden",
+                "description": "hidden tool",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        ensure_ascii=False,
+    )
+    base_messages = [{"role": "user", "content": "find a tool"}]
+    search_result = {
+        "role": "tool",
+        "name": "tool_search",
+        "tool_call_id": "search-1",
+        "content": payload,
+    }
+
+    await provider.chat(messages=base_messages, tools=tools, model="provider/exact-model")
+    await provider.chat(messages=[*base_messages, search_result], tools=tools, model="provider/exact-model")
+    await provider.chat(messages=[*base_messages, search_result], tools=tools, model="provider/exact-model")
+    await provider.chat(
+        messages=[
+            *base_messages,
+            search_result,
+            {**search_result, "tool_call_id": "search-2"},
+            {"role": "tool", "name": "read_file", "tool_call_id": "read-1", "content": payload},
+        ],
+        tools=tools,
+        model="provider/exact-model",
+    )
+
+    native = estimate_visible_tool_schema_tokens(tools)
+    in_band = estimate_in_band_disclosure_tokens(payload)
+    assert [record["tool_array_schema_tokens"] for record in provider.call_records] == [native] * 4
+    assert [record["in_band_disclosure_tokens"] for record in provider.call_records] == [0, in_band, 0, in_band]
+    assert provider.call_records[-1]["cumulative_tool_array_schema_tokens"] == native * 4
+    assert provider.call_records[-1]["cumulative_in_band_disclosure_tokens"] == in_band * 2
+    assert provider.call_records[-1]["total_disclosure_proxy"] == native * 4 + in_band * 2
+    assert [
+        record["provider_visible_in_band_disclosure_tokens"]
+        for record in provider.call_records
+    ] == [0, in_band, in_band, in_band * 2]
+    assert provider.call_records[-1]["cumulative_unique_in_band_disclosure_tokens"] == in_band * 2
+    assert provider.call_records[-1]["cumulative_provider_visible_in_band_disclosure_tokens"] == in_band * 4
+    assert provider.call_records[-1]["cumulative_provider_visible_disclosure_tokens"] == (
+        native * 4 + in_band * 4
+    )
+
+
 def test_tool_mcp_detects_budget_exhaustion_hidden_by_final_synthesis() -> None:
     assert (
         _effective_failure_category(
@@ -175,6 +261,36 @@ def test_tool_mcp_pack_freezes_catalog_tasks_and_single_axis(
     )
     assert len(plan.trials) == 8 * 2 * 3 == 48
     assert len(plan.pairs) == 8 * 3 == 24
+
+
+def test_role_experiment_pack_has_explicit_tasks_and_four_separable_variants(
+    tmp_path: Path,
+) -> None:
+    tasks = load_tool_mcp_tasks(ToolMCPTrack.ROLE_EXPERIMENT)
+    assert len(tasks) == ROLE_EXPERIMENT_TOOL_MCP_TASK_COUNT == 3
+    assert {task.role for task in tasks} == {"coder", "debugger", "researcher"}
+    assert all(task.search_query and task.relevant_tools and task.irrelevant_tools for task in tasks)
+
+    pack = ToolMCPPack(ToolMCPTrack.ROLE_EXPERIMENT)
+    definition = pack.definition()
+    assert definition.pack_id == "tool-mcp-role-experiment"
+    assert [variant.variant_id for variant in definition.variants] == [
+        "role-full",
+        "role-prog",
+        "role-prompt",
+        "role-aware",
+    ]
+    assert [pair.treatment_axis for pair in definition.pairs] == [
+        "tool_disclosure",
+        "role_prompt",
+        "role_prior",
+    ]
+    plan = compile_plan(
+        _experiment(tmp_path, pack_id=definition.pack_id),
+        (pack,),
+    )
+    assert len(plan.trials) == 3 * 4 * 3 == 36
+    assert len(plan.pairs) == 3 * 3 * 3 == 27
 
 
 def test_target_call_normalization_keeps_invalid_unknown_and_exact_repeats() -> None:

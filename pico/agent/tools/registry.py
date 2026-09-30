@@ -13,7 +13,9 @@ from dataclasses import replace
 from typing import Any
 
 from pico.agent.tools.base import Tool, ToolResult
+from pico.agent.tools.discovery import ToolDiscoveryMetadata, ToolSourceKind
 from pico.agent.tools.execution import (
+    ResolvedToolInvocation,
     ToolEffect,
     ToolExecution,
     ToolExecutionContext,
@@ -46,9 +48,18 @@ class ToolRegistry:
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
         self._tools: dict[str, Tool] = {}
+        self._discovery: dict[str, ToolDiscoveryMetadata] = {}
         self._max_parallel = max_parallel
 
-    def register(self, tool: Tool, *, replace: bool = False) -> None:
+    def register(
+        self,
+        tool: Tool,
+        *,
+        replace: bool = False,
+        source_kind: ToolSourceKind | None = None,
+        source_id: str | None = None,
+        category: str | None = None,
+    ) -> None:
         """按稳定名称注册一个 Tool，并显式控制同名覆盖。
 
         名称已存在且 ``replace=False`` 时抛 `ValueError`，防止内置能力被意外替换；Plugin 等
@@ -58,6 +69,14 @@ class ToolRegistry:
         if tool.name in self._tools and not replace:
             raise ValueError(f"Tool '{tool.name}' is already registered")
         self._tools[tool.name] = tool
+        self._discovery[tool.name] = ToolDiscoveryMetadata(
+            name=tool.name,
+            description=tool.description,
+            source_kind=source_kind or tool.discovery_source_kind,
+            source_id=source_id if source_id is not None else tool.discovery_source_id,
+            category=category if category is not None else tool.discovery_category,
+            effect=tool.capability.effect,
+        )
 
     def unregister(self, name: str) -> None:
         """按 ``name`` 移除 Tool，名称不存在时保持 no-op。
@@ -66,6 +85,7 @@ class ToolRegistry:
         自有资源。该幂等语义使宽泛 disabled list 可以安全覆盖不同构建的注册表。
         """
         self._tools.pop(name, None)
+        self._discovery.pop(name, None)
 
     def get(self, name: str) -> Tool | None:
         """返回 ``name`` 对应的 Tool 实例，不存在时返回 ``None``。
@@ -82,6 +102,26 @@ class ToolRegistry:
         与 disabled 策略可能在更高层继续缩小模型可见集合。
         """
         return name in self._tools
+
+    def discovery_metadata(self, name: str) -> ToolDiscoveryMetadata | None:
+        """Project current descriptive metadata without granting execution authority."""
+        tool = self._tools.get(name)
+        registered = self._discovery.get(name)
+        if tool is None or registered is None:
+            return None
+        return replace(
+            registered,
+            description=tool.description,
+            effect=tool.capability.effect,
+        )
+
+    def discovery_catalog(self) -> tuple[ToolDiscoveryMetadata, ...]:
+        """Return an immutable, registration-ordered snapshot of discovery facts."""
+        return tuple(
+            metadata
+            for name in self._tools
+            if (metadata := self.discovery_metadata(name)) is not None
+        )
 
     def get_definitions(self) -> list[dict[str, Any]]:
         """按注册顺序返回全部 Tool 的 OpenAI function definitions。
@@ -162,6 +202,24 @@ class ToolRegistry:
             return ToolResult(f"Error executing {name}: {str(e)}" + _hint, failed=True)
 
     async def execute_invocation(self, invocation: ToolInvocation) -> ToolExecution:
+        return await self.execute_target(invocation)
+
+    async def execute_target(
+        self,
+        invocation: ToolInvocation,
+        *,
+        routed_via: str | None = None,
+    ) -> ToolExecution:
+        """Resolve and execute one concrete Registry target through the common seam.
+
+        ``routed_via`` identifies a transport/meta Tool such as ``tool_call``; it
+        never substitutes for the concrete target name or changes Registry lookup.
+        Missing targets retain the normal ``execute`` failure contract.
+        """
+        resolved = self.resolve_target(invocation, routed_via=routed_via)
+        if resolved is not None:
+            return await self.execute_resolved(resolved)
+
         started = time.perf_counter_ns()
         result = await self.execute(
             invocation.name,
@@ -171,6 +229,54 @@ class ToolRegistry:
         )
         duration_ms = (time.perf_counter_ns() - started) / 1_000_000
         return ToolExecution(invocation=invocation, result=result, duration_ms=duration_ms)
+
+    def resolve_target(
+        self,
+        invocation: ToolInvocation,
+        *,
+        routed_via: str | None = None,
+    ) -> ResolvedToolInvocation | None:
+        """Return the current executable Tool without running or mutating it."""
+        tool = self._tools.get(invocation.name)
+        if tool is None:
+            return None
+        return ResolvedToolInvocation(
+            invocation=invocation,
+            tool=tool,
+            routed_via=routed_via,
+        )
+
+    async def execute_resolved(self, resolved: ResolvedToolInvocation) -> ToolExecution:
+        """Common post-resolution, pre-execution seam for every concrete target."""
+        invocation = resolved.invocation
+        current_tool = self._tools.get(invocation.name)
+        if current_tool is None:
+            started = time.perf_counter_ns()
+            result = await self.execute(
+                invocation.name,
+                invocation.arguments,
+                invocation.context.call_id,
+                invocation.context,
+            )
+            duration_ms = (time.perf_counter_ns() - started) / 1_000_000
+            return ToolExecution(invocation=invocation, result=result, duration_ms=duration_ms)
+        if current_tool is not resolved.tool:
+            resolved = replace(resolved, tool=current_tool)
+
+        started = time.perf_counter_ns()
+        result = await self.execute(
+            invocation.name,
+            invocation.arguments,
+            invocation.context.call_id,
+            invocation.context,
+        )
+        duration_ms = (time.perf_counter_ns() - started) / 1_000_000
+        return ToolExecution(
+            invocation=invocation,
+            result=result,
+            duration_ms=duration_ms,
+            resolved=resolved,
+        )
 
     async def execute_many(
         self,
@@ -240,7 +346,8 @@ class ToolRegistry:
             await on_start(observed)
         execution = await self.execute_invocation(invocation)
         if execution.invocation is not observed:
-            execution = replace(execution, invocation=observed)
+            resolved = self.resolve_target(observed, routed_via=invocation.name)
+            execution = replace(execution, invocation=observed, resolved=resolved)
         if on_complete is not None:
             await on_complete(execution)
         return execution

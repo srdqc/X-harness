@@ -21,6 +21,12 @@ from benchmarks.picobench.fixtures.mcp import (
     catalog_definitions,
     catalog_digest,
 )
+from benchmarks.picobench.fixtures.mcp.live_catalog import (
+    live_catalog_definitions,
+    live_catalog_definitions_v2,
+    live_catalog_digest,
+    live_catalog_digest_v2,
+)
 from benchmarks.picobench.host import RecordingOutlet, RuntimeTrialHost
 from benchmarks.picobench.isolation import TrialIsolation
 from benchmarks.picobench.protocol import TrialContext, TrialExecution
@@ -31,6 +37,7 @@ from benchmarks.picobench.records import (
 )
 from pico.agent.tools.mcp import connect_mcp_servers
 from pico.agent.tools.registry import ToolRegistry
+from pico.agent.tools.tool_index import ToolRetrievalResult
 from pico.agent.tools.tool_search import (
     ToolCallTool,
     ToolSearchController,
@@ -50,16 +57,28 @@ from pico.spine import (
     Origin,
     Source,
     ToolEvent,
+    ToolPhase,
     TurnRequest,
 )
+from pico.utils.helpers import estimate_prompt_tokens
 
+from .live_verifier import SealedLiveStateVerifier
+from .live_verifier_v2 import SealedLiveStateVerifierV2
 from .metrics import (
     TOOL_SCHEMA_ESTIMATOR_DIGEST,
     TOOL_SCHEMA_ESTIMATOR_ID,
+    estimate_in_band_disclosure_tokens,
     estimate_visible_tool_schema_tokens,
     normalize_target_calls,
 )
-from .models import MCPTransportSmokeResult, ToolMCPTask
+from .models import (
+    LIVE_SOLVABLE_TRACKS,
+    MCPTransportSmokeResult,
+    TargetCallRecord,
+    ToolMCPTask,
+    ToolMCPTrack,
+)
+from .tasks import load_tool_mcp_tasks
 from .verifier import SealedMCPReceiptVerifier
 
 _DISABLED_DEFAULT_TOOLS = [
@@ -81,6 +100,26 @@ _DISABLED_DEFAULT_TOOLS = [
 _EXPECTED_CATALOG_NAMES = frozenset(definition.runtime_name for definition in catalog_definitions())
 _MAX_OUTPUT_TOKENS = 1_500
 TOOL_MCP_MAX_TOOL_ITERATIONS = 6
+
+
+def _live_catalog_definitions(track: ToolMCPTrack) -> tuple[Any, ...]:
+    if track is ToolMCPTrack.LIVE_SOLVABLE_V2:
+        return live_catalog_definitions_v2()
+    return live_catalog_definitions()
+
+
+def _expected_catalog_names(track: ToolMCPTrack) -> frozenset[str]:
+    if track in LIVE_SOLVABLE_TRACKS:
+        return frozenset(item.runtime_name for item in _live_catalog_definitions(track))
+    return _EXPECTED_CATALOG_NAMES
+
+
+def _catalog_source_digest(track: ToolMCPTrack) -> str:
+    if track is ToolMCPTrack.LIVE_SOLVABLE_V2:
+        return live_catalog_digest_v2()
+    if track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+        return live_catalog_digest()
+    return catalog_digest()
 
 
 class _ScriptedToolMCPProvider(LLMProvider):
@@ -113,7 +152,7 @@ class _ScriptedToolMCPProvider(LLMProvider):
                         id=f"{self.task.task_id}-search",
                         name="tool_search",
                         arguments={
-                            "query": _search_query(first.tool_name),
+                            "query": self.task.search_query or _search_query(first.tool_name),
                             "limit": 5,
                         },
                     )
@@ -170,6 +209,81 @@ class _RecordingToolMCPProvider(LLMProvider):
         self.tool_payloads: list[list[dict[str, Any]]] = []
         self.call_records: list[dict[str, Any]] = []
         self._request_attempts: dict[str, int] = {}
+        self._seen_search_results: set[str] = set()
+        self._cumulative_tool_array_tokens = 0
+        self._cumulative_in_band_tokens = 0
+        self._cumulative_provider_visible_in_band_tokens = 0
+        self._cumulative_role_prompt_tokens = 0
+
+    @staticmethod
+    def _unwrap_tool_result(content: str, name: str) -> str:
+        if content.startswith(f"[BEGIN UNTRUSTED {name} #"):
+            lines = content.splitlines()
+            if len(lines) >= 3 and lines[-1].startswith(f"[END UNTRUSTED {name} #"):
+                return "\n".join(lines[1:-1])
+        return content
+
+    def _recognized_in_band_disclosures(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[tuple[str, str, int]]:
+        disclosures: list[tuple[str, str, int]] = []
+        for message in messages:
+            if message.get("role") != "tool" or message.get("name") != "tool_search":
+                continue
+            call_id = str(message.get("tool_call_id") or "")
+            if not call_id:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            payload_text = self._unwrap_tool_result(content, "tool_search")
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, list) or not payload:
+                continue
+            if not all(
+                isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and "description" in item
+                and isinstance(item.get("parameters"), dict)
+                for item in payload
+            ):
+                continue
+            disclosures.append((call_id, payload_text, estimate_in_band_disclosure_tokens(payload_text)))
+        return disclosures
+
+    def _new_in_band_disclosure_tokens(
+        self,
+        disclosures: list[tuple[str, str, int]],
+    ) -> int:
+        added = 0
+        for call_id, _payload, tokens in disclosures:
+            if call_id in self._seen_search_results:
+                continue
+            self._seen_search_results.add(call_id)
+            added += tokens
+        return added
+
+    def _fallback_reason_from_messages(self, messages: list[dict[str, Any]]) -> str | None:
+        zero_hits = 0
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            name = str(message.get("name") or "")
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            body = self._unwrap_tool_result(content, name)
+            if name == "tool_search" and body.startswith("No tools matched '"):
+                zero_hits += 1
+            if name == "tool_call" and "not found. Use tool_search" in body:
+                return "unknown_tool_call_target"
+        if zero_hits >= 2:
+            return "repeated_zero_hit_tool_search"
+        return None
 
     async def chat(
         self,
@@ -186,6 +300,24 @@ class _RecordingToolMCPProvider(LLMProvider):
         effective_model = self.model
         tool_payload = to_primitive(tools or [])
         self.tool_payloads.append(tool_payload)
+        tool_array_tokens = estimate_visible_tool_schema_tokens(tool_payload)
+        disclosures = self._recognized_in_band_disclosures(messages)
+        in_band_tokens = self._new_in_band_disclosure_tokens(disclosures)
+        provider_visible_in_band_tokens = sum(tokens for _call_id, _payload, tokens in disclosures)
+        role_prompt_tokens = _role_prompt_tokens(messages)
+        self._cumulative_tool_array_tokens += tool_array_tokens
+        self._cumulative_in_band_tokens += in_band_tokens
+        self._cumulative_provider_visible_in_band_tokens += provider_visible_in_band_tokens
+        self._cumulative_role_prompt_tokens += role_prompt_tokens
+        visible_names = {definition["function"]["name"] for definition in tool_payload}
+        has_meta = {"tool_search", "tool_call"}.issubset(visible_names)
+        disclosure_mode = (
+            "fallback_full"
+            if has_meta and any(name.startswith("mcp_picobench_") for name in visible_names)
+            else "progressive"
+            if has_meta
+            else "full"
+        )
         request_digest = canonical_digest(
             {
                 "messages": messages,
@@ -210,9 +342,27 @@ class _RecordingToolMCPProvider(LLMProvider):
             "temperature": temperature,
             "reasoning_effort": reasoning_effort,
             "visible_tool_count": len(tool_payload),
-            "visible_tool_names": sorted(definition["function"]["name"] for definition in tool_payload),
+            "visible_tool_names": sorted(visible_names),
             "visible_tool_schema_digest": canonical_digest(tool_payload),
-            "estimated_visible_tool_schema_tokens": (estimate_visible_tool_schema_tokens(tool_payload)),
+            "estimated_visible_tool_schema_tokens": tool_array_tokens,
+            "tool_array_schema_tokens": tool_array_tokens,
+            "cumulative_tool_array_schema_tokens": self._cumulative_tool_array_tokens,
+            "in_band_disclosure_tokens": in_band_tokens,
+            "cumulative_in_band_disclosure_tokens": self._cumulative_in_band_tokens,
+            "unique_in_band_disclosure_tokens": in_band_tokens,
+            "cumulative_unique_in_band_disclosure_tokens": self._cumulative_in_band_tokens,
+            "provider_visible_in_band_disclosure_tokens": provider_visible_in_band_tokens,
+            "cumulative_provider_visible_in_band_disclosure_tokens": (self._cumulative_provider_visible_in_band_tokens),
+            "total_disclosure_proxy": (self._cumulative_tool_array_tokens + self._cumulative_in_band_tokens),
+            "cumulative_provider_visible_disclosure_tokens": (
+                self._cumulative_tool_array_tokens + self._cumulative_provider_visible_in_band_tokens
+            ),
+            "role_prompt_tokens": role_prompt_tokens,
+            "cumulative_role_prompt_tokens": self._cumulative_role_prompt_tokens,
+            "disclosure_mode": disclosure_mode,
+            "fallback_reason": (
+                self._fallback_reason_from_messages(messages) if disclosure_mode == "fallback_full" else None
+            ),
             "conservative_serialized_input_tokens": (
                 _conservative_serialized_input_tokens(
                     messages,
@@ -323,6 +473,8 @@ class DeterministicMCPTrialRunner:
         context: TrialContext,
         task: ToolMCPTask,
     ) -> TrialExecution:
+        if task.track in LIVE_SOLVABLE_TRACKS:
+            raise RuntimeError("hidden-answer deterministic provider is forbidden for live-solvable tasks")
         disclosure = str(context.variant.settings["tool_disclosure"])
         delegate = _ScriptedToolMCPProvider(task, disclosure)
         provider = _RecordingToolMCPProvider(
@@ -349,17 +501,33 @@ async def _run_runtime_trial(
     isolation = TrialIsolation.create(isolation_root, attempt_id)
     isolation.prepare()
     receipt_path = isolation.evidence_root / "receipts.jsonl"
-    verifier = SealedMCPReceiptVerifier.capture(task)
+    state_path = isolation.evidence_root / "fixture-state.json"
+    if task.track in LIVE_SOLVABLE_TRACKS:
+        state_path.write_text(json.dumps(dict(task.initial_state), sort_keys=True), encoding="utf-8")
+        verifier = (
+            SealedLiveStateVerifierV2.capture(task, state_path)
+            if task.track is ToolMCPTrack.LIVE_SOLVABLE_V2
+            else SealedLiveStateVerifier.capture(task, state_path)
+        )
+    else:
+        verifier = SealedMCPReceiptVerifier.capture(task)
+    expected_catalog_names = _expected_catalog_names(task.track)
     config, pico_config = _runtime_config(
         workspace=isolation.workspace,
         receipt_path=receipt_path,
+        state_path=state_path,
+        track=task.track,
         provider=provider,
         progressive=disclosure == "progressive_disclosure",
+        role=task.role,
+        role_prompt=bool(context.variant.settings.get("role_prompt", False)),
+        role_prior=bool(context.variant.settings.get("role_prior", False)),
     )
     outlet = RecordingOutlet("picobench-tool-mcp")
     started = time.perf_counter()
     observation = None
     catalog_payloads: list[dict[str, Any]] = []
+    retrieval_results: list[ToolRetrievalResult] = []
     environment = {
         **isolation.child_environment(),
         "PICO_TRACING_DIR": str(isolation.trace_root),
@@ -376,10 +544,22 @@ async def _run_runtime_trial(
             observation = await host.run(_turn_request(task))
             definitions = host.assembly.agent_loop.tools.get_definitions()
             catalog_payloads = [
-                definition
-                for definition in definitions
-                if definition["function"]["name"].startswith("mcp_picobench_catalog_probe_")
+                definition for definition in definitions if definition["function"]["name"] in expected_catalog_names
             ]
+            controller = getattr(host.assembly.agent_loop, "tool_search_controller", None)
+            if controller is not None:
+                for event in observation.events:
+                    if (
+                        not isinstance(event, ToolEvent)
+                        or event.phase is not ToolPhase.START
+                        or event.name != "tool_search"
+                    ):
+                        continue
+                    arguments = event.arguments or {}
+                    query = arguments.get("query")
+                    limit = arguments.get("limit")
+                    if isinstance(query, str) and (limit is None or isinstance(limit, int)):
+                        retrieval_results.append(controller.retrieve(query, limit))
         finally:
             await host.close()
     latency_ms = (time.perf_counter() - started) * 1_000
@@ -390,16 +570,26 @@ async def _run_runtime_trial(
     tool_events = tuple(event for event in observation.events if isinstance(event, ToolEvent))
     first_payload = provider.tool_payloads[0] if provider.tool_payloads else []
     initial_names = frozenset(definition["function"]["name"] for definition in first_payload)
-    initially_visible_catalog = initial_names & _EXPECTED_CATALOG_NAMES
+    initially_visible_catalog = initial_names & expected_catalog_names
     normalized = normalize_target_calls(
         tool_events,
         catalog_names=catalog_names,
         initially_visible_names=initial_names,
         expected_first_target=task.targets[0].runtime_name,
     )
+    retrieval_metrics = _retrieval_metrics(
+        retrieval_results,
+        expected_target=task.targets[0].runtime_name,
+    )
     schema_tokens = [estimate_visible_tool_schema_tokens(payload) for payload in provider.tool_payloads]
+    in_band_tokens = [int(record["in_band_disclosure_tokens"]) for record in provider.call_records]
+    provider_visible_in_band_tokens = [
+        int(record["provider_visible_in_band_disclosure_tokens"]) for record in provider.call_records
+    ]
+    role_prompt_tokens = [int(record["role_prompt_tokens"]) for record in provider.call_records]
+    visible_counts = [int(record["visible_tool_count"]) for record in provider.call_records]
     usage = _aggregate_usage(provider.call_records)
-    mcp_connected = catalog_names == _EXPECTED_CATALOG_NAMES
+    mcp_connected = catalog_names == expected_catalog_names
     findings: list[str] = []
     if not mcp_connected:
         findings.append("mcp_catalog_connection_incomplete")
@@ -415,6 +605,13 @@ async def _run_runtime_trial(
         verification_state=verification.state,
         mcp_connected=mcp_connected,
     )
+    fallback_records = [record for record in provider.call_records if record["disclosure_mode"] == "fallback_full"]
+    first_fallback_index = next(
+        (index for index, record in enumerate(provider.call_records) if record["disclosure_mode"] == "fallback_full"),
+        None,
+    )
+    fallback_reason = observation.outcome.tool_disclosure_fallback_reason if observation.outcome is not None else None
+    role_metrics = _role_metrics(task, normalized.records, retrieval_results)
     return TrialExecution(
         status=status,
         runtime_state=observation.runtime_state,
@@ -426,7 +623,7 @@ async def _run_runtime_trial(
             "mcp_connected": mcp_connected,
             "mcp_catalog_count": len(catalog_names),
             "mcp_catalog_digest": actual_catalog_digest,
-            "mcp_catalog_source_digest": catalog_digest(),
+            "mcp_catalog_source_digest": _catalog_source_digest(task.track),
             "mcp_verifier_digest": verifier.verifier_code_digest,
             "mcp_receipt_count": len(receipts),
             "initial_visible_tool_count": len(initial_names),
@@ -435,6 +632,35 @@ async def _run_runtime_trial(
             "initial_visible_catalog_tool_names": sorted(initially_visible_catalog),
             "visible_tool_schema_tokens_per_call": schema_tokens,
             "trial_total_estimated_visible_tool_schema_tokens": sum(schema_tokens),
+            "tool_array_schema_tokens_per_call": schema_tokens,
+            "cumulative_tool_array_schema_tokens": sum(schema_tokens),
+            "in_band_disclosure_tokens_per_call": in_band_tokens,
+            "cumulative_in_band_disclosure_tokens": sum(in_band_tokens),
+            "total_disclosure_proxy": sum(schema_tokens) + sum(in_band_tokens),
+            "unique_in_band_disclosure_tokens_per_call": in_band_tokens,
+            "cumulative_unique_in_band_disclosure_tokens": sum(in_band_tokens),
+            "provider_visible_in_band_disclosure_tokens_per_call": provider_visible_in_band_tokens,
+            "cumulative_provider_visible_in_band_disclosure_tokens": sum(provider_visible_in_band_tokens),
+            "cumulative_provider_visible_disclosure_tokens": (
+                sum(schema_tokens) + sum(provider_visible_in_band_tokens)
+            ),
+            "fallback_count": int(bool(fallback_records)),
+            "fallback_rate": float(bool(fallback_records)),
+            "fallback_reason_counts": ({fallback_reason: 1} if fallback_reason else {}),
+            "provider_attempts_before_fallback": (
+                first_fallback_index if first_fallback_index is not None else len(provider.call_records)
+            ),
+            "provider_attempts_after_fallback": len(fallback_records),
+            "success_after_fallback": bool(fallback_records and status is TrialStatus.PASSED),
+            "selected_role": (
+                task.role
+                if context.variant.settings.get("role_prompt") or context.variant.settings.get("role_prior")
+                else "general"
+            ),
+            "role_prompt_tokens_per_call": role_prompt_tokens,
+            "cumulative_role_prompt_tokens": sum(role_prompt_tokens),
+            "average_visible_tool_count": (sum(visible_counts) / len(visible_counts) if visible_counts else 0.0),
+            "peak_visible_tool_count": max(visible_counts, default=0),
             "schema_estimator_id": TOOL_SCHEMA_ESTIMATOR_ID,
             "schema_estimator_digest": TOOL_SCHEMA_ESTIMATOR_DIGEST,
             "meta_tool_invocations": normalized.meta_tool_invocations,
@@ -444,6 +670,8 @@ async def _run_runtime_trial(
             "exact_target_repeat_rate": normalized.exact_target_repeat_rate,
             "normalized_target_call_count": len(normalized.records),
             "target_call_records": [to_primitive(record) for record in normalized.records],
+            **role_metrics,
+            **retrieval_metrics,
             "provider_model": provider.model,
             "actual_model_names": sorted(
                 {str(record["model"]) for record in provider.call_records if record["model"] is not None}
@@ -457,6 +685,31 @@ async def _run_runtime_trial(
         findings=tuple(findings),
         artifact_refs=(isolation.root.relative_to(context.experiment.output_root).as_posix(),),
     )
+
+
+def _retrieval_metrics(
+    results: list[ToolRetrievalResult],
+    *,
+    expected_target: str,
+) -> dict[str, Any]:
+    first = results[0] if results else None
+    rank = first.rank_of(expected_target) if first is not None else None
+    wrong_before_target = (
+        [hit.metadata.name for hit in first.hits if rank is None or hit.rank < rank] if first is not None else []
+    )
+    targets = {expected_target}
+    return {
+        "tool_retrieval_query_count": len(results),
+        "tool_retrieval_evidence": [to_primitive(result) for result in results],
+        "target_recall_at_1": first.recall_at(targets, 1) if first is not None else None,
+        "target_recall_at_3": first.recall_at(targets, 3) if first is not None else None,
+        "target_recall_at_5": first.recall_at(targets, 5) if first is not None else None,
+        "first_target_retrieval_rank": rank,
+        "target_retrieval_mrr": first.reciprocal_rank(expected_target) if first is not None else None,
+        "zero_hit_count": sum(result.zero_hit for result in results),
+        "zero_hit_rate": (sum(result.zero_hit for result in results) / len(results) if results else None),
+        "wrong_target_ranking_evidence": wrong_before_target,
+    }
 
 
 async def run_mcp_transport_smoke(root: Path) -> MCPTransportSmokeResult:
@@ -517,8 +770,13 @@ def _runtime_config(
     *,
     workspace: Path,
     receipt_path: Path,
+    state_path: Path,
+    track: ToolMCPTrack,
     provider: LLMProvider,
     progressive: bool,
+    role: str = "general",
+    role_prompt: bool = False,
+    role_prior: bool = False,
 ) -> tuple[Config, PicoConfig]:
     config = Config()
     config.agents.defaults.workspace = str(workspace)
@@ -530,10 +788,15 @@ def _runtime_config(
     config.routing.enabled = False
     config.tools.restrict_to_workspace = True
     config.tools.disabled_tools = list(_DISABLED_DEFAULT_TOOLS)
-    config.tools.mcp_servers = {"picobench": _mcp_server_config(receipt_path)}
+    config.tools.mcp_servers = {"picobench": _mcp_server_config(receipt_path, state_path=state_path, track=track)}
     config.tools.tool_search.enabled = progressive
     config.tools.tool_search.compaction_threshold = 50
     config.tools.tool_search.search_result_limit = 5
+    config.tools.tool_search.experimental_role = role
+    config.tools.tool_search.experimental_role_prompt = role_prompt
+    config.tools.tool_search.experimental_role_prior = role_prior
+    if task_categories := _role_fixture_categories(role, track):
+        config.tools.tool_search.experimental_role_categories = task_categories
     pico_config = PicoConfig(base=config)
     pico_config.memory.backend = None
     pico_config.skill_forge.enabled = False
@@ -545,13 +808,109 @@ def _runtime_config(
     return config, pico_config
 
 
-def _mcp_server_config(receipt_path: Path) -> MCPServerConfig:
-    server_path = Path(__file__).resolve().parents[2] / "fixtures" / "mcp" / "server.py"
+def _role_prompt_tokens(messages: list[dict[str, Any]]) -> int:
+    marker = "[Experimental Role: "
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") != "system" or not isinstance(content, str):
+            continue
+        start = content.find(marker)
+        if start >= 0:
+            total += estimate_prompt_tokens([{"role": "system", "content": content[start:]}])
+    return total
+
+
+def _role_fixture_categories(role: str, track: ToolMCPTrack) -> dict[str, str]:
+    if role == "general":
+        return {}
+    if track in LIVE_SOLVABLE_TRACKS:
+        return {item.runtime_name: item.category for item in _live_catalog_definitions(track)}
+    task = next(
+        (candidate for candidate in load_tool_mcp_tasks(ToolMCPTrack.ROLE_EXPERIMENT) if candidate.role == role),
+        None,
+    )
+    if task is None:
+        return {}
+    off_role = {
+        "coder": "researcher",
+        "debugger": "coder",
+        "researcher": "debugger",
+    }[role]
+    return {
+        **{f"mcp_picobench_{name}": role for name in task.relevant_tools},
+        **{f"mcp_picobench_{name}": off_role for name in task.irrelevant_tools},
+    }
+
+
+def _role_metrics(
+    task: ToolMCPTask,
+    records: tuple[TargetCallRecord, ...],
+    retrieval_results: list[ToolRetrievalResult],
+) -> dict[str, Any]:
+    irrelevant = {f"mcp_picobench_{name}" for name in task.irrelevant_tools}
+    relevant = {f"mcp_picobench_{name}" for name in task.relevant_tools}
+    off_role_count = sum(record.target_name in irrelevant for record in records)
+    if task.track in LIVE_SOLVABLE_TRACKS:
+        capability_by_name = {
+            item.runtime_name: item.capability for item in _live_catalog_definitions(task.track)
+        }
+        operations = [capability_by_name.get(record.target_name, "") for record in records]
+        mutation_indices = [index for index, operation in enumerate(operations) if operation.endswith(".mutate")]
+        evidence_marker = ".read"
+        verification_marker = ".verify"
+    else:
+        operations = [str(record.arguments.get("operation") or "") for record in records]
+        mutation_indices = [index for index, operation in enumerate(operations) if operation == "transform"]
+        evidence_marker = "inspect"
+        verification_marker = "validate"
+    first_mutation = mutation_indices[0] if mutation_indices else None
+    evidence_before = (
+        any(operation.endswith(evidence_marker) for operation in operations[:first_mutation])
+        if first_mutation is not None
+        else None
+    )
+    verification_after = (
+        any(operation.endswith(verification_marker) for operation in operations[first_mutation + 1 :])
+        if first_mutation is not None
+        else None
+    )
+    irrelevant_before = 0
+    for result in retrieval_results:
+        target_ranks = [hit.rank for hit in result.hits if hit.metadata.name in relevant]
+        if not target_ranks:
+            continue
+        target_rank = min(target_ranks)
+        irrelevant_before += sum(hit.metadata.name in irrelevant and hit.rank < target_rank for hit in result.hits)
+    return {
+        "off_role_tool_selection_count": off_role_count,
+        "off_role_tool_selection_rate": (off_role_count / len(records) if records else 0.0),
+        "irrelevant_ranked_before_target_count": irrelevant_before,
+        "evidence_before_first_mutation": (evidence_before if task.role == "debugger" else None),
+        "verification_after_mutation": (verification_after if task.role == "debugger" else None),
+        "repository_inspection_before_edit": (evidence_before if task.role == "coder" else None),
+        "verification_after_edit": (verification_after if task.role == "coder" else None),
+        "unnecessary_mutation_count": (len(mutation_indices) if task.role == "researcher" else 0),
+    }
+
+
+def _mcp_server_config(
+    receipt_path: Path,
+    *,
+    state_path: Path | None = None,
+    track: ToolMCPTrack = ToolMCPTrack.FORMAL,
+) -> MCPServerConfig:
+    server_name = "live_server.py" if track in LIVE_SOLVABLE_TRACKS else "server.py"
+    server_path = Path(__file__).resolve().parents[2] / "fixtures" / "mcp" / server_name
+    environment = {"PICOBENCH_MCP_RECEIPTS": str(receipt_path)}
+    if state_path is not None and track in LIVE_SOLVABLE_TRACKS:
+        environment["PICOBENCH_MCP_STATE"] = str(state_path)
+        environment["PICOBENCH_MCP_LIVE_CONTRACT"] = track.value
     return MCPServerConfig(
         type="stdio",
         command=sys.executable,
         args=[str(server_path)],
-        env={"PICOBENCH_MCP_RECEIPTS": str(receipt_path)},
+        env=environment,
         tool_timeout=10,
     )
 

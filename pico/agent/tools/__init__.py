@@ -6,7 +6,9 @@ Web、Message 等实现不在这里急切导入，避免额外依赖与循环导
 """
 
 from pico.agent.tools.base import Tool, ToolResult
+from pico.agent.tools.discovery import ToolDiscoveryMetadata, ToolSourceKind
 from pico.agent.tools.execution import (
+    ResolvedToolInvocation,
     ToolCapability,
     ToolEffect,
     ToolExecution,
@@ -17,6 +19,8 @@ from pico.agent.tools.registry import ToolRegistry
 
 __all__ = [
     "Tool",
+    "ToolDiscoveryMetadata",
+    "ResolvedToolInvocation",
     "ToolCapability",
     "ToolEffect",
     "ToolExecution",
@@ -24,4 +28,5 @@ __all__ = [
     "ToolInvocation",
     "ToolRegistry",
     "ToolResult",
+    "ToolSourceKind",
 ]
