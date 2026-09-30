@@ -6,6 +6,10 @@ from benchmarks.picobench.fixtures.mcp import (
     MCP_CATALOG_SIZE,
     catalog_digest,
 )
+from benchmarks.picobench.fixtures.mcp.live_catalog import (
+    LIVE_MCP_CATALOG_SIZE,
+    live_catalog_digest,
+)
 from benchmarks.picobench.protocol import TrialContext, TrialExecution
 from benchmarks.picobench.records import (
     TrialStatus,
@@ -14,6 +18,7 @@ from benchmarks.picobench.records import (
 )
 from benchmarks.picobench.schema import PackDefinition, PairSpec, VariantSpec
 
+from .live_verifier import live_verifier_code_digest
 from .metrics import (
     TOOL_SCHEMA_ESTIMATOR_DIGEST,
     TOOL_SCHEMA_ESTIMATOR_ID,
@@ -125,6 +130,8 @@ class ToolMCPPack:
         self._tasks = {task.task_id: task for task in load_tool_mcp_tasks(self.track)}
 
     def definition(self) -> PackDefinition:
+        if self.track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+            return self._live_solvable_definition()
         if self.track is ToolMCPTrack.ROLE_EXPERIMENT:
             return self._role_experiment_definition()
         pack_id = "tool-mcp" if self.track is ToolMCPTrack.FORMAL else "tool-mcp-calibration"
@@ -233,6 +240,63 @@ class ToolMCPPack:
                 "schema_estimator_digest": TOOL_SCHEMA_ESTIMATOR_DIGEST,
                 "max_tool_iterations": TOOL_MCP_MAX_TOOL_ITERATIONS,
                 "result_scope": "experimental_role_comparison",
+            },
+        )
+
+    def _live_solvable_definition(self) -> PackDefinition:
+        variants = (
+            VariantSpec(
+                variant_id="live-full",
+                settings={
+                    "tool_disclosure": "all_tools",
+                    "role_prompt": False,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="live-progressive",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": False,
+                    "role_prior": False,
+                },
+            ),
+            VariantSpec(
+                variant_id="live-role-aware",
+                settings={
+                    "tool_disclosure": "progressive_disclosure",
+                    "role_prompt": True,
+                    "role_prior": True,
+                },
+            ),
+        )
+        return PackDefinition(
+            pack_id="tool-mcp-live-solvable-v1",
+            tasks=tuple(task.to_task_spec() for task in self._tasks.values()),
+            variants=variants,
+            pairs=(
+                PairSpec(
+                    treatment_axis="tool_disclosure",
+                    control_variant_id=variants[0].variant_id,
+                    treatment_variant_id=variants[1].variant_id,
+                ),
+                PairSpec(
+                    treatment_axis="role_guidance",
+                    control_variant_id=variants[1].variant_id,
+                    treatment_variant_id=variants[2].variant_id,
+                ),
+            ),
+            identity={
+                "claim_reducer": "live_solvable_v1",
+                "task_set_digest": tool_mcp_task_set_digest(self.track),
+                "mcp_catalog_digest": live_catalog_digest(),
+                "mcp_verifier_digest": live_verifier_code_digest(),
+                "mcp_catalog_size": LIVE_MCP_CATALOG_SIZE,
+                "mcp_transport": "stdio",
+                "schema_estimator_id": TOOL_SCHEMA_ESTIMATOR_ID,
+                "schema_estimator_digest": TOOL_SCHEMA_ESTIMATOR_DIGEST,
+                "max_tool_iterations": TOOL_MCP_MAX_TOOL_ITERATIONS,
+                "result_scope": "live_model_acceptance_v1",
             },
         )
 

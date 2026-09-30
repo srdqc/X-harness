@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Mapping
 
 from benchmarks.picobench.canonical import canonical_digest
 from benchmarks.picobench.fixtures.mcp import receipt_payload
@@ -14,18 +14,31 @@ class ToolMCPTrack(StrEnum):
     FORMAL = "formal"
     CALIBRATION = "calibration"
     ROLE_EXPERIMENT = "role_experiment"
+    LIVE_SOLVABLE_V1 = "live_solvable_v1"
+
+
+@dataclass(frozen=True)
+class ArgumentSource:
+    kind: str
+    state_path: str | None = None
 
 
 @dataclass(frozen=True)
 class ToolTarget:
     tool_name: str
     arguments: dict[str, Any]
+    argument_sources: Mapping[str, ArgumentSource] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "arguments",
             MappingProxyType(dict(self.arguments)),
+        )
+        object.__setattr__(
+            self,
+            "argument_sources",
+            MappingProxyType(dict(self.argument_sources)),
         )
 
     @property
@@ -48,9 +61,15 @@ class ToolMCPTask:
     search_query: str | None = None
     relevant_tools: tuple[str, ...] = ()
     irrelevant_tools: tuple[str, ...] = ()
+    initial_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    expected_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    required_capabilities: tuple[str, ...] = ()
+    prohibited_capabilities: tuple[str, ...] = ()
 
     @property
     def expected_receipts_digest(self) -> str:
+        if self.track is ToolMCPTrack.LIVE_SOLVABLE_V1:
+            return canonical_digest(dict(self.expected_state))
         return canonical_digest([target.expected_receipt for target in self.targets])
 
     def to_task_spec(self) -> TaskSpec:
@@ -62,6 +81,17 @@ class ToolMCPTask:
                 "irrelevant_tools": [f"mcp_picobench_{name}" for name in self.irrelevant_tools],
             }
             if self.track is ToolMCPTrack.ROLE_EXPERIMENT
+            else {}
+        )
+        live_contract = (
+            {
+                "role": self.role,
+                "relevant_tools": [f"mcp_picobench_{name}" for name in self.relevant_tools],
+                "irrelevant_tools": [f"mcp_picobench_{name}" for name in self.irrelevant_tools],
+                "expected_state_digest": canonical_digest(dict(self.expected_state)),
+                "verifier": "external_mcp_fixture_state_v1",
+            }
+            if self.track is ToolMCPTrack.LIVE_SOLVABLE_V1
             else {}
         )
         return TaskSpec(
@@ -77,9 +107,16 @@ class ToolMCPTask:
                     }
                     for target in self.targets
                 ],
-                "expected_receipts_digest": self.expected_receipts_digest,
-                "verifier": "external_mcp_receipt",
+                **(
+                    {
+                        "expected_receipts_digest": self.expected_receipts_digest,
+                        "verifier": "external_mcp_receipt",
+                    }
+                    if self.track is not ToolMCPTrack.LIVE_SOLVABLE_V1
+                    else {}
+                ),
                 **experimental,
+                **live_contract,
             },
         )
 
@@ -117,6 +154,7 @@ class MCPTransportSmokeResult:
 
 
 __all__ = [
+    "ArgumentSource",
     "MCPTransportSmokeResult",
     "TargetCallRecord",
     "TargetCallSummary",
