@@ -40,7 +40,10 @@ def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
 
 
 def _atomic_create_or_compare(path: Path, payload: Mapping[str, Any]) -> ImmutableWriteStatus:
-    data = _canonical_bytes(payload)
+    return _atomic_bytes_create_or_compare(path, _canonical_bytes(payload))
+
+
+def _atomic_bytes_create_or_compare(path: Path, data: bytes) -> ImmutableWriteStatus:
     path.parent.mkdir(parents=True, exist_ok=True)
     with file_lock(path.with_suffix(path.suffix + ".lock")):
         if path.exists():
@@ -97,6 +100,11 @@ class KnowledgeRecordStore:
         self.task_success = self.root / "task-success"
         self.candidates = self.root / "candidates"
         self.extractions = self.root / "extractions"
+        self.validations = self.root / "validations"
+        self.reviews = self.root / "reviews"
+        self.lifecycle = self.root / "lifecycle"
+        self.materialized = self.root / "materialized"
+        self.materialization_results = self.root / "materialization-results"
         self.bindings = self.root / "scope-bindings"
 
     @staticmethod
@@ -181,6 +189,145 @@ class KnowledgeRecordStore:
         value = _load(path, KnowledgeExtractionResult.from_dict)
         if value.extraction_id != extraction_id:
             raise KnowledgeStoreError("extraction result path binding mismatch")
+        return value
+
+    def write_validation(self, result: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(
+            self._path(self.validations, result.validation_id), result.to_dict()
+        )
+
+    def read_validation(self, validation_id: str) -> Any | None:
+        path = self._path(self.validations, validation_id)
+        if not path.exists():
+            return None
+        from .validation import CandidateValidationResult
+
+        value = _load(path, CandidateValidationResult.from_dict)
+        if value.validation_id != validation_id:
+            raise KnowledgeStoreError("validation result path binding mismatch")
+        return value
+
+    def write_review(self, receipt: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(
+            self._path(self.reviews, receipt.review_id), receipt.to_dict()
+        )
+
+    def read_review(self, review_id: str) -> Any | None:
+        path = self._path(self.reviews, review_id)
+        if not path.exists():
+            return None
+        from .review import KnowledgeReviewReceipt
+
+        value = _load(path, KnowledgeReviewReceipt.from_dict)
+        if value.review_id != review_id:
+            raise KnowledgeStoreError("review receipt path binding mismatch")
+        return value
+
+    def _lifecycle_path(self, repository_scope_id: str, candidate_id: str) -> Path:
+        scope = _safe_id(repository_scope_id)
+        candidate = _safe_id(candidate_id)
+        directory = self.lifecycle / scope
+        return self._path(directory, candidate).with_suffix(".jsonl")
+
+    def read_lifecycle(
+        self, repository_scope_id: str, candidate_id: str
+    ) -> tuple[Any, ...]:
+        path = self._lifecycle_path(repository_scope_id, candidate_id)
+        if not path.exists():
+            return ()
+        from .lifecycle import KnowledgeLifecycleTransition
+
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise KnowledgeStoreError("cannot read lifecycle chain") from exc
+        values = []
+        for line in lines:
+            if not line.strip():
+                raise KnowledgeStoreError("lifecycle chain contains an empty line")
+            try:
+                raw = json.loads(line)
+                if not isinstance(raw, dict):
+                    raise TypeError("lifecycle record is not an object")
+                values.append(KnowledgeLifecycleTransition.from_dict(raw))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                raise KnowledgeStoreError("invalid lifecycle transition") from exc
+        previous = None
+        for sequence, value in enumerate(values, start=1):
+            if (
+                value.sequence != sequence
+                or value.candidate_id != candidate_id
+                or value.repository_scope_id != repository_scope_id
+                or value.previous_transition_digest != previous
+            ):
+                raise KnowledgeStoreError("lifecycle digest chain mismatch")
+            previous = value.transition_digest
+        return tuple(values)
+
+    def append_lifecycle_transition(self, transition: Any) -> ImmutableWriteStatus:
+        path = self._lifecycle_path(transition.repository_scope_id, transition.candidate_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = _canonical_bytes(transition.to_dict())
+        with file_lock(path.with_suffix(path.suffix + ".lock")):
+            existing = self.read_lifecycle(
+                transition.repository_scope_id, transition.candidate_id
+            )
+            for item in existing:
+                if item.transition_id == transition.transition_id:
+                    return (
+                        ImmutableWriteStatus.UNCHANGED
+                        if item == transition
+                        else ImmutableWriteStatus.CONFLICT
+                    )
+            previous = existing[-1].transition_digest if existing else None
+            if (
+                transition.sequence != len(existing) + 1
+                or transition.previous_transition_digest != previous
+            ):
+                return ImmutableWriteStatus.CONFLICT
+            created = not path.exists()
+            try:
+                with path.open("ab") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if created and os.name == "posix":
+                    directory_fd = os.open(path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+            except OSError as exc:
+                raise KnowledgeStoreError("cannot append lifecycle transition") from exc
+        return ImmutableWriteStatus.CREATED
+
+    def write_materialized_bytes(
+        self, relative_parts: tuple[str, ...], data: bytes
+    ) -> tuple[ImmutableWriteStatus, Path]:
+        if not relative_parts:
+            raise ValueError("materialized path is empty")
+        safe_parts = tuple(_safe_id(item) for item in relative_parts)
+        path = self.materialized.joinpath(*safe_parts)
+        resolved_root = self.materialized.resolve(strict=False)
+        if not path.resolve(strict=False).is_relative_to(resolved_root):
+            raise ValueError("materialized path escapes store root")
+        return _atomic_bytes_create_or_compare(path, data), path
+
+    def write_materialization_result(self, result: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(
+            self._path(self.materialization_results, result.materialization_id),
+            result.to_dict(),
+        )
+
+    def read_materialization_result(self, materialization_id: str) -> Any | None:
+        path = self._path(self.materialization_results, materialization_id)
+        if not path.exists():
+            return None
+        from .materialize import KnowledgeMaterializationResult
+
+        value = _load(path, KnowledgeMaterializationResult.from_dict)
+        if value.materialization_id != materialization_id:
+            raise KnowledgeStoreError("materialization result path binding mismatch")
         return value
 
     def load_or_create_local_binding(

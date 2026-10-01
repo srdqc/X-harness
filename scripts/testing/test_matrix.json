@@ -74,6 +74,10 @@
         "tests/test_knowledge_canonicalization.py",
         "tests/test_knowledge_dedup.py",
         "tests/test_knowledge_conflict.py",
+        "tests/test_knowledge_lifecycle.py",
+        "tests/test_knowledge_validation.py",
+        "tests/test_knowledge_review.py",
+        "tests/test_knowledge_materialization.py",
         "tests/test_trace_verifier.py",
         "tests/test_trace_replay.py"
       ]

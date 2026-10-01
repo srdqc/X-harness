@@ -29,6 +29,27 @@ from .extraction import (
     extract_candidates,
 )
 from .index import CandidateComparison, CandidateIndex, CandidateRelation
+from .lifecycle import (
+    LEGAL_TRANSITIONS,
+    KnowledgeLifecycleManager,
+    KnowledgeLifecycleTransition,
+    LifecycleActorType,
+    LifecycleProjection,
+    LifecycleReason,
+    LifecycleState,
+)
+from .materialize import (
+    KnowledgeMaterializationResult,
+    MaterializationStatus,
+    materialize_candidate,
+    materialized_skill_root,
+)
+from .review import (
+    KnowledgeReviewReceipt,
+    ReviewDecision,
+    ReviewerType,
+    create_review,
+)
 from .scope import (
     RepositoryIdentityMethod,
     RepositoryScopeIdentity,
@@ -55,6 +76,12 @@ from .types import (
     KnowledgeCandidate,
     SourceTurnReference,
 )
+from .validation import (
+    CandidateValidationResult,
+    ValidationReason,
+    ValidationStatus,
+    validate_candidate,
+)
 
 __all__ = [
     "SUPPORTED_POLICY",
@@ -65,6 +92,7 @@ __all__ = [
     "CandidateIndex",
     "CandidateRelation",
     "CandidateType",
+    "CandidateValidationResult",
     "CanonicalProposal",
     "ContentClass",
     "EligibilityReason",
@@ -77,15 +105,27 @@ __all__ = [
     "KnowledgeExtractionRequest",
     "KnowledgeExtractionResult",
     "KnowledgeExtractor",
+    "KnowledgeLifecycleManager",
+    "KnowledgeLifecycleTransition",
+    "KnowledgeMaterializationResult",
     "KnowledgeProposal",
     "KnowledgeRecordStore",
+    "KnowledgeReviewReceipt",
     "KnowledgeStoreError",
+    "LEGAL_TRANSITIONS",
+    "LifecycleActorType",
+    "LifecycleProjection",
+    "LifecycleReason",
+    "LifecycleState",
+    "MaterializationStatus",
     "RepositoryIdentityMethod",
     "RepositoryScopeIdentity",
     "RepositoryScopeReason",
     "RepositoryScopeResolution",
     "RepositoryScopeResolver",
     "RepositoryScopeStatus",
+    "ReviewDecision",
+    "ReviewerType",
     "ProposalRejectionReason",
     "ProposalValidation",
     "RejectedProposal",
@@ -94,10 +134,16 @@ __all__ = [
     "TaskSuccessSource",
     "TaskSuccessStatus",
     "UnsafeKnowledgeContentError",
+    "ValidationReason",
+    "ValidationStatus",
     "build_extraction_context",
+    "create_review",
     "evaluate_candidate_eligibility",
     "extract_candidates",
+    "materialize_candidate",
+    "materialized_skill_root",
     "normalize_git_remote",
     "normalize_project_key",
     "validate_and_canonicalize",
+    "validate_candidate",
 ]
