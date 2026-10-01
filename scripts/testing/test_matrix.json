@@ -50,6 +50,7 @@
     "p2_decision_plane": {
       "targets": [
         "tests/test_decision_plane.py",
+        "tests/test_jev_decision_adapter.py",
         "tests/test_skill_router_sr1.py",
         "tests/test_skill_router_sr2.py",
         "tests/test_skill_segment_builder.py",

@@ -35,6 +35,7 @@ PROVIDER_ATTEMPT_STARTED = "provider.attempt.started"
 PROVIDER_ATTEMPT_COMPLETED = "provider.attempt.completed"
 TOOL_EXECUTION_STARTED = "tool.execution.started"
 TOOL_EXECUTION_COMPLETED = "tool.execution.completed"
+DECISION_RECEIPT = "decision.completed"
 PROVIDER_RECEIPT_SCHEMA = "pico.provider-attempt.v1"
 TOOL_RECEIPT_SCHEMA = "pico.resolved-tool-execution.v1"
 
@@ -678,6 +679,7 @@ def read_turn_evidence(state_dir: str | Path, turn_id: str) -> TurnEvidenceReadR
 __all__ = [
     "AGENT_ENTERED",
     "CHECKPOINT_REFERENCE",
+    "DECISION_RECEIPT",
     "DELIVERY_OUTCOME",
     "EvidenceCompleteness",
     "PROVIDER_ATTEMPT_COMPLETED",

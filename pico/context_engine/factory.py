@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         SkillForgeConfig,
         SkillForgeRouterConfig,
     )
+    from pico.decision_plane.jev import JevBackend
     from pico.memory_engine.backend import MemoryBackend
     from pico.memory_engine.skill_forge import SkillForgeRouter
 
@@ -57,6 +58,7 @@ class ContextEngineFactory(Protocol):
         memory_config: "MemoryConfig | None" = None,
         skill_forge_router_config: "SkillForgeRouterConfig | None" = None,
         skill_forge_config: "SkillForgeConfig | None" = None,
+        jev_backend: "JevBackend | None" = None,
     ) -> ContextEngine: ...
 
 
@@ -74,6 +76,7 @@ def build_context_engine(
     memory_config: "MemoryConfig | None" = None,
     skill_forge_router_config: "SkillForgeRouterConfig | None" = None,
     skill_forge_config: "SkillForgeConfig | None" = None,
+    jev_backend: "JevBackend | None" = None,
 ) -> ContextEngine:
     """从扁平 SegmentBuilder 列表构建唯一 :class:`ContextAssembler`。
 
@@ -101,6 +104,7 @@ def build_context_engine(
     router = _build_router(
         builder=builder,
         skill_forge_router_config=skill_forge_router_config,
+        jev_backend=jev_backend,
     )
     configured_inject_max = int(getattr(skill_forge_config, "inject_max", 2)) if skill_forge_config is not None else 2
     summary_only = (
@@ -142,6 +146,7 @@ def _build_router(
     *,
     builder: ContextBuilder,
     skill_forge_router_config: "SkillForgeRouterConfig",
+    jev_backend: "JevBackend | None" = None,
 ) -> "SkillForgeRouter":
     """为 segment 5 组装只包含 operator-managed Local Skill 的路由器。
 
@@ -150,7 +155,7 @@ def _build_router(
     当前只有该 Source，top-k 与 activation 数量由上层 `SkillsSegmentBuilder` 控制，本函数不
     执行检索。
     """
-    from pico.decision_plane import DeterministicSkillRankingAdapter
+    from pico.decision_plane import DeterministicSkillRankingAdapter, JevDecisionAdapter
     from pico.memory_engine.skill_forge import (
         LocalSkillSource,
         SkillForgeRouter,
@@ -161,12 +166,15 @@ def _build_router(
         registry=builder.skills.registry,
         min_score=skill_forge_router_config.local_min_score,
     )
-    decision_adapter = (
-        DeterministicSkillRankingAdapter()
-        if skill_forge_router_config.decision_plane_enabled
-        and skill_forge_router_config.decision_adapter == "deterministic"
-        else None
-    )
+    decision_adapter = None
+    if skill_forge_router_config.decision_plane_enabled:
+        if skill_forge_router_config.decision_adapter == "jev":
+            decision_adapter = JevDecisionAdapter(
+                jev_backend,
+                timeout_seconds=skill_forge_router_config.decision_timeout_seconds,
+            )
+        else:
+            decision_adapter = DeterministicSkillRankingAdapter()
     return SkillForgeRouter(
         sources=[local_source],
         decision_plane_enabled=skill_forge_router_config.decision_plane_enabled,

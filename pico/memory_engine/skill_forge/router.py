@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from pico.decision_plane import (
@@ -26,8 +28,10 @@ from pico.decision_plane import (
     DeterministicSkillRankingAdapter,
     validate_decision_result,
 )
+from pico.decision_plane.evidence import DecisionReceipt, emit_decision_receipt
 from pico.memory_engine.skill_forge.fusion import rrf_merge_weighted
 from pico.memory_engine.skill_forge.types import RouterHit, SkillSource
+from pico.tracing import evidence as turn_evidence
 
 if TYPE_CHECKING:
     from pico.decision_plane import DecisionAdapter
@@ -111,6 +115,7 @@ class SkillForgeRouter:
         """Apply one advisory ordering or return the authoritative baseline."""
 
         try:
+            recorder = turn_evidence.current()
             request = DecisionRequest(
                 decision_type=DecisionType.SKILL_RANKING,
                 query=query[:4096],
@@ -125,6 +130,12 @@ class SkillForgeRouter:
                     )
                     for rank, hit in enumerate(deterministic, start=1)
                 ),
+                decision_id=(
+                    recorder.next_identity("decision")
+                    if recorder is not None
+                    else f"decision:{uuid.uuid4().hex}"
+                ),
+                correlation_id=recorder.turn_id if recorder is not None else None,
             )
             baseline = await self._baseline_adapter.decide(request)
         except (TypeError, ValueError) as exc:
@@ -137,6 +148,7 @@ class SkillForgeRouter:
             return deterministic
 
         result: DecisionResult
+        started_ns = time.perf_counter_ns()
         try:
             result = (
                 baseline
@@ -145,31 +157,40 @@ class SkillForgeRouter:
             )
             invalid_reason = validate_decision_result(request, result)
         except Exception as exc:
-            self._record_decision_diagnostic(
+            latency_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
+            self._record_decision_evidence(
                 diagnostics,
                 status="error",
                 used_fallback=True,
                 reason=f"adapter_exception:{type(exc).__name__}",
                 request=request,
                 baseline=baseline,
+                latency_ms=latency_ms,
             )
             return deterministic
 
+        latency_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
         if invalid_reason is not None:
-            self._record_decision_diagnostic(
+            fallback_reason = (
+                result.reason
+                if getattr(self._decision_adapter, "kind", None) == "jev" and result.reason
+                else invalid_reason
+            )
+            self._record_decision_evidence(
                 diagnostics,
                 status=result.outcome.value,
                 used_fallback=True,
-                reason=invalid_reason,
+                reason=fallback_reason,
                 request=request,
                 result=result,
                 baseline=baseline,
+                latency_ms=latency_ms,
             )
             return deterministic
 
         by_id = {hit.qualified_id: hit for hit in deterministic}
         ranked = [by_id[item.candidate_id] for item in result.ranking]
-        self._record_decision_diagnostic(
+        self._record_decision_evidence(
             diagnostics,
             status=result.outcome.value,
             used_fallback=False,
@@ -177,11 +198,12 @@ class SkillForgeRouter:
             request=request,
             result=result,
             baseline=baseline,
+            latency_ms=latency_ms,
         )
         return ranked
 
-    @staticmethod
-    def _record_decision_diagnostic(
+    def _record_decision_evidence(
+        self,
         diagnostics: dict[str, Any] | None,
         *,
         status: str,
@@ -190,20 +212,91 @@ class SkillForgeRouter:
         request: DecisionRequest | None = None,
         result: DecisionResult | None = None,
         baseline: DecisionResult | None = None,
+        latency_ms: float = 0.0,
     ) -> None:
-        if diagnostics is None:
+        if request is None or baseline is None:
+            self._record_decision_diagnostic(
+                diagnostics,
+                status=status,
+                used_fallback=used_fallback,
+                reason=reason,
+            )
             return
-        diagnostics["decision_plane"] = {
-            "decision_id": request.decision_id if request is not None else None,
-            "decision_type": DecisionType.SKILL_RANKING.value,
-            "status": status,
-            "source": result.source if result is not None else None,
-            "used_fallback": used_fallback,
-            "fallback_reason": reason,
-            "request_digest": request.request_digest if request is not None else None,
-            "result_digest": result.result_digest if result is not None else None,
-            "baseline_result_digest": baseline.result_digest if baseline is not None else None,
-        }
+
+        recorder = turn_evidence.current()
+        final_result = baseline if used_fallback else result
+        if final_result is None:  # defensive: the successful path always has a result
+            final_result = baseline
+        accepted_cost = result.cost if result is not None and not used_fallback else baseline.cost
+        confidences = (
+            tuple(
+                (item.candidate_id, item.confidence)
+                for item in result.ranking
+                if item.confidence is not None
+            )
+            if result is not None and not used_fallback
+            else ()
+        )
+        adapter_kind = str(
+            getattr(
+                self._decision_adapter,
+                "kind",
+                result.source if result is not None else type(self._decision_adapter).__name__,
+            )
+        )
+        receipt = DecisionReceipt(
+            turn_id=recorder.turn_id if recorder is not None else None,
+            decision_id=request.decision_id,
+            decision_type=request.decision_type.value,
+            adapter_kind=adapter_kind,
+            candidate_count=len(request.candidates),
+            candidate_set_digest=request.candidate_set_digest,
+            request_digest=request.request_digest,
+            baseline_result_digest=baseline.result_digest,
+            adapter_result_digest=result.result_digest if result is not None else None,
+            final_result_digest=final_result.result_digest,
+            adapter_outcome=status,
+            fallback_used=used_fallback,
+            fallback_reason=reason,
+            latency_ms=latency_ms,
+            cost_available=accepted_cost.available,
+            cost_amount=accepted_cost.amount,
+            cost_unit=accepted_cost.unit,
+            confidences=confidences,
+            final_ranking_source=final_result.source,
+        )
+        emit_decision_receipt(receipt)
+        if diagnostics is not None:
+            diagnostics["decision_plane"] = dict(receipt.metadata())
+            diagnostics["decision_plane"].update(
+                {
+                    "status": status,
+                    "source": result.source if result is not None else None,
+                    "used_fallback": used_fallback,
+                    "result_digest": result.result_digest if result is not None else None,
+                }
+            )
+
+    @staticmethod
+    def _record_decision_diagnostic(
+        diagnostics: dict[str, Any] | None,
+        *,
+        status: str,
+        used_fallback: bool,
+        reason: str | None,
+    ) -> None:
+        if diagnostics is not None:
+            diagnostics["decision_plane"] = {
+                "decision_id": None,
+                "decision_type": DecisionType.SKILL_RANKING.value,
+                "status": status,
+                "source": None,
+                "used_fallback": used_fallback,
+                "fallback_reason": reason,
+                "request_digest": None,
+                "result_digest": None,
+                "baseline_result_digest": None,
+            }
 
     async def _safe_search(
         self,

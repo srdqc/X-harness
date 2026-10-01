@@ -16,13 +16,16 @@ from pico.decision_plane.types import (
 class DecisionAdapter(Protocol):
     """An advisory component that cannot mutate or activate candidates."""
 
+    kind: str
+
     async def decide(self, request: DecisionRequest) -> DecisionResult: ...
 
 
 class DeterministicSkillRankingAdapter:
     """Preserve the ranking already produced by the authoritative Skill router."""
 
-    source = "deterministic"
+    kind = "deterministic"
+    source = kind
 
     async def decide(self, request: DecisionRequest) -> DecisionResult:
         return DecisionResult(

@@ -156,7 +156,7 @@ def test_request_and_baseline_result_digests_are_deterministic() -> None:
     second = _request(correlation_id="turn-b")
     assert first.candidate_set_digest == second.candidate_set_digest
     assert first.request_digest == second.request_digest
-    assert first.decision_id == second.decision_id
+    assert first.decision_id != second.decision_id
 
 
 async def test_deterministic_adapter_preserves_candidate_order_and_digest() -> None:

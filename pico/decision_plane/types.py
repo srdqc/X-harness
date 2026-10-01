@@ -8,6 +8,7 @@ P2.1 intentionally defines only ``SKILL_RANKING``.
 from __future__ import annotations
 
 import math
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -26,10 +27,34 @@ class DecisionType(str, Enum):
 
 class DecisionOutcome(str, Enum):
     SUCCESS = "success"
+    FALLBACK = "fallback"
     UNAVAILABLE = "unavailable"
     TIMEOUT = "timeout"
     ERROR = "error"
+    INVALID_RESULT = "invalid_result"
     INVALID = "invalid"
+
+
+@dataclass(frozen=True)
+class DecisionCost:
+    """Optional backend-reported cost; absent cost is explicit and valid."""
+
+    available: bool = False
+    amount: float | None = None
+    unit: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.available:
+            if self.amount is not None or self.unit is not None:
+                raise ValueError("unavailable decision cost cannot carry amount or unit")
+            return
+        if self.amount is None or isinstance(self.amount, bool) or not math.isfinite(self.amount) or self.amount < 0:
+            raise ValueError("available decision cost requires a finite nonnegative amount")
+        if not isinstance(self.unit, str) or not self.unit.strip():
+            raise ValueError("available decision cost requires a unit")
+
+    def canonical_payload(self) -> dict[str, Any]:
+        return {"available": self.available, "amount": self.amount, "unit": self.unit}
 
 
 @dataclass(frozen=True)
@@ -66,23 +91,25 @@ class DecisionCandidate:
 
 @dataclass(frozen=True)
 class DecisionRequest:
-    """Versioned request whose identity is deterministic over semantic input."""
+    """Versioned request with a unique identity and deterministic semantic digests."""
 
     decision_type: DecisionType
     query: str
     candidates: tuple[DecisionCandidate, ...]
+    decision_id: str = field(default_factory=lambda: f"decision:{uuid.uuid4().hex}")
     correlation_id: str | None = None
     schema: str = DECISION_SCHEMA
     schema_version: int = DECISION_SCHEMA_VERSION
     candidate_set_digest: str = field(init=False)
     request_digest: str = field(init=False)
-    decision_id: str = field(init=False)
 
     def __post_init__(self) -> None:
         if self.schema != DECISION_SCHEMA or self.schema_version != DECISION_SCHEMA_VERSION:
             raise ValueError("unsupported decision request schema")
         if self.decision_type is not DecisionType.SKILL_RANKING:
             raise ValueError("unsupported decision type")
+        if not self.decision_id:
+            raise ValueError("decision_id must be non-empty")
         if len(self.query) > MAX_QUERY_CHARS:
             raise ValueError("decision query exceeds the bounded projection")
         candidate_ids = tuple(candidate.candidate_id for candidate in self.candidates)
@@ -105,7 +132,6 @@ class DecisionRequest:
         )
         object.__setattr__(self, "candidate_set_digest", candidate_set_digest)
         object.__setattr__(self, "request_digest", request_digest)
-        object.__setattr__(self, "decision_id", f"skill-ranking:{request_digest[:24]}")
 
 
 @dataclass(frozen=True)
@@ -143,6 +169,7 @@ class DecisionResult:
     outcome: DecisionOutcome
     ranking: tuple[DecisionRanking, ...] = ()
     reason: str | None = None
+    cost: DecisionCost = field(default_factory=DecisionCost)
     schema: str = DECISION_SCHEMA
     schema_version: int = DECISION_SCHEMA_VERSION
     result_digest: str = field(init=False)
@@ -159,13 +186,13 @@ class DecisionResult:
                 {
                     "schema": self.schema,
                     "schema_version": self.schema_version,
-                    "decision_id": self.decision_id,
                     "decision_type": self.decision_type.value,
                     "request_digest": self.request_digest,
                     "source": self.source,
                     "outcome": self.outcome.value,
                     "ranking": [item.canonical_payload() for item in self.ranking],
                     "reason": self.reason,
+                    "cost": self.cost.canonical_payload(),
                 }
             ),
         )
@@ -200,6 +227,7 @@ __all__ = [
     "MAX_DESCRIPTION_CHARS",
     "MAX_QUERY_CHARS",
     "DecisionCandidate",
+    "DecisionCost",
     "DecisionOutcome",
     "DecisionRanking",
     "DecisionRequest",
