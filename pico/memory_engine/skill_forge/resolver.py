@@ -83,6 +83,11 @@ class LocalSkillResolver:
         activated: list[RouterHit] = []
         references: list[RouterHit] = []
         for hit in candidates:
+            # LocalSkillSource derives this fact from the authoritative
+            # SkillRegistry.  Ranking may move an unavailable Skill earlier,
+            # but cannot turn it into an activation or prompt reference.
+            if hit.meta.get("requirements_met") is False:
+                continue
             skill_path = self._skill_path(hit)
             if skill_path is None:
                 if len(activated) < self._activation_limit:

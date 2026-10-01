@@ -68,6 +68,12 @@ class DecisionReceipt:
                 "request_digest": self.request_digest,
                 "baseline_result_digest": self.baseline_result_digest,
                 "adapter_result_digest": self.adapter_result_digest,
+                # P2.3 comparison aliases make the accepted treatment and
+                # actually applied source explicit without changing the v1
+                # P2.2 field names.
+                "experimental_result_digest": (
+                    self.adapter_result_digest if not self.fallback_used else None
+                ),
                 "final_result_digest": self.final_result_digest,
                 "adapter_outcome": self.adapter_outcome,
                 "fallback_used": self.fallback_used,
@@ -78,6 +84,7 @@ class DecisionReceipt:
                 "cost_unit": self.cost_unit,
                 "confidences": self.confidences,
                 "final_ranking_source": self.final_ranking_source,
+                "final_source": self.final_ranking_source,
             }
         )
 
