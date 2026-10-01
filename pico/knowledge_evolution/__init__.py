@@ -1,5 +1,12 @@
 """P3 controlled knowledge-evolution evidence and persistence contracts."""
 
+from .applicability import (
+    ApplicabilityEnvironment,
+    ApplicabilityReason,
+    ApplicabilityStatus,
+    KnowledgeApplicabilityResult,
+    evaluate_applicability,
+)
 from .canonicalize import (
     CanonicalProposal,
     KnowledgeProposal,
@@ -44,6 +51,12 @@ from .materialize import (
     materialize_candidate,
     materialized_skill_root,
 )
+from .retrieval import (
+    KnowledgeRetrievalReceipt,
+    KnowledgeRetriever,
+    RetrievedKnowledge,
+    SuppressionReason,
+)
 from .review import (
     KnowledgeReviewReceipt,
     ReviewDecision,
@@ -76,6 +89,13 @@ from .types import (
     KnowledgeCandidate,
     SourceTurnReference,
 )
+from .usage import (
+    KnowledgeUsageMode,
+    KnowledgeUsageOutcomeAssociation,
+    KnowledgeUsageReceipt,
+    associate_usage_outcome,
+    persist_usage,
+)
 from .validation import (
     CandidateValidationResult,
     ValidationReason,
@@ -85,6 +105,9 @@ from .validation import (
 
 __all__ = [
     "SUPPORTED_POLICY",
+    "ApplicabilityEnvironment",
+    "ApplicabilityReason",
+    "ApplicabilityStatus",
     "CandidateEligibilityInput",
     "CandidateEligibilityResult",
     "CandidateExtractionOutcome",
@@ -101,6 +124,7 @@ __all__ = [
     "ExtractionStatus",
     "ImmutableWriteStatus",
     "KnowledgeCandidate",
+    "KnowledgeApplicabilityResult",
     "KnowledgeExtractionContext",
     "KnowledgeExtractionRequest",
     "KnowledgeExtractionResult",
@@ -110,8 +134,13 @@ __all__ = [
     "KnowledgeMaterializationResult",
     "KnowledgeProposal",
     "KnowledgeRecordStore",
+    "KnowledgeRetrievalReceipt",
+    "KnowledgeRetriever",
     "KnowledgeReviewReceipt",
     "KnowledgeStoreError",
+    "KnowledgeUsageMode",
+    "KnowledgeUsageOutcomeAssociation",
+    "KnowledgeUsageReceipt",
     "LEGAL_TRANSITIONS",
     "LifecycleActorType",
     "LifecycleProjection",
@@ -126,6 +155,7 @@ __all__ = [
     "RepositoryScopeStatus",
     "ReviewDecision",
     "ReviewerType",
+    "RetrievedKnowledge",
     "ProposalRejectionReason",
     "ProposalValidation",
     "RejectedProposal",
@@ -133,17 +163,21 @@ __all__ = [
     "TaskSuccessEvidence",
     "TaskSuccessSource",
     "TaskSuccessStatus",
+    "SuppressionReason",
     "UnsafeKnowledgeContentError",
     "ValidationReason",
     "ValidationStatus",
     "build_extraction_context",
+    "associate_usage_outcome",
     "create_review",
     "evaluate_candidate_eligibility",
+    "evaluate_applicability",
     "extract_candidates",
     "materialize_candidate",
     "materialized_skill_root",
     "normalize_git_remote",
     "normalize_project_key",
+    "persist_usage",
     "validate_and_canonicalize",
     "validate_candidate",
 ]

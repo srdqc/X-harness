@@ -36,6 +36,7 @@ PROVIDER_ATTEMPT_COMPLETED = "provider.attempt.completed"
 TOOL_EXECUTION_STARTED = "tool.execution.started"
 TOOL_EXECUTION_COMPLETED = "tool.execution.completed"
 DECISION_RECEIPT = "decision.completed"
+KNOWLEDGE_USAGE = "knowledge.usage"
 PROVIDER_RECEIPT_SCHEMA = "pico.provider-attempt.v1"
 TOOL_RECEIPT_SCHEMA = "pico.resolved-tool-execution.v1"
 
@@ -682,6 +683,7 @@ __all__ = [
     "DECISION_RECEIPT",
     "DELIVERY_OUTCOME",
     "EvidenceCompleteness",
+    "KNOWLEDGE_USAGE",
     "PROVIDER_ATTEMPT_COMPLETED",
     "PROVIDER_ATTEMPT_STARTED",
     "PROVIDER_RECEIPT_SCHEMA",

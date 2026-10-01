@@ -78,6 +78,10 @@
         "tests/test_knowledge_validation.py",
         "tests/test_knowledge_review.py",
         "tests/test_knowledge_materialization.py",
+        "tests/test_knowledge_applicability.py",
+        "tests/test_knowledge_retrieval.py",
+        "tests/test_knowledge_usage.py",
+        "tests/test_knowledge_runtime_integration.py",
         "tests/test_trace_verifier.py",
         "tests/test_trace_replay.py"
       ]

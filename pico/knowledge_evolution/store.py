@@ -105,6 +105,10 @@ class KnowledgeRecordStore:
         self.lifecycle = self.root / "lifecycle"
         self.materialized = self.root / "materialized"
         self.materialization_results = self.root / "materialization-results"
+        self.applicability_results = self.root / "applicability-results"
+        self.retrievals = self.root / "retrievals"
+        self.usages = self.root / "usages"
+        self.outcome_associations = self.root / "outcome-associations"
         self.bindings = self.root / "scope-bindings"
 
     @staticmethod
@@ -207,6 +211,20 @@ class KnowledgeRecordStore:
             raise KnowledgeStoreError("validation result path binding mismatch")
         return value
 
+    def list_validations(self, *, candidate_id: str | None = None) -> tuple[Any, ...]:
+        if not self.validations.exists():
+            return ()
+        from .validation import CandidateValidationResult
+
+        values = []
+        for path in sorted(self.validations.glob("*.json"), key=lambda item: item.name):
+            value = _load(path, CandidateValidationResult.from_dict)
+            if value.validation_id != path.stem:
+                raise KnowledgeStoreError("validation result path binding mismatch")
+            if candidate_id is None or value.candidate_id == candidate_id:
+                values.append(value)
+        return tuple(values)
+
     def write_review(self, receipt: Any) -> ImmutableWriteStatus:
         return _atomic_create_or_compare(
             self._path(self.reviews, receipt.review_id), receipt.to_dict()
@@ -222,6 +240,20 @@ class KnowledgeRecordStore:
         if value.review_id != review_id:
             raise KnowledgeStoreError("review receipt path binding mismatch")
         return value
+
+    def list_reviews(self, *, candidate_id: str | None = None) -> tuple[Any, ...]:
+        if not self.reviews.exists():
+            return ()
+        from .review import KnowledgeReviewReceipt
+
+        values = []
+        for path in sorted(self.reviews.glob("*.json"), key=lambda item: item.name):
+            value = _load(path, KnowledgeReviewReceipt.from_dict)
+            if value.review_id != path.stem:
+                raise KnowledgeStoreError("review receipt path binding mismatch")
+            if candidate_id is None or value.candidate_id == candidate_id:
+                values.append(value)
+        return tuple(values)
 
     def _lifecycle_path(self, repository_scope_id: str, candidate_id: str) -> Path:
         scope = _safe_id(repository_scope_id)
@@ -328,6 +360,96 @@ class KnowledgeRecordStore:
         value = _load(path, KnowledgeMaterializationResult.from_dict)
         if value.materialization_id != materialization_id:
             raise KnowledgeStoreError("materialization result path binding mismatch")
+        return value
+
+    def list_materialization_results(self, candidate_id: str | None = None) -> tuple[Any, ...]:
+        if not self.materialization_results.exists():
+            return ()
+        from .materialize import KnowledgeMaterializationResult
+
+        values = []
+        for path in sorted(self.materialization_results.glob("*.json")):
+            value = _load(path, KnowledgeMaterializationResult.from_dict)
+            if path.stem != value.materialization_id:
+                raise KnowledgeStoreError("materialization result path binding mismatch")
+            if candidate_id is None or value.candidate_id == candidate_id:
+                values.append(value)
+        return tuple(values)
+
+    def write_applicability(self, result: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(
+            self._path(self.applicability_results, result.applicability_id), result.to_dict()
+        )
+
+    def read_applicability(self, applicability_id: str) -> Any | None:
+        path = self._path(self.applicability_results, applicability_id)
+        if not path.exists():
+            return None
+        from .applicability import KnowledgeApplicabilityResult
+
+        value = _load(path, KnowledgeApplicabilityResult.from_dict)
+        if value.applicability_id != applicability_id:
+            raise KnowledgeStoreError("applicability result path binding mismatch")
+        return value
+
+    def write_retrieval(self, receipt: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(
+            self._path(self.retrievals, receipt.retrieval_id), receipt.to_dict()
+        )
+
+    def read_retrieval(self, retrieval_id: str) -> Any | None:
+        path = self._path(self.retrievals, retrieval_id)
+        if not path.exists():
+            return None
+        from .retrieval import KnowledgeRetrievalReceipt
+
+        value = _load(path, KnowledgeRetrievalReceipt.from_dict)
+        if value.retrieval_id != retrieval_id:
+            raise KnowledgeStoreError("retrieval receipt path binding mismatch")
+        return value
+
+    def write_usage(self, receipt: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(self._path(self.usages, receipt.usage_id), receipt.to_dict())
+
+    def read_usage(self, usage_id: str) -> Any | None:
+        path = self._path(self.usages, usage_id)
+        if not path.exists():
+            return None
+        from .usage import KnowledgeUsageReceipt
+
+        value = _load(path, KnowledgeUsageReceipt.from_dict)
+        if value.usage_id != usage_id:
+            raise KnowledgeStoreError("usage receipt path binding mismatch")
+        return value
+
+    def list_usages(self, *, turn_id: str | None = None) -> tuple[Any, ...]:
+        if not self.usages.exists():
+            return ()
+        from .usage import KnowledgeUsageReceipt
+
+        values = []
+        for path in sorted(self.usages.glob("*.json"), key=lambda item: item.name):
+            value = _load(path, KnowledgeUsageReceipt.from_dict)
+            if value.usage_id != path.stem:
+                raise KnowledgeStoreError("usage receipt path binding mismatch")
+            if turn_id is None or value.turn_id == turn_id:
+                values.append(value)
+        return tuple(values)
+
+    def write_outcome_association(self, receipt: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(
+            self._path(self.outcome_associations, receipt.association_id), receipt.to_dict()
+        )
+
+    def read_outcome_association(self, association_id: str) -> Any | None:
+        path = self._path(self.outcome_associations, association_id)
+        if not path.exists():
+            return None
+        from .usage import KnowledgeUsageOutcomeAssociation
+
+        value = _load(path, KnowledgeUsageOutcomeAssociation.from_dict)
+        if value.association_id != association_id:
+            raise KnowledgeStoreError("outcome association path binding mismatch")
         return value
 
     def load_or_create_local_binding(
