@@ -469,6 +469,12 @@ class SkillForgeRouterConfig(_Base):
     top_k: int = 5
     """``SkillForgeRouter.select`` 返回的 Final Top-K。"""
 
+    decision_plane_enabled: bool = False
+    """Enable advisory Skill re-ranking after deterministic BM25/RRF candidate selection."""
+
+    decision_adapter: Literal["deterministic"] = "deterministic"
+    """P2.1 supports only the in-process deterministic baseline adapter."""
+
 
 # ``SkillForgeRouterConfig`` 已存在于模块作用域，此处解析前向引用
 # 字段声明：``SkillForgeConfig.router: "SkillForgeRouterConfig"``。

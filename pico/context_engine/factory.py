@@ -150,6 +150,7 @@ def _build_router(
     当前只有该 Source，top-k 与 activation 数量由上层 `SkillsSegmentBuilder` 控制，本函数不
     执行检索。
     """
+    from pico.decision_plane import DeterministicSkillRankingAdapter
     from pico.memory_engine.skill_forge import (
         LocalSkillSource,
         SkillForgeRouter,
@@ -160,4 +161,14 @@ def _build_router(
         registry=builder.skills.registry,
         min_score=skill_forge_router_config.local_min_score,
     )
-    return SkillForgeRouter(sources=[local_source])
+    decision_adapter = (
+        DeterministicSkillRankingAdapter()
+        if skill_forge_router_config.decision_plane_enabled
+        and skill_forge_router_config.decision_adapter == "deterministic"
+        else None
+    )
+    return SkillForgeRouter(
+        sources=[local_source],
+        decision_plane_enabled=skill_forge_router_config.decision_plane_enabled,
+        decision_adapter=decision_adapter,
+    )

@@ -47,6 +47,19 @@
         "tests/test_picobench_replay_verification.py"
       ]
     },
+    "p2_decision_plane": {
+      "targets": [
+        "tests/test_decision_plane.py",
+        "tests/test_skill_router_sr1.py",
+        "tests/test_skill_router_sr2.py",
+        "tests/test_skill_segment_builder.py",
+        "tests/test_skill_forge_phase_a.py",
+        "tests/test_default_context_engine.py",
+        "tests/test_config_cfg1.py",
+        "tests/test_memory_backend_protocol.py",
+        "tests/test_tool_registry_execution.py"
+      ]
+    },
     "provider": {
       "targets": [
         "tests/test_provider_catalog.py",
@@ -140,7 +153,8 @@
         "p0": ["phase_p0"],
         "p1a": ["phase_p1a"],
         "p1b": ["phase_p1b"],
-        "p1c": ["phase_p1c"]
+        "p1c": ["phase_p1c"],
+        "p2": ["p2_decision_plane"]
       }
     },
     "global": {
