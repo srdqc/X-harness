@@ -93,6 +93,14 @@ class LocalSkillSource:
                         # 偶尔会用于遥测，因此保留在 meta 中。
                         "physical_source": h.source,
                         "always": meta.always,
+                        # Registry owns binary/environment availability.  The
+                        # resolver consumes this fact after advisory ranking;
+                        # a decision adapter never receives authority to
+                        # reinterpret requirements.
+                        "requirements_met": self._registry.check_available(
+                            h.name,
+                            source=h.source,
+                        ),
                         "skill_dir": skill_dir,
                         "description": meta.description,
                     },

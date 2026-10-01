@@ -820,6 +820,9 @@ class _SkillRegistry:
             None,
         )
 
+    def check_available(self, name: str, source: str | None = None) -> bool:
+        return self.get(name, source=source) is not None
+
 
 class _EmptyMemoryStore:
     def get_memory_context(self, current_message: str = "") -> str:

@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from pico.config.schema import ChannelsConfig, ExecToolConfig
     from pico.context_engine import ContextEngine
     from pico.context_engine.factory import ContextEngineFactory
+    from pico.decision_plane.jev import JevBackend
     from pico.memory_engine.backend import MemoryBackend
     from pico.proactive_engine.schedulers.cron.service import CronService
     from pico.routing.router import ModelRouter
@@ -293,6 +294,7 @@ class AgentLoop:
         # 转发给 ``build_context_engine``，供 Memory 通道和本地 Skill 路由器使用。
         memory_config: "MemoryConfig | None" = None,
         skill_forge_router_config: "SkillForgeRouterConfig | None" = None,
+        jev_backend: "JevBackend | None" = None,
         # 已激活插件贡献的工具，由 CLI 通过 ``build_plugin_tools`` 构建，并在
         # ``_register_default_tools`` 中与内置工具一起注册。None 或空列表表示无插件工具，
         # 默认行为不变。
@@ -387,6 +389,7 @@ class AgentLoop:
             memory_config=memory_config,
             skill_forge_router_config=skill_forge_router_config,
             skill_forge_config=skill_forge_config,
+            **({"jev_backend": jev_backend} if jev_backend is not None else {}),
         )
 
         # 运行时约束（第五支柱）。检查点受 policy 和 interactive 联合门控，见 ``_checkpoint_active``。

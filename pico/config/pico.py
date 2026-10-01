@@ -469,6 +469,22 @@ class SkillForgeRouterConfig(_Base):
     top_k: int = 5
     """``SkillForgeRouter.select`` 返回的 Final Top-K。"""
 
+    decision_plane_enabled: bool = False
+    """Enable advisory Skill re-ranking after deterministic BM25/RRF candidate selection."""
+
+    decision_adapter: Literal["deterministic", "jev"] = "deterministic"
+    """Optional advisory adapter; ``jev`` still requires an injected backend."""
+
+    decision_timeout_seconds: float = Field(default=0.25, gt=0.0, le=30.0, allow_inf_nan=False)
+    """Host-side upper bound for one experimental ranking request."""
+
+    @field_validator("decision_timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_decision_timeout(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("decision_timeout_seconds must be a number")
+        return value
+
 
 # ``SkillForgeRouterConfig`` 已存在于模块作用域，此处解析前向引用
 # 字段声明：``SkillForgeConfig.router: "SkillForgeRouterConfig"``。

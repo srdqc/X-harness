@@ -42,6 +42,14 @@ def test_phase_resolution_is_recursive_and_deduplicated() -> None:
     assert removed == requested - len(targets)
 
 
+def test_fast_phase_resolution_uses_registered_focused_suite() -> None:
+    targets, requested, removed, suites = runner.resolve_targets(_matrix(), tier="fast", phase="p2")
+    assert suites == ["p2_decision_plane"]
+    assert "tests/test_decision_plane.py" in targets
+    assert requested == len(targets)
+    assert removed == 0
+
+
 def test_global_resolution_uses_single_tree_target() -> None:
     targets, requested, removed, suites = runner.resolve_targets(_matrix(), tier="global")
     assert targets == ["tests"]

@@ -149,7 +149,7 @@ def resolve_targets(
     all_suites = matrix["suites"]
     if suites:
         selected = list(suites)
-    elif tier == "phase":
+    elif phase is not None and tier in {"fast", "phase"}:
         phases = matrix["tiers"]["phase"]["phases"]
         if phase not in phases:
             raise ConfigurationError(f"unknown or missing phase {phase!r}")

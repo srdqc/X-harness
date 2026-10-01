@@ -45,6 +45,8 @@ class TestDefaults:
         assert c.enabled is True
         assert c.local_min_score == 0.0
         assert c.top_k == 5
+        assert c.decision_plane_enabled is False
+        assert c.decision_adapter == "deterministic"
 
     def test_skill_forge_public_defaults(self) -> None:
         c = SkillForgeConfig()
