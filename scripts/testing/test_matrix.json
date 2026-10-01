@@ -1,0 +1,150 @@
+{
+  "schema": "x-harness.test-matrix.v1",
+  "suites": {
+    "test_infrastructure": {
+      "targets": ["tests/test_test_runner.py"]
+    },
+    "p0_core": {
+      "targets": [
+        "tests/test_spine_events.py",
+        "tests/test_spine_scheduler.py",
+        "tests/test_spine_scheduler_status.py",
+        "tests/test_spine_delivery.py",
+        "tests/test_gateway_control.py",
+        "tests/test_gateway_terminal_correlation.py",
+        "tests/test_turn_evidence_correlation.py",
+        "tests/test_picobench_runtime_baseline.py"
+      ]
+    },
+    "p1a_session_rewind": {
+      "targets": [
+        "tests/test_session_manager.py",
+        "tests/test_agent_loop_session_stamps.py",
+        "tests/test_checkpoint_catalogue.py",
+        "tests/test_workspace_restore.py",
+        "tests/test_selective_rewind.py",
+        "tests/test_rewind_surfaces.py"
+      ]
+    },
+    "p1b_tool_disclosure": {
+      "targets": [
+        "tests/test_tool_search.py",
+        "tests/test_agent_loop_tool_search.py",
+        "tests/test_agent_loop_tool_fallback.py",
+        "tests/test_tool_role_profile.py",
+        "tests/test_picobench_tool_mcp_track.py",
+        "tests/integration/test_picobench_mcp_e2e.py"
+      ]
+    },
+    "p1c_trace_replay": {
+      "targets": [
+        "tests/test_trace_verifier.py",
+        "tests/test_trace_replay.py",
+        "tests/test_turn_evidence_envelope.py",
+        "tests/test_execution_receipts.py",
+        "tests/test_agent_loop_session_stamps.py",
+        "tests/test_verify_turn_evidence.py",
+        "tests/test_picobench_replay_verification.py"
+      ]
+    },
+    "provider": {
+      "targets": [
+        "tests/test_provider_catalog.py",
+        "tests/test_provider_fallback_chain.py",
+        "tests/test_provider_stream_fallback.py"
+      ]
+    },
+    "tool_registry": {
+      "targets": [
+        "tests/test_tool_registry_execution.py",
+        "tests/test_tool_registry_timeout.py"
+      ]
+    },
+    "mcp": {
+      "targets": [
+        "tests/test_mcp_tools.py",
+        "tests/integration/test_picobench_mcp_e2e.py"
+      ]
+    },
+    "context": {
+      "targets": [
+        "tests/test_default_context_engine.py",
+        "tests/test_context_invariants.py",
+        "tests/test_agent_loop_context_overflow.py",
+        "tests/test_picobench_context_track.py"
+      ]
+    },
+    "picobench": {
+      "targets": [
+        "tests/test_picobench_runtime_baseline.py",
+        "tests/test_picobench_tool_mcp_track.py",
+        "tests/test_picobench_replay_verification.py"
+      ]
+    },
+    "tracing_compat": {
+      "targets": [
+        "tests/test_tracing_api.py",
+        "tests/test_tracing_viewer.py",
+        "tests/test_cli_tracing_commands.py",
+        "tests/test_no_otel_tracing.py"
+      ]
+    },
+    "earlier_phase_representative": {
+      "targets": [
+        "tests/test_spine_scheduler.py",
+        "tests/test_gateway_control.py",
+        "tests/test_session_manager.py",
+        "tests/test_tool_search.py"
+      ]
+    },
+    "phase_p0": {
+      "suites": ["p0_core", "tracing_compat"]
+    },
+    "phase_p1a": {
+      "suites": ["p1a_session_rewind", "earlier_phase_representative"]
+    },
+    "phase_p1b": {
+      "suites": [
+        "p1b_tool_disclosure",
+        "earlier_phase_representative",
+        "tool_registry",
+        "mcp",
+        "context"
+      ]
+    },
+    "phase_p1c": {
+      "suites": [
+        "p1c_trace_replay",
+        "earlier_phase_representative",
+        "tracing_compat"
+      ]
+    },
+    "optional_channels": {
+      "targets": [
+        "tests/test_channels_errors.py",
+        "tests/test_channels_feishu.py",
+        "tests/test_channels_qq.py",
+        "tests/test_channels_wecom.py"
+      ]
+    },
+    "global": {
+      "targets": ["tests"]
+    }
+  },
+  "tiers": {
+    "fast": {
+      "default_suites": ["test_infrastructure"]
+    },
+    "phase": {
+      "phases": {
+        "p0": ["phase_p0"],
+        "p1a": ["phase_p1a"],
+        "p1b": ["phase_p1b"],
+        "p1c": ["phase_p1c"]
+      }
+    },
+    "global": {
+      "default_suites": ["global"]
+    }
+  }
+}
