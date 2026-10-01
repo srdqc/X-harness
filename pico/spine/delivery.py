@@ -31,7 +31,7 @@ from pico.spine.events import (
     TurnFailed,
     TurnStarted,
 )
-from pico.tracing import semconv, trace
+from pico.tracing import evidence, semconv, trace
 
 DeliveryFailureSink = Callable[[Notice], Awaitable[None]]
 DeliveryResultSink = Callable[["DeliveryResult"], Awaitable[None]]
@@ -146,6 +146,7 @@ class _Routed:
     out: Deliverable
     trace_id: str | None
     parent_span_id: str | None
+    evidence_recorder: evidence.TurnEvidenceRecorder | None
 
 
 class DeliveryHub:
@@ -252,7 +253,16 @@ class DeliveryHub:
         if channel not in self._outlets:
             logger.warning("no outlet for channel {!r}; dropping {}", channel, type(out).__name__)
             if _is_terminal_deliverable(out):
-                self._deliver_span(out, channel, semconv.CHANNEL_NO_OUTLET, attempts=0)
+                trace_id, span_id = self._deliver_span(out, channel, semconv.CHANNEL_NO_OUTLET, attempts=0)
+                self._emit_delivery_evidence(
+                    evidence.current(),
+                    out,
+                    channel,
+                    semconv.CHANNEL_NO_OUTLET,
+                    attempts=0,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                )
                 await self._report_delivery_result(
                     out,
                     channel,
@@ -278,6 +288,7 @@ class DeliveryHub:
             out=out,
             trace_id=getattr(ctx, "trace_id", None),
             parent_span_id=getattr(ctx, "parent_span_id", None),
+            evidence_recorder=evidence.current(),
         )
         await self._put(queue, routed)  # 队列满时只阻塞当前 channel（每 Outlet 独立背压）
 
@@ -326,7 +337,7 @@ class DeliveryHub:
         *,
         attempts: int,
         error: str | None = None,
-    ) -> None:
+    ) -> tuple[str | None, str | None]:
         chat_id = getattr(out.source, "chat_id", None) if out.source is not None else None
         conversation_id = out.conversation_id or (f"{channel}:{chat_id}" if chat_id else None)
         with trace.span(
@@ -347,13 +358,51 @@ class DeliveryHub:
         ) as span:
             if outcome != semconv.CHANNEL_DELIVERED:
                 span.error(outcome)
+            return span.trace_id or None, span.span_id or None
+
+    @staticmethod
+    def _emit_delivery_evidence(
+        recorder: evidence.TurnEvidenceRecorder | None,
+        out: Deliverable,
+        channel: str,
+        outcome: str,
+        *,
+        attempts: int,
+        trace_id: str | None,
+        span_id: str | None,
+        error: str | None = None,
+    ) -> None:
+        if recorder is None or out.turn_id != recorder.turn_id:
+            return
+        recorder.emit(
+            evidence.DELIVERY_OUTCOME,
+            span_id=span_id,
+            correlations={"delivery_trace_id": trace_id},
+            metadata={
+                "channel": channel,
+                "event": type(out).__name__,
+                "outcome": outcome,
+                "attempts": attempts,
+                "error_class": error,
+            },
+        )
 
     async def _deliver_routed(self, outlet: Outlet, item: _Routed) -> None:
         outcome, attempts, error = await self._deliver_with_retry(outlet, item.out)
         if not _is_terminal_deliverable(item.out):
             return
         with trace.attach(item.trace_id, item.parent_span_id):
-            self._deliver_span(item.out, outlet.name, outcome, attempts=attempts, error=error)
+            trace_id, span_id = self._deliver_span(item.out, outlet.name, outcome, attempts=attempts, error=error)
+        self._emit_delivery_evidence(
+            item.evidence_recorder,
+            item.out,
+            outlet.name,
+            outcome,
+            attempts=attempts,
+            error=error,
+            trace_id=trace_id,
+            span_id=span_id,
+        )
         await self._report_delivery_result(item.out, outlet.name, outcome, attempts=attempts, error=error)
         if outcome == semconv.CHANNEL_DROPPED:
             await self._report_delivery_failure(item.out, outlet.name, error)

@@ -26,6 +26,8 @@ from pico.session.manager import SessionManager
 from pico.spine import OriginPools, Scheduler
 from pico.spine.message import ChatType, Source
 from pico.spine.turn import Origin, TurnRequest
+from pico.tracing import evidence
+from pico.tracing import spans as tracing_spans
 
 
 class StubProvider(LLMProvider):
@@ -140,7 +142,11 @@ async def test_scheduler_runtime_turn_ids_persist_on_ordered_session_boundaries(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_catalogue_correlates_runtime_turn_and_durable_session_boundary(workspace):
+async def test_checkpoint_catalogue_correlates_runtime_turn_and_durable_session_boundary(workspace, monkeypatch):
+    trace_dir = workspace / "traces"
+    monkeypatch.setenv("PICO_TRACING", "1")
+    monkeypatch.setenv("PICO_TRACING_DIR", str(trace_dir))
+    tracing_spans._store = None
     manager = SessionManager(workspace, boundary_id_factory=lambda: "boundary-1")
     agent = AgentLoop(
         provider=StubProvider(),
@@ -178,6 +184,14 @@ async def test_checkpoint_catalogue_correlates_runtime_turn_and_durable_session_
     loaded = SessionManager(workspace).get_or_create("tui:chat1")
     assert loaded.turn_boundaries[0].turn_id == record.turn_id
     assert loaded.turn_boundaries[0].boundary_id == record.boundary_id
+    turn_evidence = evidence.read_turn_evidence(trace_dir, "turn-1")
+    assert turn_evidence.completeness is evidence.EvidenceCompleteness.COMPLETE
+    by_type = {event.event_type: event for event in turn_evidence.events}
+    assert by_type[evidence.AGENT_ENTERED].correlations["session_id"] == "tui:chat1"
+    assert by_type[evidence.SESSION_BOUNDARY].correlations["boundary_id"] == "boundary-1"
+    assert by_type[evidence.CHECKPOINT_REFERENCE].correlations["checkpoint_record_id"] == record.record_id
+    assert by_type[evidence.CHECKPOINT_REFERENCE].correlations["checkpoint_id"] == record.checkpoint_id
+    tracing_spans._store = None
 
 
 @pytest.mark.asyncio

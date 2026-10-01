@@ -21,7 +21,7 @@ from pico.agent.tools.execution import (
     ToolExecutionContext,
     ToolInvocation,
 )
-from pico.tracing import semconv, trace
+from pico.tracing import evidence, semconv, trace
 
 ToolStartCallback = Callable[[ToolInvocation], Awaitable[None]]
 ToolCompleteCallback = Callable[[ToolExecution], Awaitable[None]]
@@ -164,11 +164,21 @@ class ToolRegistry:
             return ToolResult(
                 f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}",
                 failed=True,
+                failure_stage="resolution",
+                failure_category="not_found",
             )
 
         try:
             # 尝试转换参数以匹配模式类型
-            params = tool.cast_params(params)
+            try:
+                params = tool.cast_params(params)
+            except Exception as exc:
+                return ToolResult(
+                    f"Error executing {name}: {str(exc)}" + _hint,
+                    failed=True,
+                    failure_stage="argument_conversion",
+                    failure_category=type(exc).__name__,
+                )
 
             # 校验参数
             errors = tool.validate_params(params)
@@ -176,6 +186,8 @@ class ToolRegistry:
                 return ToolResult(
                     f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint,
                     failed=True,
+                    failure_stage="schema_validation",
+                    failure_category="invalid_arguments",
                 )
 
             ceiling = tool.timeout_seconds or self.DEFAULT_TOOL_TIMEOUT_S
@@ -189,17 +201,38 @@ class ToolRegistry:
                 )
 
             if isinstance(result, ToolResult):
+                if result.failed and result.failure_stage is None:
+                    result.failure_stage = "execution"
+                    discovery = self._discovery.get(name)
+                    result.failure_category = (
+                        "remote" if discovery is not None and discovery.source_kind is ToolSourceKind.MCP else "tool_reported"
+                    )
                 return result
             if isinstance(result, str) and result.startswith("Error"):
-                return ToolResult(result + _hint, failed=True)
+                return ToolResult(
+                    result + _hint,
+                    failed=True,
+                    failure_stage="execution",
+                    failure_category="tool_reported",
+                )
             return ToolResult(result)
         except asyncio.TimeoutError:
             return ToolResult(
                 f"Error: Tool '{name}' timed out after {ceiling:.0f}s." + _hint,
                 failed=True,
+                failure_stage="timeout",
+                failure_category="timeout",
             )
         except Exception as e:
-            return ToolResult(f"Error executing {name}: {str(e)}" + _hint, failed=True)
+            discovery = self._discovery.get(name)
+            return ToolResult(
+                f"Error executing {name}: {str(e)}" + _hint,
+                failed=True,
+                failure_stage="execution",
+                failure_category=(
+                    "remote" if discovery is not None and discovery.source_kind is ToolSourceKind.MCP else type(e).__name__
+                ),
+            )
 
     async def execute_invocation(self, invocation: ToolInvocation) -> ToolExecution:
         return await self.execute_target(invocation)
@@ -220,15 +253,28 @@ class ToolRegistry:
         if resolved is not None:
             return await self.execute_resolved(resolved)
 
+        receipt = self._start_evidence_receipt(invocation, None, routed_via=routed_via)
         started = time.perf_counter_ns()
-        result = await self.execute(
-            invocation.name,
-            invocation.arguments,
-            invocation.context.call_id,
-            invocation.context,
-        )
+        try:
+            result = await self.execute(
+                invocation.name,
+                invocation.arguments,
+                invocation.context.call_id,
+                invocation.context,
+            )
+        except asyncio.CancelledError:
+            self._complete_evidence_receipt(receipt, None, failure_stage="execution", failure_category="cancelled")
+            raise
         duration_ms = (time.perf_counter_ns() - started) / 1_000_000
-        return ToolExecution(invocation=invocation, result=result, duration_ms=duration_ms)
+        execution = ToolExecution(
+            invocation=invocation,
+            result=result,
+            duration_ms=duration_ms,
+            failure_stage=result.failure_stage,
+            failure_category=result.failure_category,
+        )
+        self._complete_evidence_receipt(receipt, execution)
+        return execution
 
     def resolve_target(
         self,
@@ -251,31 +297,124 @@ class ToolRegistry:
         invocation = resolved.invocation
         current_tool = self._tools.get(invocation.name)
         if current_tool is None:
+            receipt = self._start_evidence_receipt(invocation, None, routed_via=resolved.routed_via)
             started = time.perf_counter_ns()
+            try:
+                result = await self.execute(
+                    invocation.name,
+                    invocation.arguments,
+                    invocation.context.call_id,
+                    invocation.context,
+                )
+            except asyncio.CancelledError:
+                self._complete_evidence_receipt(receipt, None, failure_stage="execution", failure_category="cancelled")
+                raise
+            duration_ms = (time.perf_counter_ns() - started) / 1_000_000
+            execution = ToolExecution(
+                invocation=invocation,
+                result=result,
+                duration_ms=duration_ms,
+                failure_stage=result.failure_stage,
+                failure_category=result.failure_category,
+            )
+            self._complete_evidence_receipt(receipt, execution)
+            return execution
+        if current_tool is not resolved.tool:
+            resolved = replace(resolved, tool=current_tool)
+
+        receipt = self._start_evidence_receipt(invocation, resolved, routed_via=resolved.routed_via)
+        started = time.perf_counter_ns()
+        try:
             result = await self.execute(
                 invocation.name,
                 invocation.arguments,
                 invocation.context.call_id,
                 invocation.context,
             )
-            duration_ms = (time.perf_counter_ns() - started) / 1_000_000
-            return ToolExecution(invocation=invocation, result=result, duration_ms=duration_ms)
-        if current_tool is not resolved.tool:
-            resolved = replace(resolved, tool=current_tool)
-
-        started = time.perf_counter_ns()
-        result = await self.execute(
-            invocation.name,
-            invocation.arguments,
-            invocation.context.call_id,
-            invocation.context,
-        )
+        except asyncio.CancelledError:
+            self._complete_evidence_receipt(receipt, None, failure_stage="execution", failure_category="cancelled")
+            raise
         duration_ms = (time.perf_counter_ns() - started) / 1_000_000
-        return ToolExecution(
+        execution = ToolExecution(
             invocation=invocation,
             result=result,
             duration_ms=duration_ms,
             resolved=resolved,
+            failure_stage=result.failure_stage,
+            failure_category=result.failure_category,
+        )
+        self._complete_evidence_receipt(receipt, execution)
+        return execution
+
+    def _start_evidence_receipt(
+        self,
+        invocation: ToolInvocation,
+        resolved: ResolvedToolInvocation | None,
+        *,
+        routed_via: str | None,
+    ) -> tuple[evidence.TurnEvidenceRecorder, str, str | None] | None:
+        recorder = evidence.current()
+        if recorder is None:
+            return None
+        receipt_id = recorder.next_identity("tool-execution")
+        span_id = getattr(trace.current(), "parent_span_id", None)
+        metadata = self._discovery.get(resolved.invocation.name) if resolved is not None else None
+        recorder.emit(
+            evidence.TOOL_EXECUTION_STARTED,
+            span_id=span_id,
+            correlations={
+                "receipt_id": receipt_id,
+                "model_call_id": invocation.context.call_id,
+                "parent_call_id": invocation.context.parent_call_id,
+            },
+            metadata={
+                "receipt_schema": evidence.TOOL_RECEIPT_SCHEMA,
+                "requested_name": invocation.name,
+                "resolved_name": resolved.invocation.name if resolved is not None else None,
+                "routed_via": routed_via,
+                "effect": resolved.effect.value if resolved is not None else None,
+                "source_kind": metadata.source_kind.value if metadata is not None else None,
+                "source_id": metadata.source_id if metadata is not None else None,
+                "source_category": metadata.category if metadata is not None else None,
+                "argument_digest": evidence.canonical_digest(invocation.arguments),
+                "argument_count": len(invocation.arguments),
+            },
+        )
+        return recorder, receipt_id, span_id
+
+    @staticmethod
+    def _complete_evidence_receipt(
+        receipt: tuple[evidence.TurnEvidenceRecorder, str, str | None] | None,
+        execution: ToolExecution | None,
+        *,
+        failure_stage: str | None = None,
+        failure_category: str | None = None,
+    ) -> None:
+        if receipt is None:
+            return
+        recorder, receipt_id, span_id = receipt
+        result = execution.result if execution is not None else None
+        result_text = str(result) if result is not None else None
+        recorder.emit(
+            evidence.TOOL_EXECUTION_COMPLETED,
+            span_id=span_id,
+            correlations={"receipt_id": receipt_id},
+            metadata={
+                "receipt_schema": evidence.TOOL_RECEIPT_SCHEMA,
+                "outcome": (
+                    "cancelled"
+                    if execution is None
+                    else "failure"
+                    if execution.result.failed
+                    else "success"
+                ),
+                "failure_stage": failure_stage or (execution.failure_stage if execution is not None else None),
+                "failure_category": failure_category
+                or (execution.failure_category if execution is not None else None),
+                "duration_ms": int(execution.duration_ms) if execution is not None else None,
+                "result_digest": evidence.canonical_digest(result_text) if result_text is not None else None,
+                "result_size": len(result_text.encode("utf-8")) if result_text is not None else None,
+            },
         )
 
     async def execute_many(

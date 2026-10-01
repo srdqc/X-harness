@@ -694,6 +694,14 @@ def turn_open(span, bound: dict[str, Any]) -> None:
         {"content": user_input, "channel": channel, "chat_id": chat_id, "media": getattr(req, "media", None)},
     )
     span.checkpoint()
+    # Structural evidence deliberately records only identity, never the input.
+    from pico.tracing import evidence
+
+    evidence.emit_current(
+        evidence.AGENT_ENTERED,
+        span_id=getattr(span, "span_id", None),
+        correlations={"session_id": _turn_ids(bound)[0]},
+    )
 
 
 def turn(span, bound: dict[str, Any], result: Any, exc: BaseException | None) -> None:

@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pico.utils.portable_lock import file_lock
+
 DEFAULT_MAX_BYTES = 50 * 1024 * 1024
 
 _KIND_FILES = {
@@ -69,7 +71,7 @@ class TraceStore:
 
     实例拥有 Logs/Artifacts/Archive Paths 与 Maximum Active Log Bytes。Span/Event 追加在 OSError 时静默
     降级；Artifact Persist 返回包含 Path/SHA-1/Bytes/Preview 的 Dict，失败则在 Dict 中显式携带 Error。
-    Store 不维护跨进程文件锁，Concurrent Writer 的完整性取决于 OS Append/Rename 行为。
+    Event append 使用项目既有 portable advisory lock 并 fsync；旧有 Span append 责任与行为保持不变。
     """
 
     def __init__(self, state_dir: str | os.PathLike[str], max_bytes: int | None = None) -> None:
@@ -113,11 +115,26 @@ class TraceStore:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(text)
 
-    def append_event(self, record: dict[str, Any]) -> None:
+    def append_event(self, record: dict[str, Any]) -> bool:
+        """Durably append an event under the existing portable lock abstraction."""
+
         try:
-            self.append("events", record)
-        except OSError:
-            pass
+            text = f"{to_json_text(record)}\n"
+            lock_path = self.logs_dir / ".lock" / "audit-events.log.lock"
+            with file_lock(lock_path):
+                path = self._rotate_if_needed("events", text)
+                with path.open("a+b") as fh:
+                    payload = text.encode("utf-8")
+                    if fh.tell() > 0:
+                        fh.seek(-1, os.SEEK_END)
+                        if fh.read(1) != b"\n":
+                            payload = b"\n" + payload
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            return True
+        except Exception:  # noqa: BLE001 -- evidence cannot affect Runtime
+            return False
 
     def append_span(self, span: dict[str, Any]) -> None:
         try:

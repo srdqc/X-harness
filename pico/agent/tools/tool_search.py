@@ -339,6 +339,14 @@ class ToolSearchController:
         if name in META_TOOL_NAMES:
             return f"Error: '{name}' cannot be invoked via tool_call."
         if not self._registry.has(name):
+            unresolved = ToolInvocation(
+                name=name,
+                arguments=arguments if isinstance(arguments, dict) else {},
+                context=(context or ToolExecutionContext()).child(
+                    f"{context.call_id}:{name}" if context is not None and context.call_id else None
+                ),
+            )
+            await self._registry.execute_target(unresolved, routed_via=TOOL_CALL_NAME)
             return f"Error: tool '{name}' not found. Use tool_search to find it."
         invocation = self.resolve_invocation(name, arguments, context or ToolExecutionContext())
         if invocation is None:

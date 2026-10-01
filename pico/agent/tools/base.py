@@ -22,10 +22,21 @@ class ToolResult(str):
     """
 
     failed: bool
+    failure_stage: str | None
+    failure_category: str | None
 
-    def __new__(cls, value: object = "", *, failed: bool = False):
+    def __new__(
+        cls,
+        value: object = "",
+        *,
+        failed: bool = False,
+        failure_stage: str | None = None,
+        failure_category: str | None = None,
+    ):
         result = super().__new__(cls, str(value))
         result.failed = failed
+        result.failure_stage = failure_stage
+        result.failure_category = failure_category
         return result
 
 

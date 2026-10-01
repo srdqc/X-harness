@@ -60,6 +60,8 @@ class ToolExecution:
     result: ToolResult
     duration_ms: float
     resolved: ResolvedToolInvocation | None = None
+    failure_stage: str | None = None
+    failure_category: str | None = None
 
 
 __all__ = [

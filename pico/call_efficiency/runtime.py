@@ -31,7 +31,7 @@ from pico.call_efficiency.pricing import estimate_cost_usd
 from pico.call_efficiency.usage import normalize_usage
 from pico.product import get_product_home
 from pico.providers.base import LLMProvider, LLMResponse
-from pico.tracing import trace
+from pico.tracing import evidence, trace
 
 _MODES = frozenset({"off", "observe", "optimize"})
 
@@ -162,6 +162,7 @@ class CallEfficiency:
             if cost is None:
                 all_findings.append("pricing_unavailable")
         ctx = trace.current()
+        evidence_recorder = evidence.current()
         record = CallRecord(
             requested_model=requested_model,
             attempted_model=attempted_model,
@@ -178,6 +179,10 @@ class CallEfficiency:
             mode=self.mode,
             cache_policy=cache_policy or ("disabled" if self.mode == "off" else "observe_only"),
             observed_at=datetime.now(timezone.utc).isoformat(),
+            turn_id=evidence_recorder.turn_id if evidence_recorder is not None else None,
+            logical_call_id=response.logical_call_id,
+            attempt_id=response.attempt_id,
+            attempt_ordinal=response.attempt_ordinal,
             findings=tuple(all_findings),
         )
         if self.mode != "off":

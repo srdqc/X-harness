@@ -15,6 +15,7 @@ from loguru import logger
 
 from pico.providers.base import LLMProvider, LLMResponse, StreamDelta
 from pico.providers.custom_provider import CustomProvider
+from pico.tracing import evidence
 
 if TYPE_CHECKING:
     from pico.config.schema import ModelEndpoint
@@ -62,6 +63,24 @@ class PerModelProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         fallback_models: list[str] | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        with evidence.provider_call_scope(model or self.get_default_model()):
+            return await self._chat_with_retry_routed(
+                messages,
+                tools,
+                model=model,
+                fallback_models=fallback_models,
+                **kwargs,
+            )
+
+    async def _chat_with_retry_routed(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        *,
+        model: str | None,
+        fallback_models: list[str] | None,
         **kwargs: Any,
     ) -> LLMResponse:
         if not fallback_models:

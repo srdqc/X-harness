@@ -12,9 +12,9 @@ Behavior。
 
 from __future__ import annotations
 
-from . import config, trace
+from . import config, evidence, replay, trace, verifier
 
-__all__ = ["enabled", "trace"]
+__all__ = ["enabled", "evidence", "replay", "trace", "verifier"]
 
 
 def enabled() -> bool:

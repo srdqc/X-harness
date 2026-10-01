@@ -11,13 +11,14 @@ Provider 的 Chat Interface，因此 Agent Loop 不需要为计量逻辑增加�
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from threading import RLock
 from typing import Any
 
 from pico.call_efficiency.runtime import CallEfficiency
 from pico.providers.base import ErrorClassification, LLMProvider, LLMResponse, StreamDelta
-from pico.tracing import trace
+from pico.tracing import evidence, trace
 
 
 class CallEfficiencyProvider(LLMProvider):
@@ -74,6 +75,9 @@ class CallEfficiencyProvider(LLMProvider):
         ctx: Any,
         usage: dict[str, Any] | None = None,
         actual_model: str | None = None,
+        logical_call_id: str | None = None,
+        attempt_id: str | None = None,
+        attempt_ordinal: int | None = None,
     ) -> None:
         outcome, classification = self._failure(exc, delegate)
         self.controller.record(
@@ -83,6 +87,9 @@ class CallEfficiencyProvider(LLMProvider):
                 usage=usage or {},
                 model=actual_model or attempted_model,
                 error_classification=classification,
+                logical_call_id=logical_call_id,
+                attempt_id=attempt_id,
+                attempt_ordinal=attempt_ordinal,
             ),
             requested_model=requested_model,
             attempted_model=attempted_model,
@@ -235,59 +242,156 @@ class CallEfficiencyProvider(LLMProvider):
         requested_model = model or delegate.get_default_model()
         prepared = self.controller.prepare(messages, tools, requested_model, provider=delegate)
         ctx = trace.current()
+        evidence_call_scope = evidence.provider_call_scope(requested_model)
         content: list[str] = []
         usage: dict[str, Any] = {}
         actual_model: str | None = None
         finish_reason = "stop"
         error_classification: ErrorClassification | None = None
-        try:
-            async for delta in delegate.chat_stream(
-                messages=prepared.messages,
-                tools=prepared.tools,
-                model=prepared.model,
-                **kwargs,
-            ):
-                if delta.content:
-                    content.append(delta.content)
-                if delta.usage is not None:
-                    usage = delta.usage
-                if delta.model:
-                    actual_model = delta.model
-                if delta.finish_reason:
-                    finish_reason = delta.finish_reason
-                if delta.error_classification is not None:
-                    error_classification = delta.error_classification
-                delta.cache_policy = prepared.cache_policy
-                yield delta
-        except BaseException as exc:
-            self._record_exception(
-                exc,
-                delegate=delegate,
-                requested_model=requested_model,
-                attempted_model=prepared.model,
-                cache_policy=prepared.cache_policy,
-                ctx=ctx,
-                usage=usage,
-                actual_model=actual_model,
-            )
-            raise
-        if finish_reason == "error" and error_classification is None:
-            error_classification = delegate.classify_error(content="".join(content))
-        record = self.controller.record(
-            LLMResponse(
+        with evidence_call_scope as evidence_call:
+            attempt_id: str | None = None
+            attempt_ordinal: int | None = None
+            receipt_started = time.perf_counter_ns()
+            span_id = getattr(trace.current(), "parent_span_id", None)
+            if evidence_call is not None:
+                attempt_id, attempt_ordinal = evidence_call.next_attempt()
+                evidence_call.recorder.emit(
+                    evidence.PROVIDER_ATTEMPT_STARTED,
+                    span_id=span_id,
+                    correlations={
+                        "logical_call_id": evidence_call.logical_call_id,
+                        "attempt_id": attempt_id,
+                        "attempt_ordinal": attempt_ordinal,
+                    },
+                    metadata={
+                        "receipt_schema": evidence.PROVIDER_RECEIPT_SCHEMA,
+                        "provider": type(delegate).__name__,
+                        "requested_model": requested_model,
+                        "attempted_model": prepared.model,
+                        "request_digest": evidence.canonical_digest(
+                            {
+                                "messages": prepared.messages,
+                                "tools": prepared.tools,
+                                "model": prepared.model,
+                                "options": kwargs,
+                            }
+                        ),
+                        "message_count": len(prepared.messages),
+                        "tool_count": len(prepared.tools or ()),
+                    },
+                )
+            try:
+                async for delta in delegate.chat_stream(
+                    messages=prepared.messages,
+                    tools=prepared.tools,
+                    model=prepared.model,
+                    **kwargs,
+                ):
+                    if delta.content:
+                        content.append(delta.content)
+                    if delta.usage is not None:
+                        usage = delta.usage
+                    if delta.model:
+                        actual_model = delta.model
+                    if delta.finish_reason:
+                        finish_reason = delta.finish_reason
+                    if delta.error_classification is not None:
+                        error_classification = delta.error_classification
+                    delta.cache_policy = prepared.cache_policy
+                    yield delta
+            except BaseException as exc:
+                outcome, classification = self._failure(exc, delegate)
+                if evidence_call is not None:
+                    evidence_call.recorder.emit(
+                        evidence.PROVIDER_ATTEMPT_COMPLETED,
+                        span_id=span_id,
+                        correlations={
+                            "logical_call_id": evidence_call.logical_call_id,
+                            "attempt_id": attempt_id,
+                            "attempt_ordinal": attempt_ordinal,
+                        },
+                        metadata={
+                            "receipt_schema": evidence.PROVIDER_RECEIPT_SCHEMA,
+                            "outcome": outcome,
+                            "finish_reason": "error",
+                            "error_category": classification.category,
+                            "actual_model": actual_model or prepared.model,
+                            "usage_available": bool(usage),
+                            "usage": {
+                                str(key): value
+                                for key, value in usage.items()
+                                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                            },
+                            "duration_ms": int((time.perf_counter_ns() - receipt_started) / 1_000_000),
+                        },
+                    )
+                self._record_exception(
+                    exc,
+                    delegate=delegate,
+                    requested_model=requested_model,
+                    attempted_model=prepared.model,
+                    cache_policy=prepared.cache_policy,
+                    ctx=ctx,
+                    usage=usage,
+                    actual_model=actual_model,
+                    logical_call_id=evidence_call.logical_call_id if evidence_call is not None else None,
+                    attempt_id=attempt_id,
+                    attempt_ordinal=attempt_ordinal,
+                )
+                raise
+            if finish_reason == "error" and error_classification is None:
+                error_classification = delegate.classify_error(content="".join(content))
+            response = LLMResponse(
                 content="".join(content),
                 finish_reason=finish_reason,
                 usage=usage,
                 model=actual_model or prepared.model,
                 error_classification=error_classification,
-            ),
-            requested_model=requested_model,
-            attempted_model=prepared.model,
-            session_key=getattr(ctx, "session_key", None),
-            cache_policy=prepared.cache_policy,
-            trace_id=getattr(ctx, "trace_id", None),
-            turn_span_id=getattr(ctx, "turn_span_id", None),
-        )
+                logical_call_id=evidence_call.logical_call_id if evidence_call is not None else None,
+                attempt_id=attempt_id,
+                attempt_ordinal=attempt_ordinal,
+            )
+            if evidence_call is not None:
+                evidence_call.recorder.emit(
+                    evidence.PROVIDER_ATTEMPT_COMPLETED,
+                    span_id=span_id,
+                    correlations={
+                        "logical_call_id": evidence_call.logical_call_id,
+                        "attempt_id": attempt_id,
+                        "attempt_ordinal": attempt_ordinal,
+                    },
+                    metadata={
+                        "receipt_schema": evidence.PROVIDER_RECEIPT_SCHEMA,
+                        "outcome": "error" if finish_reason == "error" else "success",
+                        "finish_reason": finish_reason,
+                        "error_category": getattr(error_classification, "category", None),
+                        "actual_model": response.model,
+                        "response_digest": evidence.canonical_digest(
+                            {
+                                "content": response.content,
+                                "finish_reason": finish_reason,
+                                "model": response.model,
+                                "usage": response.usage,
+                            }
+                        ),
+                        "usage_available": bool(usage),
+                        "usage": {
+                            str(key): value
+                            for key, value in usage.items()
+                            if isinstance(value, (int, float)) and not isinstance(value, bool)
+                        },
+                        "duration_ms": int((time.perf_counter_ns() - receipt_started) / 1_000_000),
+                    },
+                )
+            record = self.controller.record(
+                response,
+                requested_model=requested_model,
+                attempted_model=prepared.model,
+                session_key=getattr(ctx, "session_key", None),
+                cache_policy=prepared.cache_policy,
+                trace_id=getattr(ctx, "trace_id", None),
+                turn_span_id=getattr(ctx, "turn_span_id", None),
+            )
         yield StreamDelta(
             content=None,
             model=actual_model or prepared.model,
