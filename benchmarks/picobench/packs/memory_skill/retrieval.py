@@ -111,11 +111,7 @@ class ProductRetrievalAdapter:
         query_text = str(context.query.payload["query_text"])
         workspace_id = str(context.query.payload["workspace_id"])
         consuming_turn = str(context.query.payload["consuming_turn"])
-        local = self._local_source(workspace_id)
-        everos = _HistoricalSkillSource(
-            backend=self._backend,
-            agent_id=workspace_id,
-        )
+        local, everos = self.skill_sources(workspace_id)
         if configuration_id == "local_only":
             sources = [local]
         elif configuration_id == "everos_only":
@@ -177,6 +173,17 @@ class ProductRetrievalAdapter:
                 "backend_adapter": "injected_fixture",
                 "everos_semantic_quality_claim_eligible": False,
             },
+        )
+
+    def skill_sources(self, workspace_id: str) -> tuple[LocalSkillSource, "_HistoricalSkillSource"]:
+        """Return the same workspace-scoped sources used by the frozen Skill suite."""
+
+        return (
+            self._local_source(workspace_id),
+            _HistoricalSkillSource(
+                backend=self._backend,
+                agent_id=workspace_id,
+            ),
         )
 
     def _local_source(self, workspace_id: str) -> LocalSkillSource:
@@ -318,6 +325,9 @@ class _FixtureSkillRegistry:
             (meta for meta in self._metas if meta.name == name and (source is None or meta.source == source)),
             None,
         )
+
+    def check_available(self, name: str, source: str | None = None) -> bool:
+        return self.get(name, source=source) is not None
 
 
 class _EmptyMemoryStore:
