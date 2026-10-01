@@ -162,5 +162,9 @@ def test_p3_package_has_no_runtime_authority_dependencies() -> None:
         "pico.memory_engine",
         "workspace_restore",
         "selective_rewind",
+        "activate_skill",
+        "grant_permission",
+        "alter_sandbox",
+        "terminal_state",
     )
     assert all(name not in source for name in forbidden)

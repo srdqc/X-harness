@@ -96,6 +96,7 @@ class KnowledgeRecordStore:
         self.scopes = self.root / "scopes"
         self.task_success = self.root / "task-success"
         self.candidates = self.root / "candidates"
+        self.extractions = self.root / "extractions"
         self.bindings = self.root / "scope-bindings"
 
     @staticmethod
@@ -148,6 +149,38 @@ class KnowledgeRecordStore:
         value = _load(path, KnowledgeCandidate.from_dict)
         if value.candidate_id != candidate_id:
             raise KnowledgeStoreError("candidate record path binding mismatch")
+        return value
+
+    def list_candidates(
+        self, *, repository_scope_id: str | None = None
+    ) -> tuple[KnowledgeCandidate, ...]:
+        if repository_scope_id is not None:
+            _safe_id(repository_scope_id)
+        if not self.candidates.exists():
+            return ()
+        values: list[KnowledgeCandidate] = []
+        for path in sorted(self.candidates.glob("*.json"), key=lambda item: item.name):
+            value = _load(path, KnowledgeCandidate.from_dict)
+            if path.stem != value.candidate_id:
+                raise KnowledgeStoreError("candidate record path binding mismatch")
+            if repository_scope_id is None or value.repository_scope_id == repository_scope_id:
+                values.append(value)
+        return tuple(values)
+
+    def write_extraction_result(self, result: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(
+            self._path(self.extractions, result.extraction_id), result.to_dict()
+        )
+
+    def read_extraction_result(self, extraction_id: str) -> Any | None:
+        path = self._path(self.extractions, extraction_id)
+        if not path.exists():
+            return None
+        from .extraction import KnowledgeExtractionResult
+
+        value = _load(path, KnowledgeExtractionResult.from_dict)
+        if value.extraction_id != extraction_id:
+            raise KnowledgeStoreError("extraction result path binding mismatch")
         return value
 
     def load_or_create_local_binding(

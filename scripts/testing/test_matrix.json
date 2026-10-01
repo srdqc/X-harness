@@ -70,6 +70,10 @@
         "tests/test_knowledge_candidate.py",
         "tests/test_candidate_eligibility.py",
         "tests/test_knowledge_store.py",
+        "tests/test_knowledge_extraction.py",
+        "tests/test_knowledge_canonicalization.py",
+        "tests/test_knowledge_dedup.py",
+        "tests/test_knowledge_conflict.py",
         "tests/test_trace_verifier.py",
         "tests/test_trace_replay.py"
       ]

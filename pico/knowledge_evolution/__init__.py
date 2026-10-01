@@ -1,5 +1,13 @@
 """P3 controlled knowledge-evolution evidence and persistence contracts."""
 
+from .canonicalize import (
+    CanonicalProposal,
+    KnowledgeProposal,
+    ProposalRejectionReason,
+    ProposalValidation,
+    UnsafeKnowledgeContentError,
+    validate_and_canonicalize,
+)
 from .eligibility import (
     SUPPORTED_POLICY,
     CandidateEligibilityInput,
@@ -8,6 +16,19 @@ from .eligibility import (
     EligibilityStatus,
     evaluate_candidate_eligibility,
 )
+from .extraction import (
+    CandidateExtractionOutcome,
+    ExtractionFailureReason,
+    ExtractionStatus,
+    KnowledgeExtractionContext,
+    KnowledgeExtractionRequest,
+    KnowledgeExtractionResult,
+    KnowledgeExtractor,
+    RejectedProposal,
+    build_extraction_context,
+    extract_candidates,
+)
+from .index import CandidateComparison, CandidateIndex, CandidateRelation
 from .scope import (
     RepositoryIdentityMethod,
     RepositoryScopeIdentity,
@@ -39,12 +60,24 @@ __all__ = [
     "SUPPORTED_POLICY",
     "CandidateEligibilityInput",
     "CandidateEligibilityResult",
+    "CandidateExtractionOutcome",
+    "CandidateComparison",
+    "CandidateIndex",
+    "CandidateRelation",
     "CandidateType",
+    "CanonicalProposal",
     "ContentClass",
     "EligibilityReason",
     "EligibilityStatus",
+    "ExtractionFailureReason",
+    "ExtractionStatus",
     "ImmutableWriteStatus",
     "KnowledgeCandidate",
+    "KnowledgeExtractionContext",
+    "KnowledgeExtractionRequest",
+    "KnowledgeExtractionResult",
+    "KnowledgeExtractor",
+    "KnowledgeProposal",
     "KnowledgeRecordStore",
     "KnowledgeStoreError",
     "RepositoryIdentityMethod",
@@ -53,11 +86,18 @@ __all__ = [
     "RepositoryScopeResolution",
     "RepositoryScopeResolver",
     "RepositoryScopeStatus",
+    "ProposalRejectionReason",
+    "ProposalValidation",
+    "RejectedProposal",
     "SourceTurnReference",
     "TaskSuccessEvidence",
     "TaskSuccessSource",
     "TaskSuccessStatus",
+    "UnsafeKnowledgeContentError",
+    "build_extraction_context",
     "evaluate_candidate_eligibility",
+    "extract_candidates",
     "normalize_git_remote",
     "normalize_project_key",
+    "validate_and_canonicalize",
 ]
