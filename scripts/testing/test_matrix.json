@@ -87,6 +87,15 @@
         "tests/test_trace_replay.py"
       ]
     },
+    "p3r_live_evaluation": {
+      "targets": [
+        "tests/test_picobench_knowledge_evolution_live.py",
+        "tests/test_execution_receipts.py",
+        "tests/test_knowledge_canonicalization.py",
+        "tests/test_picobench_runtime_baseline.py",
+        "tests/test_test_runner.py"
+      ]
+    },
     "provider": {
       "targets": [
         "tests/test_provider_catalog.py",
@@ -182,7 +191,8 @@
         "p1b": ["phase_p1b"],
         "p1c": ["phase_p1c"],
         "p2": ["p2_decision_plane"],
-        "p3": ["p3_candidate_foundation"]
+        "p3": ["p3_candidate_foundation"],
+        "p3r": ["p3r_live_evaluation"]
       }
     },
     "global": {

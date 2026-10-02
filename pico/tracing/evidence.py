@@ -196,6 +196,7 @@ class ToolExecutionEvidence:
     duration_ms: int | None
     trace_id: str | None
     span_id: str | None
+    repository_read_path: str | None = None
 
     @property
     def complete(self) -> bool:
@@ -511,6 +512,7 @@ def _tool_executions(events: tuple[TurnEvidenceEvent, ...]) -> tuple[ToolExecuti
                 duration_ms=end_meta.get("duration_ms"),
                 trace_id=source.trace_id,
                 span_id=source.span_id,
+                repository_read_path=start_meta.get("repository_read_path"),
             )
         )
     return tuple(executions)

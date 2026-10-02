@@ -10,6 +10,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
+from pathlib import PurePosixPath
 from typing import Any
 
 from pico.agent.tools.base import Tool, ToolResult
@@ -25,6 +26,21 @@ from pico.tracing import evidence, semconv, trace
 
 ToolStartCallback = Callable[[ToolInvocation], Awaitable[None]]
 ToolCompleteCallback = Callable[[ToolExecution], Awaitable[None]]
+
+
+def _repository_read_path(resolved: ResolvedToolInvocation | None) -> str | None:
+    """Return only a safe repository-relative path for the canonical file reader."""
+
+    if resolved is None or resolved.invocation.name != "read_file":
+        return None
+    raw = resolved.invocation.arguments.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    normalized = raw.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or ".." in path.parts or ":" in path.parts[0]:
+        return None
+    return path.as_posix()
 
 
 class ToolRegistry:
@@ -359,6 +375,7 @@ class ToolRegistry:
         receipt_id = recorder.next_identity("tool-execution")
         span_id = getattr(trace.current(), "parent_span_id", None)
         metadata = self._discovery.get(resolved.invocation.name) if resolved is not None else None
+        repository_read_path = _repository_read_path(resolved)
         recorder.emit(
             evidence.TOOL_EXECUTION_STARTED,
             span_id=span_id,
@@ -378,6 +395,7 @@ class ToolRegistry:
                 "source_category": metadata.category if metadata is not None else None,
                 "argument_digest": evidence.canonical_digest(invocation.arguments),
                 "argument_count": len(invocation.arguments),
+                "repository_read_path": repository_read_path,
             },
         )
         return recorder, receipt_id, span_id
