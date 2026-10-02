@@ -101,10 +101,62 @@ def build_context_engine(
     if skill_forge_router_config is None:
         skill_forge_router_config = _SkillForgeRouterConfig()
 
+    p3_builder = None
+    p3_skill_source = None
+    try:
+        from pico.knowledge_evolution import (
+            ApplicabilityEnvironment,
+            KnowledgeRecordStore,
+            RepositoryScopeResolver,
+            materialized_skill_root,
+        )
+        from pico.knowledge_evolution.runtime import KnowledgeContextSegmentBuilder
+        from pico.memory_engine.skill_forge.knowledge_source import (
+            ApplicableKnowledgeSkillSource,
+        )
+        from pico.memory_engine.skill_local import SkillRegistry
+
+        scope = RepositoryScopeResolver(workspace, builder.state).resolve()
+        if scope.resolved and scope.identity is not None:
+            store = KnowledgeRecordStore(builder.state)
+            scope_id = scope.identity.repository_scope_id
+
+            def environment_factory() -> ApplicabilityEnvironment:
+                return ApplicabilityEnvironment(
+                    repository_scope_id=scope_id,
+                    workspace=workspace,
+                    available_tools=tuple(
+                        sorted(
+                            str(item.get("function", {}).get("name"))
+                            for item in get_tool_definitions()
+                            if item.get("function", {}).get("name")
+                        )
+                    ),
+                )
+
+            p3_builder = KnowledgeContextSegmentBuilder(store, environment_factory)
+            source_label = f"experience:{scope_id}"
+            p3_registry = SkillRegistry(
+                workspace,
+                extra_dirs=[(materialized_skill_root(store, scope_id), source_label, False)],
+            )
+            p3_skill_source = ApplicableKnowledgeSkillSource(
+                store=store,
+                registry=p3_registry,
+                environment_factory=environment_factory,
+                physical_source=source_label,
+            )
+    except Exception:
+        # P3 knowledge is optional guidance. Resolution/storage failure keeps
+        # the baseline Runtime path and cannot inject unvalidated content.
+        p3_builder = None
+        p3_skill_source = None
+
     router = _build_router(
         builder=builder,
         skill_forge_router_config=skill_forge_router_config,
         jev_backend=jev_backend,
+        extra_sources=([p3_skill_source] if p3_skill_source is not None else []),
     )
     configured_inject_max = int(getattr(skill_forge_config, "inject_max", 2)) if skill_forge_config is not None else 2
     summary_only = (
@@ -122,6 +174,7 @@ def build_context_engine(
             memory_top_k=memory_config.memory_top_k,
             enabled=backend is not None,
         ),
+        *([p3_builder] if p3_builder is not None else []),
         ActiveSkillsSegmentBuilder(builder.skills),
         SkillsSegmentBuilder(
             router,
@@ -147,6 +200,7 @@ def _build_router(
     builder: ContextBuilder,
     skill_forge_router_config: "SkillForgeRouterConfig",
     jev_backend: "JevBackend | None" = None,
+    extra_sources: list[object] | None = None,
 ) -> "SkillForgeRouter":
     """为 segment 5 组装只包含 operator-managed Local Skill 的路由器。
 
@@ -176,7 +230,7 @@ def _build_router(
         else:
             decision_adapter = DeterministicSkillRankingAdapter()
     return SkillForgeRouter(
-        sources=[local_source],
+        sources=[local_source, *(extra_sources or [])],
         decision_plane_enabled=skill_forge_router_config.decision_plane_enabled,
         decision_adapter=decision_adapter,
     )

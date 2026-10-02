@@ -63,6 +63,30 @@
         "tests/test_tool_registry_execution.py"
       ]
     },
+    "p3_candidate_foundation": {
+      "targets": [
+        "tests/test_knowledge_scope.py",
+        "tests/test_task_success_evidence.py",
+        "tests/test_knowledge_candidate.py",
+        "tests/test_candidate_eligibility.py",
+        "tests/test_knowledge_store.py",
+        "tests/test_knowledge_extraction.py",
+        "tests/test_knowledge_canonicalization.py",
+        "tests/test_knowledge_dedup.py",
+        "tests/test_knowledge_conflict.py",
+        "tests/test_knowledge_lifecycle.py",
+        "tests/test_knowledge_validation.py",
+        "tests/test_knowledge_review.py",
+        "tests/test_knowledge_materialization.py",
+        "tests/test_knowledge_applicability.py",
+        "tests/test_knowledge_retrieval.py",
+        "tests/test_knowledge_usage.py",
+        "tests/test_knowledge_runtime_integration.py",
+        "tests/test_picobench_knowledge_evolution.py",
+        "tests/test_trace_verifier.py",
+        "tests/test_trace_replay.py"
+      ]
+    },
     "provider": {
       "targets": [
         "tests/test_provider_catalog.py",
@@ -157,7 +181,8 @@
         "p1a": ["phase_p1a"],
         "p1b": ["phase_p1b"],
         "p1c": ["phase_p1c"],
-        "p2": ["p2_decision_plane"]
+        "p2": ["p2_decision_plane"],
+        "p3": ["p3_candidate_foundation"]
       }
     },
     "global": {

@@ -75,6 +75,13 @@ class SkillsSegmentBuilder:
             if part
         ]
         all_hits = [*activated, *references]
+        from pico.knowledge_evolution.runtime import persist_skill_hit_usage
+        from pico.knowledge_evolution.usage import KnowledgeUsageMode
+
+        for hit in activated:
+            persist_skill_hit_usage(hit, KnowledgeUsageMode.ACTIVATED)
+        for hit in references:
+            persist_skill_hit_usage(hit, KnowledgeUsageMode.REFERENCED)
         meta = {
             "injected_skill_ids": [h.qualified_id for h in activated if h.qualified_id],
             "referenced_skill_ids": [h.qualified_id for h in references if h.qualified_id],
