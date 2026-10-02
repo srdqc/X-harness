@@ -9,7 +9,7 @@ from pathlib import Path
 from pico.knowledge_evolution import CandidateType, KnowledgeRecordStore
 from pico.tracing import evidence, replay
 
-from .schema import Availability, MetricValue, RunMetrics
+from .schema import Availability, MetricValue, RunMetrics, TokenAccountingStatus
 
 
 def available(value: int | float) -> MetricValue:
@@ -18,6 +18,10 @@ def available(value: int | float) -> MetricValue:
 
 def unavailable() -> MetricValue:
     return MetricValue(None, Availability.NOT_AVAILABLE)
+
+
+def partial(value: int | float) -> MetricValue:
+    return MetricValue(value, Availability.PARTIAL)
 
 
 def repeated_repository_reads(paths: tuple[str, ...]) -> tuple[int, int, int]:
@@ -39,11 +43,18 @@ def extract_run_metrics(
     replayed = replay.replay_turn(trace_root, turn_id)
     attempts = readback.provider_attempts
     logical_calls = {item.logical_call_id for item in attempts if item.logical_call_id}
-    usage_available = bool(attempts) and all(item.usage_available is True for item in attempts)
+    attempts_with_usage = sum(item.usage_available is True for item in attempts)
+    attempts_without_usage = len(attempts) - attempts_with_usage
+    if attempts_with_usage == len(attempts) and attempts:
+        token_status = TokenAccountingStatus.COMPLETE
+    elif attempts_with_usage:
+        token_status = TokenAccountingStatus.PARTIAL
+    else:
+        token_status = TokenAccountingStatus.NOT_AVAILABLE
     input_tokens = output_tokens = cached_tokens = 0
-    cached_available = usage_available
-    if usage_available:
-        for attempt in attempts:
+    cached_available = bool(attempts_with_usage)
+    for attempt in attempts:
+        if attempt.usage_available is True:
             input_tokens += int(attempt.usage.get("input_tokens", attempt.usage.get("prompt_tokens", 0)))
             output_tokens += int(attempt.usage.get("output_tokens", attempt.usage.get("completion_tokens", 0)))
             if "cached_tokens" not in attempt.usage and "cache_read_input_tokens" not in attempt.usage:
@@ -51,6 +62,12 @@ def extract_run_metrics(
             cached_tokens += int(
                 attempt.usage.get("cached_tokens", attempt.usage.get("cache_read_input_tokens", 0))
             )
+
+    token_metric = {
+        TokenAccountingStatus.COMPLETE: available,
+        TokenAccountingStatus.PARTIAL: partial,
+        TokenAccountingStatus.NOT_AVAILABLE: lambda _value: unavailable(),
+    }[token_status]
 
     if repository_read_paths is None:
         read_receipts = tuple(
@@ -116,6 +133,28 @@ def extract_run_metrics(
         end = datetime.fromisoformat(timestamps[-1].replace("Z", "+00:00"))
         latency = available(round((end - start).total_seconds() * 1000, 3))
 
+    exhausted = next(
+        (
+            item
+            for item in readback.events
+            if item.event_type == evidence.AGENT_ITERATION_BUDGET_EXHAUSTED
+        ),
+        None,
+    )
+    final_synthesis = bool(
+        exhausted
+        and any(
+            item.started_sequence is not None and item.started_sequence > exhausted.sequence
+            for item in attempts
+        )
+    )
+    agent_iterations = (
+        int(exhausted.metadata.get("agent_iterations", len(logical_calls)))
+        if exhausted is not None
+        else len(logical_calls)
+    )
+    failed_attempts = tuple(item for item in attempts if item.outcome == "error")
+
     metrics = RunMetrics(
         provider_logical_calls=available(len(logical_calls)),
         provider_attempts=available(len(attempts)),
@@ -129,9 +168,9 @@ def extract_run_metrics(
         skills_referenced=available(skill_modes["referenced"]),
         skills_activated=available(skill_modes["activated"]),
         repeated_skill_reads=available(repeated_skill_reads),
-        input_tokens=(available(input_tokens) if usage_available else unavailable()),
-        output_tokens=(available(output_tokens) if usage_available else unavailable()),
-        cached_tokens=(available(cached_tokens) if cached_available else unavailable()),
+        input_tokens=token_metric(input_tokens),
+        output_tokens=token_metric(output_tokens),
+        cached_tokens=(token_metric(cached_tokens) if cached_available else unavailable()),
         turn_latency_ms=latency,
         provider_retries=available(max(0, len(attempts) - len(logical_calls))),
         failed_tool_attempts=available(sum(item.outcome not in {None, "success"} for item in replayed.tool_executions)),
@@ -139,6 +178,16 @@ def extract_run_metrics(
         p3_approximate_context_tokens=(
             available(approximate_context_tokens) if approximate_available else unavailable()
         ),
+        provider_failed_attempts=available(len(failed_attempts)),
+        known_input_tokens_sum=token_metric(input_tokens),
+        known_output_tokens_sum=token_metric(output_tokens),
+        known_cached_tokens_sum=(token_metric(cached_tokens) if cached_available else unavailable()),
+        attempts_with_usage=available(attempts_with_usage),
+        attempts_without_usage=available(attempts_without_usage),
+        token_accounting_status=token_status,
+        agent_iterations=available(agent_iterations),
+        iteration_exhausted=exhausted is not None,
+        final_synthesis_call_present=final_synthesis,
     )
     refs = {
         "retrieval_refs": retrieval_ids,
@@ -148,6 +197,11 @@ def extract_run_metrics(
         "injected_ids": tuple(item.candidate_id for item in usages if item.usage_mode.value == "injected"),
         "referenced_ids": tuple(item.candidate_id for item in usages if item.usage_mode.value == "referenced"),
         "activated_ids": tuple(item.candidate_id for item in usages if item.usage_mode.value == "activated"),
+        "normalized_provider_failure_categories": tuple(
+            item.normalized_error_category
+            or evidence.normalize_provider_failure(item.error_category)
+            for item in failed_attempts
+        ),
     }
     return metrics, refs
 

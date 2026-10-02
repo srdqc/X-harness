@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 from benchmarks.picobench.canonical import canonical_digest, to_primitive
@@ -20,6 +20,7 @@ from .schema import (
     CampaignManifest,
     CampaignMode,
     RunRecord,
+    RunValidity,
 )
 
 CORE_EFFICIENCY_METRICS = (
@@ -77,20 +78,38 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
         record.validate()
     expected = {item.run_id for item in manifest.planned_runs}
     actual = {item.run_id for item in records}
-    complete = expected == actual
-    grouped: dict[tuple[str, int], dict[Arm, RunRecord]] = defaultdict(dict)
+    complete = expected <= actual
+    grouped: dict[tuple[str, int], dict[Arm, list[RunRecord]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for record in records:
-        grouped[(record.task_id, record.repetition)][record.arm] = record
+        grouped[(record.task_id, record.repetition)][record.arm].append(record)
     pairs: list[dict[str, Any]] = []
     per_task_values: dict[str, dict[Arm, dict[str, list[float]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(list))
     )
     outcomes = {"a_pass_b_pass": 0, "a_fail_b_pass": 0, "a_pass_b_fail": 0, "a_fail_b_fail": 0}
     fairness_valid = True
+    incomplete_pairs: list[dict[str, Any]] = []
+    selected_records: list[RunRecord] = []
     for (task_id, repetition), arms in sorted(grouped.items()):
         if set(arms) != {Arm.NO_REUSE, Arm.APPROVED_REUSE}:
+            incomplete_pairs.append({"task_id": task_id, "repetition": repetition})
             continue
-        a, b = arms[Arm.NO_REUSE], arms[Arm.APPROVED_REUSE]
+        valid_arms = {
+            arm: tuple(item for item in values if item.run_validity is RunValidity.VALID)
+            for arm, values in arms.items()
+        }
+        if any(not values for values in valid_arms.values()):
+            incomplete_pairs.append({"task_id": task_id, "repetition": repetition})
+            continue
+        a = sorted(
+            valid_arms[Arm.NO_REUSE], key=lambda item: item.replacement_for_run_id is not None
+        )[-1]
+        b = sorted(
+            valid_arms[Arm.APPROVED_REUSE], key=lambda item: item.replacement_for_run_id is not None
+        )[-1]
+        selected_records.extend((a, b))
         pair_valid = a.fairness_digest == b.fairness_digest
         fairness_valid &= pair_valid
         a_pass = a.verifier_outcome == "pass"
@@ -108,6 +127,18 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
             else:
                 deltas[name] = {"absolute": None, "relative": None}
         pairs.append({"task_id": task_id, "repetition": repetition, "valid": pair_valid, "deltas": deltas})
+    expected_pair_keys = {
+        (task_id, repetition)
+        for task_id in manifest.task_ids
+        for repetition in range(
+            1,
+            (2 if manifest.mode is CampaignMode.OFFICIAL_REPEAT2 else 1) + 1,
+        )
+    }
+    incomplete_keys = {(item["task_id"], item["repetition"]) for item in incomplete_pairs}
+    completed_pair_keys = {(item["task_id"], item["repetition"]) for item in pairs}
+    for task_id, repetition in sorted(expected_pair_keys - incomplete_keys - completed_pair_keys):
+        incomplete_pairs.append({"task_id": task_id, "repetition": repetition})
     task_pairs: list[dict[str, Any]] = []
     median_inputs: dict[str, list[float]] = defaultdict(list)
     for task_id, arms in sorted(per_task_values.items()):
@@ -123,7 +154,9 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
             else:
                 deltas[name] = {"absolute": None, "relative": None}
         task_pairs.append({"task_id": task_id, "arm_median_deltas": deltas})
-    arm_records = {arm: tuple(item for item in records if item.arm is arm) for arm in Arm}
+    arm_records = {
+        arm: tuple(item for item in selected_records if item.arm is arm) for arm in Arm
+    }
     rates = {
         arm.value: (
             sum(item.verifier_outcome == "pass" for item in values) / len(values) if values else 0.0
@@ -135,9 +168,14 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
     safety_findings = tuple(
         sorted({finding for record in records for finding in record.safety_findings})
     )
-    safety_passed = all(record.safety_outcome == "pass" for record in records)
+    safety_passed = all(record.safety_outcome == "pass" for record in selected_records)
+    valid_complete_pairs = len(pairs)
+    expected_pair_count = len(manifest.task_ids) * (
+        2 if manifest.mode is CampaignMode.OFFICIAL_REPEAT2 else 1
+    )
+    efficacy_complete = complete and valid_complete_pairs == expected_pair_count
     diagnostic_classification = classify(
-        valid=complete and fairness_valid,
+        valid=efficacy_complete and fairness_valid,
         control_success_rate=rates[Arm.NO_REUSE.value],
         treatment_success_rate=rates[Arm.APPROVED_REUSE.value],
         baseline_pass_treatment_fail=outcomes["a_pass_b_fail"],
@@ -160,6 +198,15 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
             else "OFFICIAL"
         ),
         "complete": complete,
+        "planned_runs": len(manifest.planned_runs),
+        "completed_runs": len(records),
+        "valid_runs": sum(item.run_validity is RunValidity.VALID for item in records),
+        "infra_invalid_runs": sum(
+            item.run_validity is RunValidity.INFRA_INVALID for item in records
+        ),
+        "replacement_runs": sum(item.replacement_for_run_id is not None for item in records),
+        "valid_complete_pairs": valid_complete_pairs,
+        "incomplete_pairs": incomplete_pairs,
         "fairness_valid": fairness_valid,
         "safety_passed": safety_passed,
         "safety_findings": safety_findings,
@@ -172,6 +219,38 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
         "classification": classification.value,
         "diagnostic_classification": diagnostic_classification.value,
         "claim_scope": "under this frozen X-harness live campaign",
+        "infra_invalid_reason_counts": dict(
+            sorted(
+                Counter(
+                    item.infra_invalid_reason.value
+                    for item in records
+                    if item.infra_invalid_reason is not None
+                ).items()
+            )
+        ),
+        "provider_reliability": {
+            "logical_calls": sum(
+                int(item.metrics.provider_logical_calls.value or 0) for item in records
+            ),
+            "attempts": sum(int(item.metrics.provider_attempts.value or 0) for item in records),
+            "failed_attempts": sum(
+                int(item.metrics.provider_failed_attempts.value or 0) for item in records
+            ),
+            "recovered_failures": sum(item.recovered_provider_failure_count for item in records),
+            "terminal_failures": sum(item.terminal_provider_failure for item in records),
+        },
+        "token_accounting_completeness": dict(
+            sorted(Counter(item.metrics.token_accounting_status.value for item in records).items())
+        ),
+        "repository_read_metric_availability": dict(
+            sorted(
+                Counter(item.metrics.repeated_repo_file_reads.availability.value for item in records).items()
+            )
+        ),
+        "iteration_exhaustion_count": sum(item.metrics.iteration_exhausted for item in records),
+        "verifier_finding_categories": dict(
+            sorted(Counter(finding for item in records for finding in item.verifier_findings).items())
+        ),
     }
     result["semantic_digest"] = canonical_digest(result)
     return to_primitive(result)

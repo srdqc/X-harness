@@ -37,8 +37,17 @@ TOOL_EXECUTION_STARTED = "tool.execution.started"
 TOOL_EXECUTION_COMPLETED = "tool.execution.completed"
 DECISION_RECEIPT = "decision.completed"
 KNOWLEDGE_USAGE = "knowledge.usage"
+AGENT_ITERATION_BUDGET_EXHAUSTED = "agent.iteration_budget_exhausted"
 PROVIDER_RECEIPT_SCHEMA = "pico.provider-attempt.v1"
 TOOL_RECEIPT_SCHEMA = "pico.resolved-tool-execution.v1"
+
+PROVIDER_TRANSPORT = "provider_transport"
+PROVIDER_SERVER = "provider_server"
+PROVIDER_MALFORMED_RESPONSE = "provider_malformed_response"
+PROVIDER_RATE_LIMIT = "provider_rate_limit"
+PROVIDER_AUTH = "provider_auth"
+PROVIDER_MODEL_ERROR = "provider_model_error"
+PROVIDER_UNKNOWN = "provider_unknown"
 
 _TERMINAL_OUTCOMES = {"completed", "completed_with_tool_failure", "provider_failed", "error", "cancelled"}
 
@@ -74,6 +83,43 @@ def canonical_digest(value: Any) -> str:
         default=lambda item: f"<{type(item).__module__}.{type(item).__qualname__}>",
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_provider_failure(
+    category: str | None,
+    *,
+    exception_type: str | None = None,
+    message: str | None = None,
+) -> str:
+    """Return a bounded privacy-safe Provider failure category.
+
+    Message text is inspected in memory only and is never returned or persisted.
+    Empty/non-JSON normalization requires the specific parse-failure signature;
+    a generic error remains unknown.
+    """
+
+    lowered = (message or "").casefold()
+    if (
+        "unable to get json response" in lowered
+        and "expecting value" in lowered
+        and "original response:" in lowered
+    ):
+        return PROVIDER_MALFORMED_RESPONSE
+    value = (category or "").casefold()
+    exc = (exception_type or "").casefold()
+    if value in {"network", "transport", "connection", "timeout"} or any(
+        item in exc for item in ("connection", "timeout", "transport")
+    ):
+        return PROVIDER_TRANSPORT
+    if value in {"server", "service_unavailable"}:
+        return PROVIDER_SERVER
+    if value in {"rate_limit", "ratelimit"}:
+        return PROVIDER_RATE_LIMIT
+    if value in {"auth", "authentication", "permission"}:
+        return PROVIDER_AUTH
+    if value in {"model", "invalid_request", "content_policy"}:
+        return PROVIDER_MODEL_ERROR
+    return PROVIDER_UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -164,6 +210,7 @@ class ProviderAttemptEvidence:
     duration_ms: int | None
     trace_id: str | None
     span_id: str | None
+    normalized_error_category: str | None = None
 
     @property
     def complete(self) -> bool:
@@ -468,6 +515,7 @@ def _provider_attempts(events: tuple[TurnEvidenceEvent, ...]) -> tuple[ProviderA
                 outcome=end_meta.get("outcome"),
                 finish_reason=end_meta.get("finish_reason"),
                 error_category=end_meta.get("error_category"),
+                normalized_error_category=end_meta.get("normalized_error_category"),
                 request_digest=start_meta.get("request_digest"),
                 response_digest=end_meta.get("response_digest"),
                 usage_available=end_meta.get("usage_available"),

@@ -12,7 +12,7 @@ from benchmarks.picobench.canonical import canonical_json
 from .artifacts import load_manifest, load_runs, store_for
 from .prepare import preflight, prepare_campaign
 from .reducer import reduce_campaign
-from .runner import execute_one, run_campaign
+from .runner import execute_one, run_campaign, run_replacement
 from .schema import CampaignMode, CampaignPaths
 
 
@@ -38,6 +38,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--campaign-root", type=Path, required=True)
     run.add_argument("--reviewer-id", required=True)
     run.add_argument("--execute-live", action="store_true")
+
+    replacement = commands.add_parser(
+        "replace",
+        help="explicitly execute one fresh replacement for an immutable INFRA_INVALID run",
+    )
+    replacement.add_argument("--repository", type=Path, default=Path.cwd())
+    replacement.add_argument("--campaign-root", type=Path, required=True)
+    replacement.add_argument("--invalid-run-id", required=True)
+    replacement.add_argument("--reviewer-id", required=True)
+    replacement.add_argument("--execute-live", action="store_true")
 
     reduce = commands.add_parser("reduce", help="reduce immutable records offline")
     reduce.add_argument("--campaign-root", type=Path, required=True)
@@ -95,6 +105,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_campaign(
             repository=args.repository.resolve(),
             campaign_root=args.campaign_root.resolve(),
+            reviewer_id=args.reviewer_id,
+            execute_live=args.execute_live,
+        )
+        return 0
+    if args.command == "replace":
+        run_replacement(
+            repository=args.repository.resolve(),
+            campaign_root=args.campaign_root.resolve(),
+            invalid_run_id=args.invalid_run_id,
             reviewer_id=args.reviewer_id,
             execute_live=args.execute_live,
         )

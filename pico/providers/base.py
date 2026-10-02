@@ -642,6 +642,11 @@ class LLMProvider(ABC):
             classification = response.error_classification or self.classify_error(exc, response.content)
             response.error_classification = classification
             will_retry = classification.retryable and attempt != total_attempts
+            normalized_error_category = evidence.normalize_provider_failure(
+                classification.category,
+                exception_type=type(exc).__name__ if exc is not None else None,
+                message=str(exc) if exc is not None else response.content,
+            )
             if evidence_call is not None:
                 evidence_call.recorder.emit(
                     evidence.PROVIDER_ATTEMPT_COMPLETED,
@@ -656,6 +661,8 @@ class LLMProvider(ABC):
                         "outcome": "error",
                         "finish_reason": response.finish_reason,
                         "error_category": classification.category,
+                        "normalized_error_category": normalized_error_category,
+                        "error_exception_type": type(exc).__name__ if exc is not None else None,
                         "actual_model": response.model,
                         "response_digest": evidence.canonical_digest(
                             {

@@ -8,7 +8,14 @@ from typing import Any
 from benchmarks.picobench.canonical import canonical_digest
 
 from .knowledge import corpus_digest
-from .schema import Arm, CampaignManifest, CampaignMode, PlannedRun, RuntimeBudget
+from .schema import (
+    BENCHMARK_VERSION,
+    Arm,
+    CampaignManifest,
+    CampaignMode,
+    PlannedRun,
+    RuntimeBudget,
+)
 from .tasks import PILOT_TASK_IDS, TASKS
 
 EXPERIMENT_QUESTION = (
@@ -112,10 +119,15 @@ def create_manifest(
     task_ids = selected_task_ids(mode)
     tasks = tuple(item for item in TASKS if item.task_id in task_ids)
     identity = {
+        "benchmark_version": BENCHMARK_VERSION,
+        "validity_policy_version": 1,
+        "task_contract_version": 2,
         "mode": mode.value,
         "base_commit_sha": base_commit_sha,
         "seed": seed,
         "task_ids": task_ids,
+        "task_prompt_digests": tuple((item.task_id, item.prompt_digest) for item in tasks),
+        "verifier_digests": tuple((item.task_id, item.verifier_digest) for item in tasks),
         "provider_model_config_digest": provider_model_config_digest,
         "tool_config_digest": tool_config_digest,
         "runtime_config_digest": runtime_config_digest,

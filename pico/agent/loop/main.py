@@ -358,7 +358,7 @@ class AgentLoop:
         self._role_prompt_enabled = bool(
             getattr(tool_search_config, "experimental_role_prompt", False)
         )
-        self.tools = ToolRegistry()
+        self.tools = ToolRegistry(workspace_root=workspace)
 
         # Context Engine 是唯一的 ContextAssembler。在 self.tools 之后于此构建，使工厂能将
         # ``self.tools.get_definitions`` 捕获为延迟可调用对象；真正的工具注册表内容
@@ -1752,6 +1752,17 @@ class AgentLoop:
 
         if final_content is None and iteration >= self.max_iterations:
             logger.warning("Max iterations ({}) reached; synthesizing final answer", self.max_iterations)
+            recorder = evidence.current()
+            if recorder is not None:
+                recorder.emit(
+                    evidence.AGENT_ITERATION_BUDGET_EXHAUSTED,
+                    metadata={
+                        "reason": "agent_iteration_budget_exhausted",
+                        "agent_iterations": iteration,
+                        "max_agent_iterations": self.max_iterations,
+                        "final_synthesis_call_expected": True,
+                    },
+                )
             # 耗尽包含两个彼此独立的事实，并非二选一：
             #   1. 本轮尚未完成——将其标记为 ``interrupted``，让影子 Git 检查点提交带上
             #      对应标签，并让下一轮的恢复提示展示提交 SHA 和已编辑文件以便续作。

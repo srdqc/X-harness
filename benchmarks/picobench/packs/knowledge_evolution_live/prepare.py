@@ -8,11 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from benchmarks.picobench.canonical import canonical_digest
+from pico.agent.tools.registry import normalize_repository_read_path
+from pico.tracing import evidence
 
 from .artifacts import freeze_manifest
 from .knowledge import prepare_approved_corpus
 from .protocol import assert_fair_plan, create_manifest
 from .schema import CampaignManifest, CampaignMode, CampaignPaths, RuntimeBudget
+from .solvability import audit_pilot_solvability
 from .tasks import TASKS
 from .verifiers import VERIFIERS
 
@@ -25,6 +28,13 @@ class PreflightResult:
     corpus_candidate_count: int
     provider_config_present: bool
     worktree_supported: bool
+    task_verifier_contract_version: int
+    mechanical_solvability_passed: bool
+    verifier_findings_persistence_available: bool
+    repository_read_projection_passed: bool
+    provider_failure_normalization_configured: bool
+    validity_policy_version: int
+    enforced_budget_semantics_verified: bool
 
 
 def configuration_identity(config, budget: RuntimeBudget) -> dict[str, str]:
@@ -75,8 +85,9 @@ def prepare_campaign(
     config,
 ) -> tuple[CampaignPaths, CampaignManifest, PreflightResult]:
     budget = RuntimeBudget(
-        max_agent_steps=config.agents.defaults.max_tool_iterations,
-        max_provider_logical_calls=config.agents.defaults.max_tool_iterations,
+        max_agent_iterations=config.agents.defaults.max_tool_iterations,
+        provider_logical_calls_observational=config.agents.defaults.max_tool_iterations,
+        tool_calls_observational=40,
         context_window_tokens=config.agents.defaults.context_window_tokens,
     )
     identity = configuration_identity(config, budget)
@@ -148,9 +159,40 @@ def preflight(
             probe = temp / "write-probe"
             probe.write_text("ok", encoding="utf-8")
             probe.unlink()
+            solvability = audit_pilot_solvability(worktree)
+            if not all(item.passed for item in solvability):
+                raise ValueError(f"P3R mechanical solvability failed: {solvability!r}")
+            inside = worktree / "pico" / "probe.py"
+            projection_ok = (
+                normalize_repository_read_path(str(inside), worktree) == "pico/probe.py"
+                and normalize_repository_read_path(str(worktree.parent / "outside.py"), worktree)
+                is None
+            )
+            if not projection_ok:
+                raise ValueError("P3R repository read projection self-test failed")
         finally:
             _git(repository, "worktree", "remove", "--force", str(worktree))
-    return PreflightResult(base_commit_sha, len(manifest.task_ids), len(VERIFIERS), len(candidates), True, True)
+    return PreflightResult(
+        base_commit_sha,
+        len(manifest.task_ids),
+        len(VERIFIERS),
+        len(candidates),
+        True,
+        True,
+        manifest.task_contract_version,
+        True,
+        manifest.schema_version >= 2,
+        True,
+        evidence.normalize_provider_failure(
+            "server",
+            message="Unable to get json response; Expecting value; Original Response:",
+        )
+        == evidence.PROVIDER_MALFORMED_RESPONSE,
+        manifest.validity_policy_version,
+        manifest.budget.max_agent_iterations > 0
+        and manifest.budget.final_synthesis_call_allowed
+        and manifest.budget.provider_logical_calls_observational is not None,
+    )
 
 
 def resolve_base_commit(repository: Path, value: str) -> str:
