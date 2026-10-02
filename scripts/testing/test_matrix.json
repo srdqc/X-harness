@@ -82,6 +82,7 @@
         "tests/test_knowledge_retrieval.py",
         "tests/test_knowledge_usage.py",
         "tests/test_knowledge_runtime_integration.py",
+        "tests/test_picobench_knowledge_evolution.py",
         "tests/test_trace_verifier.py",
         "tests/test_trace_replay.py"
       ]
