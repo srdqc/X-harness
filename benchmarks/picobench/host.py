@@ -87,6 +87,7 @@ class RuntimeTrialHost:
         cron_service: Any,
         outlet: RecordingOutlet,
         context_engine_factory: Any = None,
+        paths: Any = None,
         user_concurrency: int = 1,
         system_concurrency: int = 1,
         delivery_retries: int = 0,
@@ -101,6 +102,7 @@ class RuntimeTrialHost:
             cron_service=cron_service,
             interactive=False,
             context_engine_factory=context_engine_factory,
+            paths=paths,
         )
         start_backend = getattr(assembly, "start_memory_backend", None)
         if start_backend is not None:

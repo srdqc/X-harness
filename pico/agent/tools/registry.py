@@ -10,6 +10,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pico.agent.tools.base import Tool, ToolResult
@@ -25,6 +26,41 @@ from pico.tracing import evidence, semconv, trace
 
 ToolStartCallback = Callable[[ToolInvocation], Awaitable[None]]
 ToolCompleteCallback = Callable[[ToolExecution], Awaitable[None]]
+
+
+def _repository_read_path(
+    resolved: ResolvedToolInvocation | None,
+    workspace_root: Path | None = None,
+) -> str | None:
+    """Return only a safe repository-relative path for the canonical file reader."""
+
+    if resolved is None or resolved.invocation.name != "read_file":
+        return None
+    raw = resolved.invocation.arguments.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return normalize_repository_read_path(raw, workspace_root)
+
+
+def normalize_repository_read_path(raw: str, workspace_root: Path | None = None) -> str | None:
+    """Project a file-reader argument to a non-leaking repository-relative path."""
+
+    normalized = raw.replace("\\", "/")
+    portable = PurePosixPath(normalized)
+    if workspace_root is None:
+        if portable.is_absolute() or ".." in portable.parts or ":" in portable.parts[0]:
+            return None
+        return portable.as_posix()
+    try:
+        root = workspace_root.resolve()
+        supplied = Path(raw)
+        candidate = supplied.resolve() if supplied.is_absolute() else (root / supplied).resolve()
+        relative = candidate.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    if not relative.parts or ".." in relative.parts:
+        return None
+    return PurePosixPath(*relative.parts).as_posix()
 
 
 class ToolRegistry:
@@ -44,12 +80,18 @@ class ToolRegistry:
     DEFAULT_TOOL_TIMEOUT_S = 300.0
     DEFAULT_MAX_PARALLEL = 4
 
-    def __init__(self, *, max_parallel: int = DEFAULT_MAX_PARALLEL):
+    def __init__(
+        self,
+        *,
+        max_parallel: int = DEFAULT_MAX_PARALLEL,
+        workspace_root: Path | None = None,
+    ):
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
         self._tools: dict[str, Tool] = {}
         self._discovery: dict[str, ToolDiscoveryMetadata] = {}
         self._max_parallel = max_parallel
+        self._workspace_root = workspace_root.resolve() if workspace_root is not None else None
 
     def register(
         self,
@@ -359,6 +401,7 @@ class ToolRegistry:
         receipt_id = recorder.next_identity("tool-execution")
         span_id = getattr(trace.current(), "parent_span_id", None)
         metadata = self._discovery.get(resolved.invocation.name) if resolved is not None else None
+        repository_read_path = _repository_read_path(resolved, self._workspace_root)
         recorder.emit(
             evidence.TOOL_EXECUTION_STARTED,
             span_id=span_id,
@@ -378,6 +421,8 @@ class ToolRegistry:
                 "source_category": metadata.category if metadata is not None else None,
                 "argument_digest": evidence.canonical_digest(invocation.arguments),
                 "argument_count": len(invocation.arguments),
+                "agent_iteration": invocation.context.iteration,
+                "repository_read_path": repository_read_path,
             },
         )
         return recorder, receipt_id, span_id

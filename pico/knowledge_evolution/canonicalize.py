@@ -236,7 +236,16 @@ def validate_and_canonicalize(proposal: object) -> ProposalValidation:
         )
 
     for index, guard in enumerate(applicability):
-        fingerprints.append((f"guard:{index}", structural_digest({"guard": guard})))
+        # Preserve the small machine-checkable namespaces understood by the
+        # Runtime applicability evaluator.  Free-form predicates remain
+        # opaque indexed guards and therefore fail closed without explicit
+        # environment evidence.
+        key = (
+            f"guard:{guard}"
+            if guard.startswith(("tool:", "binary:"))
+            else f"guard:{index}"
+        )
+        fingerprints.append((key, structural_digest({"guard": guard})))
     return ProposalValidation(
         CanonicalProposal(
             candidate_type=candidate_type,
