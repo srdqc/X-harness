@@ -10,6 +10,7 @@ from pico.context_engine.base import AssemblyContext, Segment
 from pico.tracing import evidence, spans
 
 from .applicability import ApplicabilityEnvironment
+from .relevance import KnowledgeSelectionMode
 from .retrieval import KnowledgeRetriever, RetrievedKnowledge
 from .store import KnowledgeRecordStore
 from .types import CandidateType, structural_digest
@@ -74,12 +75,14 @@ class KnowledgeContextSegmentBuilder:
         max_facts: int = 3,
         max_experiences: int = 3,
         max_tokens: int = 900,
+        selection_mode: KnowledgeSelectionMode = KnowledgeSelectionMode.LEGACY_APPLICABLE,
     ) -> None:
         self._store = store
         self._environment_factory = environment_factory
         self._max_facts = max(0, max_facts)
         self._max_experiences = max(0, max_experiences)
         self._max_tokens = max(0, max_tokens)
+        self._selection_mode = selection_mode
 
     async def build(self, ctx: AssemblyContext) -> Segment | None:
         recorder = evidence.current()
@@ -95,6 +98,7 @@ class KnowledgeContextSegmentBuilder:
                 self._store,
                 self._environment_factory(),
                 max_candidates=self._max_facts + self._max_experiences,
+                selection_mode=self._selection_mode,
             )
             items, receipt = retriever.retrieve(
                 ctx.current_message,
@@ -148,6 +152,7 @@ class KnowledgeContextSegmentBuilder:
             text=("# Trusted Repository Knowledge\n\n" + "\n\n".join(sections) if sections else ""),
             meta={
                 "p3_retrieval_id": receipt.retrieval_id,
+                "p3_selection_mode": self._selection_mode.value,
                 "p3_retrieved_candidate_ids": list(receipt.selected_candidate_ids),
                 "p3_injected_candidate_ids": [item.candidate.candidate_id for item in injected],
                 "p3_suppressed_count": receipt.suppressed_count,

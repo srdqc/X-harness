@@ -51,6 +51,15 @@ from .materialize import (
     materialize_candidate,
     materialized_skill_root,
 )
+from .relevance import (
+    CandidateRelevanceDocument,
+    KnowledgeRelevanceSelection,
+    KnowledgeSelectionMode,
+    RelevanceDecision,
+    RelevanceReason,
+    TaskRelevanceQuery,
+    select_relevant_candidates,
+)
 from .retrieval import (
     KnowledgeRetrievalReceipt,
     KnowledgeRetriever,
@@ -141,6 +150,8 @@ __all__ = [
     "KnowledgeUsageMode",
     "KnowledgeUsageOutcomeAssociation",
     "KnowledgeUsageReceipt",
+    "KnowledgeRelevanceSelection",
+    "KnowledgeSelectionMode",
     "LEGAL_TRANSITIONS",
     "LifecycleActorType",
     "LifecycleProjection",
@@ -153,6 +164,8 @@ __all__ = [
     "RepositoryScopeResolution",
     "RepositoryScopeResolver",
     "RepositoryScopeStatus",
+    "RelevanceDecision",
+    "RelevanceReason",
     "ReviewDecision",
     "ReviewerType",
     "RetrievedKnowledge",
@@ -163,6 +176,7 @@ __all__ = [
     "TaskSuccessEvidence",
     "TaskSuccessSource",
     "TaskSuccessStatus",
+    "TaskRelevanceQuery",
     "SuppressionReason",
     "UnsafeKnowledgeContentError",
     "ValidationReason",
@@ -178,6 +192,8 @@ __all__ = [
     "normalize_git_remote",
     "normalize_project_key",
     "persist_usage",
+    "select_relevant_candidates",
+    "CandidateRelevanceDocument",
     "validate_and_canonicalize",
     "validate_candidate",
 ]

@@ -107,6 +107,7 @@ class KnowledgeRecordStore:
         self.materialization_results = self.root / "materialization-results"
         self.applicability_results = self.root / "applicability-results"
         self.retrievals = self.root / "retrievals"
+        self.relevance_selections = self.root / "relevance-selections"
         self.usages = self.root / "usages"
         self.outcome_associations = self.root / "outcome-associations"
         self.bindings = self.root / "scope-bindings"
@@ -407,6 +408,42 @@ class KnowledgeRecordStore:
         if value.retrieval_id != retrieval_id:
             raise KnowledgeStoreError("retrieval receipt path binding mismatch")
         return value
+
+    def write_relevance_selection(self, result: Any) -> ImmutableWriteStatus:
+        return _atomic_create_or_compare(
+            self._path(self.relevance_selections, result.selection_id), result.to_dict()
+        )
+
+    def read_relevance_selection(self, selection_id: str) -> Any | None:
+        path = self._path(self.relevance_selections, selection_id)
+        if not path.exists():
+            return None
+        from .relevance import KnowledgeRelevanceSelection
+
+        value = _load(path, KnowledgeRelevanceSelection.from_dict)
+        if value.selection_id != selection_id:
+            raise KnowledgeStoreError("relevance selection path binding mismatch")
+        return value
+
+    def list_relevance_selections(
+        self, *, turn_id: str | None = None, retrieval_id: str | None = None
+    ) -> tuple[Any, ...]:
+        if not self.relevance_selections.exists():
+            return ()
+        from .relevance import KnowledgeRelevanceSelection
+
+        values = []
+        for path in sorted(self.relevance_selections.glob("*.json"), key=lambda item: item.name):
+            value = _load(path, KnowledgeRelevanceSelection.from_dict)
+            if value.selection_id != path.stem:
+                raise KnowledgeStoreError("relevance selection path binding mismatch")
+            if turn_id is not None and value.turn_id != turn_id:
+                continue
+            if retrieval_id is not None:
+                if value.retrieval_id != retrieval_id:
+                    continue
+            values.append(value)
+        return tuple(values)
 
     def write_usage(self, receipt: Any) -> ImmutableWriteStatus:
         return _atomic_create_or_compare(self._path(self.usages, receipt.usage_id), receipt.to_dict())

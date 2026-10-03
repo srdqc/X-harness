@@ -279,8 +279,22 @@ async def _execute_turn(*, paths, manifest, planned, worktree, state, reviewer_i
     pico_config = PicoConfig.model_validate(
         {**pico_config.model_dump(mode="python"), "memory": {"backend": None}}
     )
-    if planned.arm is Arm.APPROVED_REUSE:
+    if planned.arm in {
+        Arm.APPROVED_REUSE,
+        Arm.APPROVED_REUSE_LEGACY,
+        Arm.APPROVED_REUSE_SELECTIVE,
+    }:
         prepare_approved_corpus(state_root=state, workspace=worktree, reviewer_id=reviewer_id)
+    if planned.arm is Arm.APPROVED_REUSE_SELECTIVE:
+        pico_config = PicoConfig.model_validate(
+            {
+                **pico_config.model_dump(mode="python"),
+                "context": {
+                    **pico_config.context.model_dump(mode="python"),
+                    "knowledge_selection_mode": "task_relevance_v1",
+                },
+            }
+        )
 
     old_trace_root = os.environ.get("PICO_TRACING_DIR")
     os.environ["PICO_TRACING_DIR"] = str(state)
@@ -435,11 +449,20 @@ async def _execute_turn(*, paths, manifest, planned, worktree, state, reviewer_i
         replacement_for_run_id=planned.replacement_for_run_id,
         repository_read_paths=refs["repository_read_paths"],
         changed_paths=_changed_paths(worktree),
+        relevance_selection_refs=refs["relevance_selection_refs"],
+        relevance_selected_candidate_ids=refs["relevance_selected_candidate_ids"],
+        relevance_abstained_candidate_ids=refs["relevance_abstained_candidate_ids"],
+        relevance_abstention_reason_counts=refs["relevance_abstention_reason_counts"],
     )
 
 
 def _short_run_name(planned: PlannedRun) -> str:
-    arm = "a" if planned.arm is Arm.NO_REUSE else "b"
+    arm = {
+        Arm.NO_REUSE: "a",
+        Arm.APPROVED_REUSE: "b",
+        Arm.APPROVED_REUSE_LEGACY: "b",
+        Arm.APPROVED_REUSE_SELECTIVE: "c",
+    }[planned.arm]
     return f"{planned.task_id.removeprefix('p3r-')}-r{planned.repetition}-{arm}"
 
 

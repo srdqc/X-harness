@@ -91,7 +91,13 @@ def extract_run_metrics(
 
     store = KnowledgeRecordStore(knowledge_state_root)
     usages = store.list_usages(turn_id=turn_id)
-    retrieval_ids = tuple(sorted({item.retrieval_id for item in usages}))
+    selections = store.list_relevance_selections(turn_id=turn_id)
+    retrieval_ids = tuple(
+        sorted(
+            {item.retrieval_id for item in usages}
+            | {item.retrieval_id for item in selections}
+        )
+    )
     candidate_ids = tuple(sorted({item.candidate_id for item in usages}))
     retrieved_ids: set[str] = set()
     for retrieval_id in retrieval_ids:
@@ -217,6 +223,34 @@ def extract_run_metrics(
             tuple(repository_read_paths)
             if repository_read_paths is not None
             else evidence_paths
+        ),
+        "relevance_selection_refs": tuple(item.selection_id for item in selections),
+        "relevance_selected_candidate_ids": tuple(
+            sorted(
+                {
+                    item.candidate_id
+                    for item in selections
+                    if item.decision.value == "select"
+                }
+            )
+        ),
+        "relevance_abstained_candidate_ids": tuple(
+            sorted(
+                {
+                    item.candidate_id
+                    for item in selections
+                    if item.decision.value == "abstain"
+                }
+            )
+        ),
+        "relevance_abstention_reason_counts": tuple(
+            sorted(
+                Counter(
+                    item.reason.value
+                    for item in selections
+                    if item.decision.value == "abstain"
+                ).items()
+            )
         ),
     }
     return metrics, refs

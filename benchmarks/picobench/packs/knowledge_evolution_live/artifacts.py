@@ -125,6 +125,16 @@ def load_run(path: Path) -> RunRecord:
         "replacement_for_run_id": raw.get("replacement_for_run_id"),
         "repository_read_paths": tuple(raw.get("repository_read_paths", ())),
         "changed_paths": tuple(raw.get("changed_paths", ())),
+        "relevance_selection_refs": tuple(raw.get("relevance_selection_refs", ())),
+        "relevance_selected_candidate_ids": tuple(
+            raw.get("relevance_selected_candidate_ids", ())
+        ),
+        "relevance_abstained_candidate_ids": tuple(
+            raw.get("relevance_abstained_candidate_ids", ())
+        ),
+        "relevance_abstention_reason_counts": tuple(
+            tuple(item) for item in raw.get("relevance_abstention_reason_counts", ())
+        ),
     }
     record = RunRecord(
         **{
@@ -144,6 +154,10 @@ def load_run(path: Path) -> RunRecord:
                     "replacement_for_run_id",
                     "repository_read_paths",
                     "changed_paths",
+                    "relevance_selection_refs",
+                    "relevance_selected_candidate_ids",
+                    "relevance_abstained_candidate_ids",
+                    "relevance_abstention_reason_counts",
                 }
             },
             "arm": Arm(raw["arm"]),

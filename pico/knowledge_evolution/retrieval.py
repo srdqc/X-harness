@@ -16,6 +16,14 @@ from .applicability import (
     KnowledgeApplicabilityResult,
     evaluate_applicability,
 )
+from .relevance import (
+    KnowledgeRelevanceSelection,
+    KnowledgeSelectionMode,
+    RelevanceDecision,
+    RelevanceReason,
+    TaskRelevanceQuery,
+    select_relevant_candidates,
+)
 from .store import ImmutableWriteStatus, KnowledgeRecordStore, KnowledgeStoreError
 from .types import CandidateType, KnowledgeCandidate, require_digest, structural_digest
 
@@ -169,10 +177,12 @@ class KnowledgeRetriever:
         environment: ApplicabilityEnvironment,
         *,
         max_candidates: int = 5,
+        selection_mode: KnowledgeSelectionMode = KnowledgeSelectionMode.LEGACY_APPLICABLE,
     ) -> None:
         self.store = store
         self.environment = environment
         self.max_candidates = max(1, max_candidates)
+        self.selection_mode = selection_mode
 
     def retrieve(
         self,
@@ -189,7 +199,7 @@ class KnowledgeRetriever:
         candidates = tuple(
             item for item in self.store.list_candidates() if item.candidate_type in candidate_types
         )
-        ranked: list[tuple[float, KnowledgeCandidate, KnowledgeApplicabilityResult]] = []
+        applicable: list[tuple[KnowledgeCandidate, KnowledgeApplicabilityResult]] = []
         suppressed: list[tuple[str, SuppressionReason]] = []
         for candidate in candidates:
             applicability = evaluate_applicability(
@@ -205,14 +215,89 @@ class KnowledgeRetriever:
             if applicability.status is not ApplicabilityStatus.APPLICABLE:
                 suppressed.append((candidate.candidate_id, _suppression(applicability)))
                 continue
-            score = _score(query, candidate)
-            if score <= 0:
-                suppressed.append((candidate.candidate_id, SuppressionReason.IRRELEVANT))
-                continue
-            ranked.append((score, candidate, applicability))
-        ranked.sort(key=lambda item: (-item[0], item[1].candidate_id))
+            applicable.append((candidate, applicability))
         limit = min(self.max_candidates, top_k or self.max_candidates)
-        selected_values = ranked[:limit]
+        unsupported_query = False
+        try:
+            relevance_query = TaskRelevanceQuery.from_task(query)
+        except (TypeError, ValueError):
+            if self.selection_mode is KnowledgeSelectionMode.LEGACY_APPLICABLE:
+                raise
+            relevance_query = TaskRelevanceQuery.from_task("")
+            unsupported_query = True
+        selections: tuple[KnowledgeRelevanceSelection, ...]
+        if self.selection_mode is KnowledgeSelectionMode.TASK_RELEVANCE_V1:
+            selected, selections = select_relevant_candidates(
+                relevance_query,
+                (item[0] for item in applicable),
+                repository_scope_id=self.environment.repository_scope_id,
+                turn_id=turn_id,
+                retrieval_id=retrieval_id,
+                limit=limit,
+                unsupported_input=unsupported_query,
+            )
+            applicability_by_id = {item.candidate_id: result for item, result in applicable}
+            selected_values = [
+                (score, candidate, applicability_by_id[candidate.candidate_id])
+                for candidate, score in selected
+            ]
+            suppressed.extend(
+                (item.candidate_id, SuppressionReason.IRRELEVANT)
+                for item in selections
+                if item.decision is RelevanceDecision.ABSTAIN
+            )
+            ranked_ids = tuple(
+                item.candidate_id
+                for item in sorted(selections, key=lambda value: value.rank)
+                if item.decision is RelevanceDecision.SELECT
+            )
+        else:
+            ranked = [(_score(query, candidate), candidate, result) for candidate, result in applicable]
+            ranked.sort(key=lambda item: (-item[0], item[1].candidate_id))
+            positive = [item for item in ranked if item[0] > 0]
+            selected_values = positive[:limit]
+            selected_ids = {item[1].candidate_id for item in selected_values}
+            selection_values: list[KnowledgeRelevanceSelection] = []
+            for rank, (score, candidate, _result) in enumerate(ranked, start=1):
+                selected = candidate.candidate_id in selected_ids
+                reason = (
+                    RelevanceReason.SELECT_RELEVANT
+                    if selected
+                    else (
+                        RelevanceReason.ABSTAIN_NO_MEANINGFUL_OVERLAP
+                        if score <= 0
+                        else RelevanceReason.ABSTAIN_SELECTION_LIMIT
+                    )
+                )
+                selection_values.append(
+                    KnowledgeRelevanceSelection.create(
+                        selection_id="selection-"
+                        + structural_digest(
+                            {"retrieval_id": retrieval_id, "candidate_id": candidate.candidate_id}
+                        ),
+                        retrieval_id=retrieval_id,
+                        turn_id=turn_id,
+                        repository_scope_id=self.environment.repository_scope_id,
+                        selection_mode=self.selection_mode,
+                        query_digest=relevance_query.query_digest,
+                        candidate_id=candidate.candidate_id,
+                        candidate_type=candidate.candidate_type,
+                        rank=rank,
+                        relevance_score=round(score, 8),
+                        meaningful_overlap=(),
+                        identifier_overlap=(),
+                        decision=(RelevanceDecision.SELECT if selected else RelevanceDecision.ABSTAIN),
+                        reason=reason,
+                        selector_version=1,
+                    )
+                )
+                if score <= 0:
+                    suppressed.append((candidate.candidate_id, SuppressionReason.IRRELEVANT))
+            selections = tuple(selection_values)
+            ranked_ids = tuple(item[1].candidate_id for item in positive)
+        for selection in selections:
+            if self.store.write_relevance_selection(selection) is ImmutableWriteStatus.CONFLICT:
+                raise KnowledgeStoreError("immutable relevance selection conflict")
         retrieved = tuple(
             RetrievedKnowledge(candidate, applicability, rank, score)
             for rank, (score, candidate, applicability) in enumerate(selected_values, start=1)
@@ -226,14 +311,18 @@ class KnowledgeRetriever:
             retrieval_id=retrieval_id,
             turn_id=turn_id,
             repository_scope_id=self.environment.repository_scope_id,
-            query_digest=structural_digest({"query": query}),
+            query_digest=(
+                relevance_query.query_digest
+                if self.selection_mode is KnowledgeSelectionMode.TASK_RELEVANCE_V1
+                else structural_digest({"query": query})
+            ),
             candidate_set_digest=structural_digest(
                 {"candidate_ids": sorted(item.candidate_id for item in candidates)}
             ),
-            ranked_candidate_ids=tuple(item.candidate_id for _, item, _ in ranked),
+            ranked_candidate_ids=ranked_ids,
             selected_candidate_ids=tuple(item.candidate.candidate_id for item in retrieved),
             suppressed=tuple(sorted(suppressed, key=lambda item: item[0])),
-            applicable_count=len(ranked),
+            applicable_count=len(ranked_ids),
             suppressed_count=len(suppressed),
             latency_ms=round(float(elapsed), 6),
             created_at=created_at or spans.now_iso(),

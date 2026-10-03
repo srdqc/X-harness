@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pico.knowledge_evolution.applicability import ApplicabilityEnvironment
+from pico.knowledge_evolution.relevance import KnowledgeSelectionMode
 from pico.knowledge_evolution.retrieval import KnowledgeRetriever
 from pico.knowledge_evolution.store import KnowledgeRecordStore
 from pico.knowledge_evolution.types import CandidateType, structural_digest
@@ -23,6 +24,7 @@ class ApplicableKnowledgeSkillSource:
     registry: Any
     environment_factory: Callable[[], ApplicabilityEnvironment]
     physical_source: str
+    selection_mode: KnowledgeSelectionMode = KnowledgeSelectionMode.LEGACY_APPLICABLE
     name: str = "experience"
     weight: float = 1.0
 
@@ -42,6 +44,7 @@ class ApplicableKnowledgeSkillSource:
             self.store,
             self.environment_factory(),
             max_candidates=max(1, k),
+            selection_mode=self.selection_mode,
         )
         items, receipt = retriever.retrieve(
             query,

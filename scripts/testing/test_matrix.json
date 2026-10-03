@@ -80,6 +80,7 @@
         "tests/test_knowledge_materialization.py",
         "tests/test_knowledge_applicability.py",
         "tests/test_knowledge_retrieval.py",
+        "tests/test_knowledge_relevance.py",
         "tests/test_knowledge_usage.py",
         "tests/test_knowledge_runtime_integration.py",
         "tests/test_picobench_knowledge_evolution.py",
@@ -90,6 +91,8 @@
     "p3r_live_evaluation": {
       "targets": [
         "tests/test_picobench_knowledge_evolution_live.py",
+        "tests/test_knowledge_relevance.py",
+        "tests/test_knowledge_runtime_integration.py",
         "tests/test_execution_receipts.py",
         "tests/test_knowledge_canonicalization.py",
         "tests/test_picobench_runtime_baseline.py",

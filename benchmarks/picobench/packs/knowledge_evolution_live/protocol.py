@@ -35,10 +35,22 @@ REPLICATION_QUESTIONS = (
     "Does int-01 treatment again reduce repository reads/tokens relative to baseline?",
     "Do all treatment tasks still show identical 6-retrieved / 5-injected / 1-referenced behavior?",
 )
+P3R3_EXPLORATORY_QUESTIONS = (
+    "Does selective mode eliminate identical all-six exposure across heterogeneous tasks?",
+    "Does nav selective reduce discovery cost relative to legacy without reducing verified success?",
+    "Does integration selective retain genuinely relevant Skill-flow knowledge?",
+    "Does debug selective retain fail-closed/recovery knowledge without unrelated knowledge?",
+    "Can selective mode return zero candidates for an unrelated or low-signal task?",
+    "Does selective mode preserve scope, lifecycle, applicability, authority, and safety?",
+)
 
 
 def selected_task_ids(mode: CampaignMode) -> tuple[str, ...]:
-    return PILOT_TASK_IDS if mode is CampaignMode.PILOT else tuple(item.task_id for item in TASKS)
+    return (
+        PILOT_TASK_IDS
+        if mode in {CampaignMode.PILOT, CampaignMode.P3R3_EXPLORATORY}
+        else tuple(item.task_id for item in TASKS)
+    )
 
 
 def repetitions(mode: CampaignMode) -> int:
@@ -52,6 +64,22 @@ def arm_order(*, task_id: str, repetition: int, seed: int) -> tuple[Arm, Arm]:
     if repetition % 2 == 0:
         parity ^= 1
     return (Arm.NO_REUSE, Arm.APPROVED_REUSE) if parity == 0 else (Arm.APPROVED_REUSE, Arm.NO_REUSE)
+
+
+def arms_for_mode(mode: CampaignMode) -> tuple[Arm, ...]:
+    if mode is CampaignMode.P3R3_EXPLORATORY:
+        return (
+            Arm.NO_REUSE,
+            Arm.APPROVED_REUSE_LEGACY,
+            Arm.APPROVED_REUSE_SELECTIVE,
+        )
+    return (Arm.NO_REUSE, Arm.APPROVED_REUSE)
+
+
+def experimental_arm_order(*, task_id: str, repetition: int, seed: int) -> tuple[Arm, ...]:
+    arms = arms_for_mode(CampaignMode.P3R3_EXPLORATORY)
+    offset = int(canonical_digest({"seed": seed, "task_id": task_id, "repetition": repetition})[:8], 16) % len(arms)
+    return arms[offset:] + arms[:offset]
 
 
 def make_plan(
@@ -69,7 +97,12 @@ def make_plan(
     )
     for repetition in repetition_values:
         for task_id in selected_task_ids(mode):
-            for arm in arm_order(task_id=task_id, repetition=repetition, seed=seed):
+            ordered_arms = (
+                experimental_arm_order(task_id=task_id, repetition=repetition, seed=seed)
+                if mode is CampaignMode.P3R3_EXPLORATORY
+                else arm_order(task_id=task_id, repetition=repetition, seed=seed)
+            )
+            for arm in ordered_arms:
                 order += 1
                 runs.append(
                     PlannedRun(
@@ -109,6 +142,28 @@ def fairness_digest(manifest: CampaignManifest, task_id: str, repetition: int) -
     return canonical_digest(fairness_payload(manifest, task_id, repetition))
 
 
+def arm_configuration_payload(
+    manifest: CampaignManifest, planned: PlannedRun
+) -> dict[str, Any]:
+    payload = fairness_payload(manifest, planned.task_id, planned.repetition)
+    reuse = planned.arm is not Arm.NO_REUSE
+    selection_mode = {
+        Arm.NO_REUSE: None,
+        Arm.APPROVED_REUSE: "legacy_applicable",
+        Arm.APPROVED_REUSE_LEGACY: "legacy_applicable",
+        Arm.APPROVED_REUSE_SELECTIVE: "task_relevance_v1",
+    }[planned.arm]
+    return {
+        **payload,
+        "p3_reuse_available": reuse,
+        "knowledge_selection_mode": selection_mode,
+    }
+
+
+def arm_configuration_digest(manifest: CampaignManifest, planned: PlannedRun) -> str:
+    return canonical_digest(arm_configuration_payload(manifest, planned))
+
+
 def assert_fair_plan(manifest: CampaignManifest) -> None:
     repetition_values = (
         (manifest.pilot_repetition,)
@@ -119,7 +174,7 @@ def assert_fair_plan(manifest: CampaignManifest) -> None:
         (task_id, repetition, arm)
         for task_id in manifest.task_ids
         for repetition in repetition_values
-        for arm in Arm
+        for arm in arms_for_mode(manifest.mode)
     }
     actual = {(item.task_id, item.repetition, item.arm) for item in manifest.planned_runs}
     if expected != actual:
@@ -157,7 +212,11 @@ def create_manifest(
         "runtime_config_digest": runtime_config_digest,
         "knowledge_corpus_digest": corpus_digest(),
         "pilot_repetition": pilot_repetition,
-        "replication_questions": REPLICATION_QUESTIONS,
+        "replication_questions": (
+            P3R3_EXPLORATORY_QUESTIONS
+            if mode is CampaignMode.P3R3_EXPLORATORY
+            else REPLICATION_QUESTIONS
+        ),
     }
     manifest = CampaignManifest.create(
         campaign_id=f"p3r-{canonical_digest(identity)[:16]}",
@@ -177,7 +236,11 @@ def create_manifest(
         planned_runs=make_plan(mode, seed=seed, pilot_repetition=pilot_repetition),
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
         pilot_repetition=pilot_repetition,
-        replication_questions=REPLICATION_QUESTIONS,
+        replication_questions=(
+            P3R3_EXPLORATORY_QUESTIONS
+            if mode is CampaignMode.P3R3_EXPLORATORY
+            else REPLICATION_QUESTIONS
+        ),
     )
     manifest.validate()
     assert_fair_plan(manifest)
@@ -190,11 +253,16 @@ __all__ = [
     "MATERIAL_MEDIAN_REGRESSION",
     "REPEATED_BASELINE_PASS_TREATMENT_FAIL",
     "REPLICATION_QUESTIONS",
+    "P3R3_EXPLORATORY_QUESTIONS",
     "arm_order",
+    "arm_configuration_digest",
+    "arm_configuration_payload",
+    "arms_for_mode",
     "assert_fair_plan",
     "create_manifest",
     "fairness_digest",
     "fairness_payload",
+    "experimental_arm_order",
     "make_plan",
     "repetitions",
     "selected_task_ids",

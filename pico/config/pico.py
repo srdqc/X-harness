@@ -73,6 +73,11 @@ class ContextConfig(_Base):
     仍可加载；``build_context_engine`` 忽略其 Value。
     """
 
+    knowledge_selection_mode: Literal["legacy_applicable", "task_relevance_v1"] = (
+        "legacy_applicable"
+    )
+    """P3 candidate selection; legacy remains the production default."""
+
     # Curator 历史路径参数。
     fast_path_threshold: float = 0.60
     """Curator Fast Path Cutoff。低于 Budget 此比例时 Zero-LLM Pass-through。"""

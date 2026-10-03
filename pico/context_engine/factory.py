@@ -110,6 +110,7 @@ def build_context_engine(
             RepositoryScopeResolver,
             materialized_skill_root,
         )
+        from pico.knowledge_evolution.relevance import KnowledgeSelectionMode
         from pico.knowledge_evolution.runtime import KnowledgeContextSegmentBuilder
         from pico.memory_engine.skill_forge.knowledge_source import (
             ApplicableKnowledgeSkillSource,
@@ -134,7 +135,10 @@ def build_context_engine(
                     ),
                 )
 
-            p3_builder = KnowledgeContextSegmentBuilder(store, environment_factory)
+            selection_mode = KnowledgeSelectionMode(config.knowledge_selection_mode)
+            p3_builder = KnowledgeContextSegmentBuilder(
+                store, environment_factory, selection_mode=selection_mode
+            )
             source_label = f"experience:{scope_id}"
             p3_registry = SkillRegistry(
                 workspace,
@@ -145,6 +149,7 @@ def build_context_engine(
                 registry=p3_registry,
                 environment_factory=environment_factory,
                 physical_source=source_label,
+                selection_mode=selection_mode,
             )
     except Exception:
         # P3 knowledge is optional guidance. Resolution/storage failure keeps

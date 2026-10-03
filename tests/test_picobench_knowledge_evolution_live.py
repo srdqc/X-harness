@@ -32,6 +32,8 @@ from benchmarks.picobench.packs.knowledge_evolution_live.prepare import (
 )
 from benchmarks.picobench.packs.knowledge_evolution_live.protocol import (
     REPLICATION_QUESTIONS,
+    arm_configuration_digest,
+    arm_configuration_payload,
     arm_order,
     assert_fair_plan,
     create_manifest,
@@ -209,6 +211,77 @@ def test_pilot_repetition_two_reverses_order_and_freezes_questions() -> None:
         first_order = tuple(item.arm for item in first.planned_runs if item.task_id == task_id)
         second_order = tuple(item.arm for item in second.planned_runs if item.task_id == task_id)
         assert second_order == tuple(reversed(first_order))
+
+
+def test_p3r3_three_arm_manifest_is_deterministic_and_isolated() -> None:
+    first = _manifest(CampaignMode.P3R3_EXPLORATORY)
+    second = _manifest(CampaignMode.P3R3_EXPLORATORY)
+    assert first == second
+    assert len(first.planned_runs) == 9
+    expected = {
+        Arm.NO_REUSE,
+        Arm.APPROVED_REUSE_LEGACY,
+        Arm.APPROVED_REUSE_SELECTIVE,
+    }
+    for task_id in first.task_ids:
+        planned = tuple(item for item in first.planned_runs if item.task_id == task_id)
+        assert {item.arm for item in planned} == expected
+        assert len({arm_configuration_digest(first, item) for item in planned}) == 3
+        common = []
+        for item in planned:
+            payload = arm_configuration_payload(first, item)
+            payload.pop("p3_reuse_available")
+            payload.pop("knowledge_selection_mode")
+            common.append(payload)
+        assert common[0] == common[1] == common[2]
+    assert first.replication_questions != REPLICATION_QUESTIONS
+    assert_fair_plan(first)
+
+
+def test_p3r3_reducer_reports_three_arm_relevance_funnel_without_reinterpreting_pairs() -> None:
+    manifest = _manifest(CampaignMode.P3R3_EXPLORATORY)
+    all_candidates = tuple(f"candidate-{index}" for index in range(6))
+    selective_by_task = {
+        "p3r-nav-01": ("candidate-0",),
+        "p3r-debug-01": ("candidate-4",),
+        "p3r-int-01": ("candidate-2", "candidate-1"),
+    }
+    records = []
+    for planned in manifest.planned_runs:
+        selected = (
+            ()
+            if planned.arm is Arm.NO_REUSE
+            else (
+                all_candidates
+                if planned.arm is Arm.APPROVED_REUSE_LEGACY
+                else selective_by_task[planned.task_id]
+            )
+        )
+        abstained = tuple(item for item in all_candidates if item not in selected)
+        records.append(
+            _record(
+                manifest,
+                planned,
+                1,
+                retrieved_candidate_ids=selected,
+                injected_candidate_ids=selected,
+                relevance_selected_candidate_ids=selected,
+                relevance_abstained_candidate_ids=abstained,
+                relevance_abstention_reason_counts=(
+                    (("abstain_no_meaningful_overlap", len(abstained)),)
+                    if abstained
+                    else ()
+                ),
+            )
+        )
+    result = reduce_campaign(manifest, tuple(records))
+    assert result["schema"] == "pico.picobench.p3r3-exploratory-reduction.v1"
+    assert result["claim_eligible"] is False
+    assert result["fairness_valid"] is True
+    assert len(result["comparisons"]) == 3
+    selective = result["candidate_set_overlap"][Arm.APPROVED_REUSE_SELECTIVE.value]
+    assert selective["selected"]["distinct_set_count"] == 3
+    assert result["abstention_reason_counts"]["abstain_no_meaningful_overlap"] > 0
 
 
 def test_replication_lock_preserves_pilot_inputs_except_verifier_version() -> None:
@@ -727,7 +800,7 @@ def test_repaired_verifier_digest_does_not_replace_historical_digest() -> None:
     manifest = _manifest()
     assert spec.digest != historical_digest
     assert dict(manifest.verifier_digests)["p3r-int-01"] == spec.digest
-    assert manifest.benchmark_version.endswith("-v3")
+    assert manifest.benchmark_version.endswith("-v4")
 
 
 def test_debug_verifier_is_semantic_version_three_and_preserves_old_digest() -> None:

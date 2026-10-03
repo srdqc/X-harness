@@ -9,11 +9,12 @@ from typing import Any
 
 from benchmarks.picobench.canonical import canonical_digest, to_primitive
 
-SCHEMA_VERSION = 3
-BENCHMARK_VERSION = "p3r-live-experience-reuse-v3"
+SCHEMA_VERSION = 4
+BENCHMARK_VERSION = "p3r-live-experience-reuse-v4"
 LEGACY_BENCHMARK_VERSIONS = {
     "p3r-live-experience-reuse-v1",
     "p3r-live-experience-reuse-v2",
+    "p3r-live-experience-reuse-v3",
 }
 MANIFEST_SCHEMA = "pico.picobench.p3r-campaign.v1"
 RUN_RECORD_SCHEMA = "pico.picobench.p3r-run.v1"
@@ -23,11 +24,14 @@ class CampaignMode(StrEnum):
     PILOT = "pilot"
     OFFICIAL_SINGLE = "official-single"
     OFFICIAL_REPEAT2 = "official-repeat2"
+    P3R3_EXPLORATORY = "p3r3-exploratory"
 
 
 class Arm(StrEnum):
     NO_REUSE = "no_reuse"
     APPROVED_REUSE = "approved_reuse"
+    APPROVED_REUSE_LEGACY = "approved_reuse_legacy"
+    APPROVED_REUSE_SELECTIVE = "approved_reuse_selective"
 
 
 class BenefitClassification(StrEnum):
@@ -166,7 +170,7 @@ class CampaignManifest:
         return payload
 
     def validate(self) -> None:
-        if self.schema != MANIFEST_SCHEMA or self.schema_version not in {1, 2, SCHEMA_VERSION}:
+        if self.schema != MANIFEST_SCHEMA or self.schema_version not in {1, 2, 3, SCHEMA_VERSION}:
             raise ValueError("unsupported P3R campaign manifest schema")
         if self.manifest_digest != canonical_digest(self._payload()):
             raise ValueError("P3R campaign manifest digest mismatch")
@@ -275,6 +279,10 @@ class RunRecord:
     replacement_for_run_id: str | None = None
     repository_read_paths: tuple[str, ...] = ()
     changed_paths: tuple[str, ...] = ()
+    relevance_selection_refs: tuple[str, ...] = ()
+    relevance_selected_candidate_ids: tuple[str, ...] = ()
+    relevance_abstained_candidate_ids: tuple[str, ...] = ()
+    relevance_abstention_reason_counts: tuple[tuple[str, int], ...] = ()
     integrity_digest: str = ""
     schema: str = RUN_RECORD_SCHEMA
     schema_version: int = SCHEMA_VERSION
@@ -291,6 +299,11 @@ class RunRecord:
             payload.pop("repository_read_paths", None)
             payload.pop("changed_paths", None)
             payload["metrics"].pop("first_edit_iteration", None)
+        if self.schema_version < 4:
+            payload.pop("relevance_selection_refs", None)
+            payload.pop("relevance_selected_candidate_ids", None)
+            payload.pop("relevance_abstained_candidate_ids", None)
+            payload.pop("relevance_abstention_reason_counts", None)
         if self.schema_version == 1:
             for key in (
                 "run_validity",
@@ -319,7 +332,7 @@ class RunRecord:
 
     def validate(self) -> None:
         digest = self.integrity_digest
-        if self.schema != RUN_RECORD_SCHEMA or self.schema_version not in {1, 2, SCHEMA_VERSION}:
+        if self.schema != RUN_RECORD_SCHEMA or self.schema_version not in {1, 2, 3, SCHEMA_VERSION}:
             raise ValueError("unsupported P3R run-record schema")
         if digest != canonical_digest(self._payload()):
             raise ValueError("P3R run-record integrity mismatch")

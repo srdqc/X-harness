@@ -10,6 +10,7 @@ from pico.knowledge_evolution import (
     ApplicabilityEnvironment,
     CandidateType,
     KnowledgeRecordStore,
+    KnowledgeSelectionMode,
     LifecycleActorType,
     LifecycleReason,
     LifecycleState,
@@ -152,6 +153,38 @@ async def test_corrupt_optional_store_falls_back_to_empty_without_provider_or_to
     assert segment.text == ""
     assert segment.meta["p3_injected_candidate_ids"] == []
     assert segment.meta["p3_knowledge_failure"]
+
+
+@pytest.mark.asyncio
+async def test_selective_abstention_emits_no_injected_usage(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    state = tmp_path / "state"
+    store = KnowledgeRecordStore(state)
+    scope = make_scope(store)
+    guard = file_guard(workspace, "project.cfg", b"safe")
+    active_materialized_candidate(
+        store,
+        scope,
+        "experience-guard",
+        CandidateType.EXPERIENCE,
+        title="Fail-closed guard recovery",
+        content="Preserve fail-closed guard encoding and applicability semantics.",
+        fingerprints=(guard,),
+    )
+    builder = KnowledgeContextSegmentBuilder(
+        store,
+        lambda: ApplicabilityEnvironment(scope.repository_scope_id, workspace),
+        selection_mode=KnowledgeSelectionMode.TASK_RELEVANCE_V1,
+    )
+    recorder = _recorder(state, "turn-abstain")
+    with evidence.turn_scope(recorder):
+        segment = await builder.build(_context("update unrelated weather forecast"))
+    assert segment.text == ""
+    assert segment.meta["p3_injected_candidate_ids"] == []
+    assert store.list_usages(turn_id="turn-abstain") == ()
+    decisions = store.list_relevance_selections(turn_id="turn-abstain")
+    assert len(decisions) == 1
+    assert decisions[0].decision.value == "abstain"
 
 
 def test_runtime_adapter_has_no_tool_permission_terminal_or_verifier_authority() -> None:

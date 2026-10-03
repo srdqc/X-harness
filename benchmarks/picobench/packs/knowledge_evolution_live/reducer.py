@@ -89,6 +89,8 @@ def classify(
 
 
 def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) -> dict[str, Any]:
+    if manifest.mode is CampaignMode.P3R3_EXPLORATORY:
+        return _reduce_p3r3_exploratory(manifest, records)
     manifest.validate()
     for record in records:
         record.validate()
@@ -305,11 +307,114 @@ def _replication_evidence(record: RunRecord) -> dict[str, Any]:
         "injected_candidate_ids": record.injected_candidate_ids,
         "referenced_skill_ids": record.referenced_candidate_ids,
         "activated_skill_ids": record.activated_candidate_ids,
+        "relevance_selected_candidate_ids": record.relevance_selected_candidate_ids,
+        "relevance_abstained_candidate_ids": record.relevance_abstained_candidate_ids,
+        "relevance_abstention_reason_counts": dict(
+            record.relevance_abstention_reason_counts
+        ),
+        "retrieval_select_injection_funnel": {
+            "applicable": len(
+                set(record.relevance_selected_candidate_ids)
+                | set(record.relevance_abstained_candidate_ids)
+            ),
+            "selected": len(set(record.relevance_selected_candidate_ids)),
+            "injected": len(set(record.injected_candidate_ids)),
+        },
         "changed_paths": record.changed_paths,
         "repository_read_paths": record.repository_read_paths,
         "iteration_exhausted": record.metrics.iteration_exhausted,
         "verifier_findings": record.verifier_findings,
     }
+
+
+def _reduce_p3r3_exploratory(
+    manifest: CampaignManifest, records: tuple[RunRecord, ...]
+) -> dict[str, Any]:
+    """Reduce only the isolated three-arm experiment; never reinterpret paired history."""
+
+    manifest.validate()
+    for record in records:
+        record.validate()
+    expected_arms = {
+        Arm.NO_REUSE,
+        Arm.APPROVED_REUSE_LEGACY,
+        Arm.APPROVED_REUSE_SELECTIVE,
+    }
+    grouped: dict[tuple[str, int], dict[Arm, list[RunRecord]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for record in records:
+        grouped[(record.task_id, record.repetition)][record.arm].append(record)
+    comparisons: list[dict[str, Any]] = []
+    selected_records: list[RunRecord] = []
+    fairness_valid = True
+    for (task_id, repetition), arms in sorted(grouped.items()):
+        valid = {
+            arm: tuple(item for item in values if item.run_validity is RunValidity.VALID)
+            for arm, values in arms.items()
+        }
+        if set(valid) != expected_arms or any(not valid[arm] for arm in expected_arms):
+            continue
+        chosen = {
+            arm: sorted(
+                valid[arm], key=lambda item: item.replacement_for_run_id is not None
+            )[-1]
+            for arm in expected_arms
+        }
+        selected_records.extend(chosen.values())
+        pair_fair = len({item.fairness_digest for item in chosen.values()}) == 1
+        fairness_valid &= pair_fair
+        comparisons.append(
+            {
+                "task_id": task_id,
+                "repetition": repetition,
+                "fair": pair_fair,
+                "arms": {
+                    arm.value: _replication_evidence(chosen[arm])
+                    for arm in sorted(expected_arms, key=lambda item: item.value)
+                },
+            }
+        )
+    by_arm = {
+        arm: tuple(item for item in selected_records if item.arm is arm)
+        for arm in expected_arms
+    }
+    result = {
+        "schema": "pico.picobench.p3r3-exploratory-reduction.v1",
+        "campaign_id": manifest.campaign_id,
+        "campaign_mode": manifest.mode.value,
+        "claim_eligible": False,
+        "campaign_label": "P3R.3 EXPLORATORY / NOT FOR BENEFIT CLAIM",
+        "complete": {item.run_id for item in manifest.planned_runs}
+        <= {item.run_id for item in records},
+        "fairness_valid": fairness_valid,
+        "questions": manifest.replication_questions,
+        "comparisons": comparisons,
+        "candidate_set_overlap": {
+            arm.value: {
+                "selected": _candidate_set_overlap(
+                    by_arm[arm], "relevance_selected_candidate_ids"
+                ),
+                "injected": _candidate_set_overlap(by_arm[arm], "injected_candidate_ids"),
+            }
+            for arm in (
+                Arm.APPROVED_REUSE_LEGACY,
+                Arm.APPROVED_REUSE_SELECTIVE,
+            )
+        },
+        "abstention_reason_counts": dict(
+            sorted(
+                Counter(
+                    reason
+                    for item in by_arm[Arm.APPROVED_REUSE_SELECTIVE]
+                    for reason, count in item.relevance_abstention_reason_counts
+                    for _ in range(count)
+                ).items()
+            )
+        ),
+    }
+    result["semantic_digest"] = canonical_digest(result)
+    return to_primitive(result)
 
 
 def _candidate_set_overlap(
