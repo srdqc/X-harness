@@ -78,13 +78,9 @@ def classify(
     if severe >= 2:
         return BenefitClassification.REGRESSIVE
     improved = any(value <= BENEFICIAL_MEDIAN_IMPROVEMENT for value in available.values())
-    unexplained_regression = any(
-        value > MATERIAL_MEDIAN_REGRESSION for value in available.values()
-    )
+    unexplained_regression = any(value > MATERIAL_MEDIAN_REGRESSION for value in available.values())
     return (
-        BenefitClassification.BENEFICIAL
-        if improved and not unexplained_regression
-        else BenefitClassification.NEUTRAL
+        BenefitClassification.BENEFICIAL if improved and not unexplained_regression else BenefitClassification.NEUTRAL
     )
 
 
@@ -97,9 +93,7 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
     expected = {item.run_id for item in manifest.planned_runs}
     actual = {item.run_id for item in records}
     complete = expected <= actual
-    grouped: dict[tuple[str, int], dict[Arm, list[RunRecord]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    grouped: dict[tuple[str, int], dict[Arm, list[RunRecord]]] = defaultdict(lambda: defaultdict(list))
     for record in records:
         grouped[(record.task_id, record.repetition)][record.arm].append(record)
     pairs: list[dict[str, Any]] = []
@@ -110,8 +104,9 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
     fairness_valid = True
     incomplete_pairs: list[dict[str, Any]] = []
     selected_records: list[RunRecord] = []
+    treatment = Arm.APPROVED_REUSE if manifest.mode is CampaignMode.PILOT else Arm.APPROVED_REUSE_SELECTIVE
     for (task_id, repetition), arms in sorted(grouped.items()):
-        if set(arms) != {Arm.NO_REUSE, Arm.APPROVED_REUSE}:
+        if set(arms) != {Arm.NO_REUSE, treatment}:
             incomplete_pairs.append({"task_id": task_id, "repetition": repetition})
             continue
         valid_arms = {
@@ -121,12 +116,8 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
         if any(not values for values in valid_arms.values()):
             incomplete_pairs.append({"task_id": task_id, "repetition": repetition})
             continue
-        a = sorted(
-            valid_arms[Arm.NO_REUSE], key=lambda item: item.replacement_for_run_id is not None
-        )[-1]
-        b = sorted(
-            valid_arms[Arm.APPROVED_REUSE], key=lambda item: item.replacement_for_run_id is not None
-        )[-1]
+        a = sorted(valid_arms[Arm.NO_REUSE], key=lambda item: item.replacement_for_run_id is not None)[-1]
+        b = sorted(valid_arms[treatment], key=lambda item: item.replacement_for_run_id is not None)[-1]
         selected_records.extend((a, b))
         pair_valid = a.fairness_digest == b.fairness_digest
         fairness_valid &= pair_valid
@@ -142,7 +133,7 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
                 deltas[name] = delta
                 if name in CORE_EFFICIENCY_METRICS:
                     per_task_values[task_id][Arm.NO_REUSE][name].append(float(av.value))
-                    per_task_values[task_id][Arm.APPROVED_REUSE][name].append(float(bv.value))
+                    per_task_values[task_id][treatment][name].append(float(bv.value))
             else:
                 deltas[name] = {"absolute": None, "relative": None}
         treatment_only_paths = sorted(set(b.repository_read_paths) - set(a.repository_read_paths))
@@ -153,20 +144,18 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
                 "valid": pair_valid,
                 "verified_success": {
                     Arm.NO_REUSE.value: a_pass,
-                    Arm.APPROVED_REUSE.value: b_pass,
+                    treatment.value: b_pass,
                 },
                 "deltas": deltas,
                 "arms": {
                     Arm.NO_REUSE.value: _replication_evidence(a),
-                    Arm.APPROVED_REUSE.value: _replication_evidence(b),
+                    treatment.value: _replication_evidence(b),
                 },
                 "treatment_only_explored_paths": treatment_only_paths,
                 "treatment_only_explored_path_count": len(treatment_only_paths),
             }
         )
-    expected_pair_keys = {
-        (item.task_id, item.repetition) for item in manifest.planned_runs
-    }
+    expected_pair_keys = {(item.task_id, item.repetition) for item in manifest.planned_runs}
     incomplete_keys = {(item["task_id"], item["repetition"]) for item in incomplete_pairs}
     completed_pair_keys = {(item["task_id"], item["repetition"]) for item in pairs}
     for task_id, repetition in sorted(expected_pair_keys - incomplete_keys - completed_pair_keys):
@@ -177,29 +166,23 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
         deltas: dict[str, Any] = {}
         for name in CORE_EFFICIENCY_METRICS:
             control = arms[Arm.NO_REUSE].get(name, [])
-            treatment = arms[Arm.APPROVED_REUSE].get(name, [])
-            if control and treatment:
-                delta = paired_delta(statistics.median(control), statistics.median(treatment))
+            treatment_values = arms[treatment].get(name, [])
+            if control and treatment_values:
+                delta = paired_delta(statistics.median(control), statistics.median(treatment_values))
                 deltas[name] = delta
                 if delta["relative"] is not None:
                     median_inputs[name].append(float(delta["relative"]))
             else:
                 deltas[name] = {"absolute": None, "relative": None}
         task_pairs.append({"task_id": task_id, "arm_median_deltas": deltas})
-    arm_records = {
-        arm: tuple(item for item in selected_records if item.arm is arm) for arm in Arm
-    }
+    arm_records = {arm: tuple(item for item in selected_records if item.arm is arm) for arm in Arm}
     rates = {
-        arm.value: (
-            sum(item.verifier_outcome == "pass" for item in values) / len(values) if values else 0.0
-        )
+        arm.value: (sum(item.verifier_outcome == "pass" for item in values) / len(values) if values else 0.0)
         for arm, values in arm_records.items()
     }
     medians = {name: (statistics.median(values) if values else None) for name, values in median_inputs.items()}
     means = {name: (statistics.mean(values) if values else None) for name, values in median_inputs.items()}
-    safety_findings = tuple(
-        sorted({finding for record in records for finding in record.safety_findings})
-    )
+    safety_findings = tuple(sorted({finding for record in records for finding in record.safety_findings}))
     safety_passed = all(record.safety_outcome == "pass" for record in selected_records)
     valid_complete_pairs = len(pairs)
     expected_pair_count = len(expected_pair_keys)
@@ -207,33 +190,25 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
     diagnostic_classification = classify(
         valid=efficacy_complete and fairness_valid,
         control_success_rate=rates[Arm.NO_REUSE.value],
-        treatment_success_rate=rates[Arm.APPROVED_REUSE.value],
+        treatment_success_rate=rates[treatment.value],
         baseline_pass_treatment_fail=outcomes["a_pass_b_fail"],
         median_relative_deltas=medians,
         safety_passed=safety_passed,
     )
     classification = (
-        BenefitClassification.NOT_EVALUATED
-        if manifest.mode is CampaignMode.PILOT
-        else diagnostic_classification
+        BenefitClassification.NOT_EVALUATED if manifest.mode is CampaignMode.PILOT else diagnostic_classification
     )
     result = {
         "schema": "pico.picobench.p3r-reduction.v1",
         "campaign_id": manifest.campaign_id,
         "campaign_mode": manifest.mode.value,
         "claim_eligible": manifest.mode is not CampaignMode.PILOT,
-        "campaign_label": (
-            "PILOT / NOT FOR BENEFIT CLAIM"
-            if manifest.mode is CampaignMode.PILOT
-            else "OFFICIAL"
-        ),
+        "campaign_label": ("PILOT / NOT FOR BENEFIT CLAIM" if manifest.mode is CampaignMode.PILOT else "OFFICIAL"),
         "complete": complete,
         "planned_runs": len(manifest.planned_runs),
         "completed_runs": len(records),
         "valid_runs": sum(item.run_validity is RunValidity.VALID for item in records),
-        "infra_invalid_runs": sum(
-            item.run_validity is RunValidity.INFRA_INVALID for item in records
-        ),
+        "infra_invalid_runs": sum(item.run_validity is RunValidity.INFRA_INVALID for item in records),
         "replacement_runs": sum(item.replacement_for_run_id is not None for item in records),
         "valid_complete_pairs": valid_complete_pairs,
         "incomplete_pairs": incomplete_pairs,
@@ -245,16 +220,10 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
         "pairs": pairs,
         "replication_questions": manifest.replication_questions,
         "candidate_set_overlap": {
-            "retrieved": _candidate_set_overlap(
-                arm_records[Arm.APPROVED_REUSE], "retrieved_candidate_ids"
-            ),
-            "injected": _candidate_set_overlap(
-                arm_records[Arm.APPROVED_REUSE], "injected_candidate_ids"
-            ),
+            "retrieved": _candidate_set_overlap(arm_records[treatment], "retrieved_candidate_ids"),
+            "injected": _candidate_set_overlap(arm_records[treatment], "injected_candidate_ids"),
         },
-        "nav_cost_replication": tuple(
-            item for item in pairs if item["task_id"] == "p3r-nav-01"
-        ),
+        "nav_cost_replication": tuple(item for item in pairs if item["task_id"] == "p3r-nav-01"),
         "per_task_arm_median_pairs": task_pairs,
         "median_relative_deltas": medians,
         "mean_relative_deltas": means,
@@ -264,20 +233,14 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
         "infra_invalid_reason_counts": dict(
             sorted(
                 Counter(
-                    item.infra_invalid_reason.value
-                    for item in records
-                    if item.infra_invalid_reason is not None
+                    item.infra_invalid_reason.value for item in records if item.infra_invalid_reason is not None
                 ).items()
             )
         ),
         "provider_reliability": {
-            "logical_calls": sum(
-                int(item.metrics.provider_logical_calls.value or 0) for item in records
-            ),
+            "logical_calls": sum(int(item.metrics.provider_logical_calls.value or 0) for item in records),
             "attempts": sum(int(item.metrics.provider_attempts.value or 0) for item in records),
-            "failed_attempts": sum(
-                int(item.metrics.provider_failed_attempts.value or 0) for item in records
-            ),
+            "failed_attempts": sum(int(item.metrics.provider_failed_attempts.value or 0) for item in records),
             "recovered_failures": sum(item.recovered_provider_failure_count for item in records),
             "terminal_failures": sum(item.terminal_provider_failure for item in records),
         },
@@ -285,9 +248,7 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
             sorted(Counter(item.metrics.token_accounting_status.value for item in records).items())
         ),
         "repository_read_metric_availability": dict(
-            sorted(
-                Counter(item.metrics.repeated_repo_file_reads.availability.value for item in records).items()
-            )
+            sorted(Counter(item.metrics.repeated_repo_file_reads.availability.value for item in records).items())
         ),
         "iteration_exhaustion_count": sum(item.metrics.iteration_exhausted for item in records),
         "verifier_finding_categories": dict(
@@ -300,22 +261,17 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
 
 def _replication_evidence(record: RunRecord) -> dict[str, Any]:
     return {
-        "metrics": {
-            name: to_primitive(getattr(record.metrics, name)) for name in REPLICATION_METRICS
-        },
+        "metrics": {name: to_primitive(getattr(record.metrics, name)) for name in REPLICATION_METRICS},
         "retrieved_candidate_ids": record.retrieved_candidate_ids,
         "injected_candidate_ids": record.injected_candidate_ids,
         "referenced_skill_ids": record.referenced_candidate_ids,
         "activated_skill_ids": record.activated_candidate_ids,
         "relevance_selected_candidate_ids": record.relevance_selected_candidate_ids,
         "relevance_abstained_candidate_ids": record.relevance_abstained_candidate_ids,
-        "relevance_abstention_reason_counts": dict(
-            record.relevance_abstention_reason_counts
-        ),
+        "relevance_abstention_reason_counts": dict(record.relevance_abstention_reason_counts),
         "retrieval_select_injection_funnel": {
             "applicable": len(
-                set(record.relevance_selected_candidate_ids)
-                | set(record.relevance_abstained_candidate_ids)
+                set(record.relevance_selected_candidate_ids) | set(record.relevance_abstained_candidate_ids)
             ),
             "selected": len(set(record.relevance_selected_candidate_ids)),
             "injected": len(set(record.injected_candidate_ids)),
@@ -327,9 +283,7 @@ def _replication_evidence(record: RunRecord) -> dict[str, Any]:
     }
 
 
-def _reduce_p3r3_exploratory(
-    manifest: CampaignManifest, records: tuple[RunRecord, ...]
-) -> dict[str, Any]:
+def _reduce_p3r3_exploratory(manifest: CampaignManifest, records: tuple[RunRecord, ...]) -> dict[str, Any]:
     """Reduce only the isolated three-arm experiment; never reinterpret paired history."""
 
     manifest.validate()
@@ -340,9 +294,7 @@ def _reduce_p3r3_exploratory(
         Arm.APPROVED_REUSE_LEGACY,
         Arm.APPROVED_REUSE_SELECTIVE,
     }
-    grouped: dict[tuple[str, int], dict[Arm, list[RunRecord]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    grouped: dict[tuple[str, int], dict[Arm, list[RunRecord]]] = defaultdict(lambda: defaultdict(list))
     for record in records:
         grouped[(record.task_id, record.repetition)][record.arm].append(record)
     comparisons: list[dict[str, Any]] = []
@@ -356,9 +308,7 @@ def _reduce_p3r3_exploratory(
         if set(valid) != expected_arms or any(not valid[arm] for arm in expected_arms):
             continue
         chosen = {
-            arm: sorted(
-                valid[arm], key=lambda item: item.replacement_for_run_id is not None
-            )[-1]
+            arm: sorted(valid[arm], key=lambda item: item.replacement_for_run_id is not None)[-1]
             for arm in expected_arms
         }
         selected_records.extend(chosen.values())
@@ -375,26 +325,20 @@ def _reduce_p3r3_exploratory(
                 },
             }
         )
-    by_arm = {
-        arm: tuple(item for item in selected_records if item.arm is arm)
-        for arm in expected_arms
-    }
+    by_arm = {arm: tuple(item for item in selected_records if item.arm is arm) for arm in expected_arms}
     result = {
         "schema": "pico.picobench.p3r3-exploratory-reduction.v1",
         "campaign_id": manifest.campaign_id,
         "campaign_mode": manifest.mode.value,
         "claim_eligible": False,
         "campaign_label": "P3R.3 EXPLORATORY / NOT FOR BENEFIT CLAIM",
-        "complete": {item.run_id for item in manifest.planned_runs}
-        <= {item.run_id for item in records},
+        "complete": {item.run_id for item in manifest.planned_runs} <= {item.run_id for item in records},
         "fairness_valid": fairness_valid,
         "questions": manifest.replication_questions,
         "comparisons": comparisons,
         "candidate_set_overlap": {
             arm.value: {
-                "selected": _candidate_set_overlap(
-                    by_arm[arm], "relevance_selected_candidate_ids"
-                ),
+                "selected": _candidate_set_overlap(by_arm[arm], "relevance_selected_candidate_ids"),
                 "injected": _candidate_set_overlap(by_arm[arm], "injected_candidate_ids"),
             }
             for arm in (

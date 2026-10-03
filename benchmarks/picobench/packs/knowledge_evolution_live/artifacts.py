@@ -84,6 +84,11 @@ def load_manifest(path: Path) -> CampaignManifest:
         replication_questions=tuple(raw.get("replication_questions", ())),
         validity_policy_version=int(raw.get("validity_policy_version", 1)),
         task_contract_version=int(raw.get("task_contract_version", 1)),
+        suite_version=str(raw.get("suite_version", "")),
+        mechanical_solvability_digests=tuple(tuple(item) for item in raw.get("mechanical_solvability_digests", ())),
+        selector_mode=str(raw.get("selector_mode", "")),
+        selector_version=int(raw.get("selector_version", 0)),
+        selector_config_digest=str(raw.get("selector_config_digest", "")),
         benchmark_version=str(raw["benchmark_version"]),
         manifest_digest=str(raw["manifest_digest"]),
         schema=str(raw["schema"]),
@@ -102,9 +107,7 @@ def load_run(path: Path) -> RunRecord:
         if isinstance(value, dict) and "availability" in value
     }
     if "token_accounting_status" in metric_raw:
-        metric_fields["token_accounting_status"] = TokenAccountingStatus(
-            metric_raw["token_accounting_status"]
-        )
+        metric_fields["token_accounting_status"] = TokenAccountingStatus(metric_raw["token_accounting_status"])
     for name in ("iteration_exhausted", "final_synthesis_call_present"):
         if name in metric_raw:
             metric_fields[name] = bool(metric_raw[name])
@@ -112,13 +115,9 @@ def load_run(path: Path) -> RunRecord:
     additive = {
         "run_validity": RunValidity(raw.get("run_validity", RunValidity.VALID.value)),
         "infra_invalid_reason": (
-            InfraInvalidReason(raw["infra_invalid_reason"])
-            if raw.get("infra_invalid_reason") is not None
-            else None
+            InfraInvalidReason(raw["infra_invalid_reason"]) if raw.get("infra_invalid_reason") is not None else None
         ),
-        "normalized_provider_failure_categories": tuple(
-            raw.get("normalized_provider_failure_categories", ())
-        ),
+        "normalized_provider_failure_categories": tuple(raw.get("normalized_provider_failure_categories", ())),
         "recovered_provider_failure_count": int(raw.get("recovered_provider_failure_count", 0)),
         "terminal_provider_failure": bool(raw.get("terminal_provider_failure", False)),
         "verifier_findings": tuple(raw.get("verifier_findings", ())),
@@ -126,12 +125,8 @@ def load_run(path: Path) -> RunRecord:
         "repository_read_paths": tuple(raw.get("repository_read_paths", ())),
         "changed_paths": tuple(raw.get("changed_paths", ())),
         "relevance_selection_refs": tuple(raw.get("relevance_selection_refs", ())),
-        "relevance_selected_candidate_ids": tuple(
-            raw.get("relevance_selected_candidate_ids", ())
-        ),
-        "relevance_abstained_candidate_ids": tuple(
-            raw.get("relevance_abstained_candidate_ids", ())
-        ),
+        "relevance_selected_candidate_ids": tuple(raw.get("relevance_selected_candidate_ids", ())),
+        "relevance_abstained_candidate_ids": tuple(raw.get("relevance_abstained_candidate_ids", ())),
         "relevance_abstention_reason_counts": tuple(
             tuple(item) for item in raw.get("relevance_abstention_reason_counts", ())
         ),

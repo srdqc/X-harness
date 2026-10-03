@@ -8,6 +8,7 @@ from typing import Any
 from benchmarks.picobench.canonical import canonical_digest
 
 from .knowledge import corpus_digest
+from .official_fixtures import OFFICIAL_SUITE_VERSION, official_reference_digests
 from .schema import (
     BENCHMARK_VERSION,
     Arm,
@@ -16,7 +17,7 @@ from .schema import (
     PlannedRun,
     RuntimeBudget,
 )
-from .tasks import PILOT_TASK_IDS, TASKS
+from .tasks import PILOT_TASK_IDS, TASKS, task_by_id
 
 EXPERIMENT_QUESTION = (
     "Under identical real repository tasks, model/provider configuration, Runtime budget, "
@@ -57,13 +58,13 @@ def repetitions(mode: CampaignMode) -> int:
     return 2 if mode is CampaignMode.OFFICIAL_REPEAT2 else 1
 
 
-def arm_order(*, task_id: str, repetition: int, seed: int) -> tuple[Arm, Arm]:
+def arm_order(*, task_id: str, repetition: int, seed: int, treatment: Arm = Arm.APPROVED_REUSE) -> tuple[Arm, Arm]:
     """Pre-freeze balanced order; the second repetition reverses the first."""
 
     parity = int(canonical_digest({"seed": seed, "task_id": task_id})[:8], 16) % 2
     if repetition % 2 == 0:
         parity ^= 1
-    return (Arm.NO_REUSE, Arm.APPROVED_REUSE) if parity == 0 else (Arm.APPROVED_REUSE, Arm.NO_REUSE)
+    return (Arm.NO_REUSE, treatment) if parity == 0 else (treatment, Arm.NO_REUSE)
 
 
 def arms_for_mode(mode: CampaignMode) -> tuple[Arm, ...]:
@@ -73,7 +74,9 @@ def arms_for_mode(mode: CampaignMode) -> tuple[Arm, ...]:
             Arm.APPROVED_REUSE_LEGACY,
             Arm.APPROVED_REUSE_SELECTIVE,
         )
-    return (Arm.NO_REUSE, Arm.APPROVED_REUSE)
+    if mode is CampaignMode.PILOT:
+        return (Arm.NO_REUSE, Arm.APPROVED_REUSE)
+    return (Arm.NO_REUSE, Arm.APPROVED_REUSE_SELECTIVE)
 
 
 def experimental_arm_order(*, task_id: str, repetition: int, seed: int) -> tuple[Arm, ...]:
@@ -90,17 +93,18 @@ def make_plan(
 ) -> tuple[PlannedRun, ...]:
     runs: list[PlannedRun] = []
     order = 0
-    repetition_values = (
-        (pilot_repetition,)
-        if mode is CampaignMode.PILOT
-        else tuple(range(1, repetitions(mode) + 1))
-    )
+    repetition_values = (pilot_repetition,) if mode is CampaignMode.PILOT else tuple(range(1, repetitions(mode) + 1))
     for repetition in repetition_values:
         for task_id in selected_task_ids(mode):
             ordered_arms = (
                 experimental_arm_order(task_id=task_id, repetition=repetition, seed=seed)
                 if mode is CampaignMode.P3R3_EXPLORATORY
-                else arm_order(task_id=task_id, repetition=repetition, seed=seed)
+                else arm_order(
+                    task_id=task_id,
+                    repetition=repetition,
+                    seed=seed,
+                    treatment=arms_for_mode(mode)[1],
+                )
             )
             for arm in ordered_arms:
                 order += 1
@@ -142,9 +146,7 @@ def fairness_digest(manifest: CampaignManifest, task_id: str, repetition: int) -
     return canonical_digest(fairness_payload(manifest, task_id, repetition))
 
 
-def arm_configuration_payload(
-    manifest: CampaignManifest, planned: PlannedRun
-) -> dict[str, Any]:
+def arm_configuration_payload(manifest: CampaignManifest, planned: PlannedRun) -> dict[str, Any]:
     payload = fairness_payload(manifest, planned.task_id, planned.repetition)
     reuse = planned.arm is not Arm.NO_REUSE
     selection_mode = {
@@ -196,9 +198,16 @@ def create_manifest(
     pilot_repetition: int = 1,
 ) -> CampaignManifest:
     task_ids = selected_task_ids(mode)
-    tasks = tuple(item for item in TASKS if item.task_id in task_ids)
+    tasks = tuple(task_by_id(task_id) for task_id in task_ids)
+    official = mode in {CampaignMode.OFFICIAL_SINGLE, CampaignMode.OFFICIAL_REPEAT2}
+    campaign_benchmark_version = BENCHMARK_VERSION if official else "p3r-live-experience-reuse-v4"
+    selector_mode = "task_relevance_v1" if official else ""
+    selector_version = 1 if official else 0
+    selector_config_digest = (
+        canonical_digest({"selection_mode": selector_mode, "selector_version": selector_version}) if official else ""
+    )
     identity = {
-        "benchmark_version": BENCHMARK_VERSION,
+        "benchmark_version": campaign_benchmark_version,
         "validity_policy_version": 1,
         "task_contract_version": 2,
         "mode": mode.value,
@@ -213,10 +222,13 @@ def create_manifest(
         "knowledge_corpus_digest": corpus_digest(),
         "pilot_repetition": pilot_repetition,
         "replication_questions": (
-            P3R3_EXPLORATORY_QUESTIONS
-            if mode is CampaignMode.P3R3_EXPLORATORY
-            else REPLICATION_QUESTIONS
+            P3R3_EXPLORATORY_QUESTIONS if mode is CampaignMode.P3R3_EXPLORATORY else REPLICATION_QUESTIONS
         ),
+        "suite_version": OFFICIAL_SUITE_VERSION if official else "",
+        "mechanical_solvability_digests": official_reference_digests() if official else (),
+        "selector_mode": selector_mode,
+        "selector_version": selector_version,
+        "selector_config_digest": selector_config_digest,
     }
     manifest = CampaignManifest.create(
         campaign_id=f"p3r-{canonical_digest(identity)[:16]}",
@@ -237,10 +249,14 @@ def create_manifest(
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
         pilot_repetition=pilot_repetition,
         replication_questions=(
-            P3R3_EXPLORATORY_QUESTIONS
-            if mode is CampaignMode.P3R3_EXPLORATORY
-            else REPLICATION_QUESTIONS
+            P3R3_EXPLORATORY_QUESTIONS if mode is CampaignMode.P3R3_EXPLORATORY else REPLICATION_QUESTIONS
         ),
+        suite_version=OFFICIAL_SUITE_VERSION if official else "",
+        mechanical_solvability_digests=official_reference_digests() if official else (),
+        selector_mode=selector_mode,
+        selector_version=selector_version,
+        selector_config_digest=selector_config_digest,
+        benchmark_version=campaign_benchmark_version,
     )
     manifest.validate()
     assert_fair_plan(manifest)

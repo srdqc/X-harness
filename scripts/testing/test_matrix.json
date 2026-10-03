@@ -91,6 +91,7 @@
     "p3r_live_evaluation": {
       "targets": [
         "tests/test_picobench_knowledge_evolution_live.py",
+        "tests/test_p3r4_official_suite.py",
         "tests/test_knowledge_relevance.py",
         "tests/test_knowledge_runtime_integration.py",
         "tests/test_execution_receipts.py",

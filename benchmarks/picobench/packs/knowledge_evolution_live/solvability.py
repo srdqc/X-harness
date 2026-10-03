@@ -8,6 +8,14 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from benchmarks.picobench.canonical import canonical_digest
+
+from .official_fixtures import (
+    OFFICIAL_REFERENCE_BASE,
+    apply_official_reference,
+    official_reference_digest,
+)
+from .tasks import OFFICIAL_TASKS
 from .verifiers import (
     VERIFIERS,
     changed_path_findings,
@@ -21,6 +29,71 @@ class SolvabilityAudit:
     task_id: str
     passed: bool
     findings: tuple[str, ...]
+    reference_digest: str = ""
+    changed_path_count: int = 0
+    changed_line_count: int = 0
+
+
+def audit_official_solvability(
+    repository: Path,
+    *,
+    python_executable: str = sys.executable,
+) -> tuple[SolvabilityAudit, ...]:
+    """Execute every sealed official reference in an isolated detached worktree."""
+
+    audits: list[SolvabilityAudit] = []
+    with tempfile.TemporaryDirectory(prefix="p3r4-solvability-") as temporary:
+        root = Path(temporary)
+        for task in OFFICIAL_TASKS:
+            worktree = root / task.task_id
+            findings: list[str] = []
+            changed_paths = 0
+            changed_lines = 0
+            try:
+                _git(
+                    repository,
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(worktree),
+                    OFFICIAL_REFERENCE_BASE,
+                )
+                apply_official_reference(task.task_id, worktree)
+                changed = tuple(line for line in _git(worktree, "diff", "--name-only").splitlines() if line)
+                changed_paths = len(changed)
+                for line in _git(worktree, "diff", "--numstat").splitlines():
+                    added, removed, _ = line.split("\t", 2)
+                    if added.isdigit() and removed.isdigit():
+                        changed_lines += int(added) + int(removed)
+                result = verify_workspace(
+                    task.verifier_id,
+                    worktree,
+                    python_executable=python_executable,
+                )
+                findings.extend(result.findings)
+            except (OSError, RuntimeError, ValueError):
+                findings.append("reference_fixture_failed")
+            finally:
+                if worktree.exists():
+                    try:
+                        _git(repository, "worktree", "remove", "--force", str(worktree))
+                    except (OSError, RuntimeError):
+                        findings.append("reference_cleanup_failed")
+            audits.append(
+                SolvabilityAudit(
+                    task.task_id,
+                    not findings,
+                    tuple(dict.fromkeys(findings)),
+                    official_reference_digest(task.task_id),
+                    changed_paths,
+                    changed_lines,
+                )
+            )
+    return tuple(audits)
+
+
+def official_solvability_digest(audits: tuple[SolvabilityAudit, ...]) -> str:
+    return canonical_digest(audits)
 
 
 def audit_pilot_solvability(
@@ -178,12 +251,14 @@ def _apply_debug_shared_reference(worktree: Path) -> None:
     _apply_debug_reference(worktree)
     source_path = worktree / "pico/knowledge_evolution/canonicalize.py"
     source = source_path.read_text(encoding="utf-8")
-    source = source.replace(
-        "from .types import CandidateType, ContentClass, structural_digest",
-        "from .guards import GUARD_PREFIX\nfrom .types import CandidateType, ContentClass, structural_digest",
-        1,
-    ).replace('f"guard:{guard}"', 'f"{GUARD_PREFIX}{guard}"', 1).replace(
-        'f"guard:{index}"', 'f"{GUARD_PREFIX}{index}"', 1
+    source = (
+        source.replace(
+            "from .types import CandidateType, ContentClass, structural_digest",
+            "from .guards import GUARD_PREFIX\nfrom .types import CandidateType, ContentClass, structural_digest",
+            1,
+        )
+        .replace('f"guard:{guard}"', 'f"{GUARD_PREFIX}{guard}"', 1)
+        .replace('f"guard:{index}"', 'f"{GUARD_PREFIX}{index}"', 1)
     )
     source_path.write_text(source, encoding="utf-8")
     (source_path.parent / "guards.py").write_text('GUARD_PREFIX = "guard:"\n', encoding="utf-8")
@@ -221,11 +296,11 @@ def _apply_integration_reference(worktree: Path) -> None:
     new = (
         'ordinary = workspace / "skills" / "ordinary"\n'
         "    ordinary.mkdir(parents=True)\n"
-        "    (ordinary / \"SKILL.md\").write_text(\n"
+        '    (ordinary / "SKILL.md").write_text(\n'
         '        "---\\nname: ordinary\\ndescription: ordinary local skill\\n---\\nordinary",\n'
         '        encoding="utf-8",\n'
         "    )\n"
-        "    local_registry = SkillRegistry(workspace, builtin_skills_dir=tmp_path / \"none-local\")\n"
+        '    local_registry = SkillRegistry(workspace, builtin_skills_dir=tmp_path / "none-local")\n'
         "    local_source = LocalSkillSource(LocalPool(local_registry), local_registry)\n"
         "    builder = SkillsSegmentBuilder(\n"
         "        SkillForgeRouter([local_source, source]), skill_top_k=5, activation_max=1\n"
@@ -249,4 +324,9 @@ def _git(repository: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-__all__ = ["SolvabilityAudit", "audit_pilot_solvability"]
+__all__ = [
+    "SolvabilityAudit",
+    "audit_official_solvability",
+    "audit_pilot_solvability",
+    "official_solvability_digest",
+]

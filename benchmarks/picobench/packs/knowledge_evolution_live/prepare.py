@@ -15,7 +15,7 @@ from .artifacts import freeze_manifest
 from .knowledge import prepare_approved_corpus
 from .protocol import assert_fair_plan, create_manifest
 from .schema import CampaignManifest, CampaignMode, CampaignPaths, RuntimeBudget
-from .solvability import audit_pilot_solvability
+from .solvability import audit_official_solvability, audit_pilot_solvability
 from .tasks import TASKS
 from .verifiers import VERIFIERS
 
@@ -143,9 +143,7 @@ def _assert_replication_frozen(
         "task_prompt_digests",
         "knowledge_corpus_digest",
     )
-    drift = tuple(
-        field for field in frozen_fields if getattr(source, field) != getattr(candidate, field)
-    )
+    drift = tuple(field for field in frozen_fields if getattr(source, field) != getattr(candidate, field))
     if drift:
         raise ValueError(f"P3R Pilot replication drift: {', '.join(drift)}")
     if candidate.pilot_repetition <= source.pilot_repetition:
@@ -166,7 +164,7 @@ def preflight(
     assert_fair_plan(manifest)
     if len(TASKS) != 12 or len({item.task_id for item in TASKS}) != 12:
         raise ValueError("P3R requires exactly twelve unique frozen tasks")
-    if set(item.verifier_id for item in TASKS) != set(VERIFIERS):
+    if not set(item.verifier_id for item in TASKS).issubset(VERIFIERS):
         raise ValueError("P3R task/verifier set mismatch")
     if not Path(__file__).with_name("verifiers.py").is_file():
         raise ValueError("sealed verifier implementation is missing")
@@ -195,14 +193,17 @@ def preflight(
             probe = temp / "write-probe"
             probe.write_text("ok", encoding="utf-8")
             probe.unlink()
-            solvability = audit_pilot_solvability(worktree)
+            solvability = (
+                audit_pilot_solvability(worktree)
+                if manifest.mode in {CampaignMode.PILOT, CampaignMode.P3R3_EXPLORATORY}
+                else audit_official_solvability(worktree)
+            )
             if not all(item.passed for item in solvability):
                 raise ValueError(f"P3R mechanical solvability failed: {solvability!r}")
             inside = worktree / "pico" / "probe.py"
             projection_ok = (
                 normalize_repository_read_path(str(inside), worktree) == "pico/probe.py"
-                and normalize_repository_read_path(str(worktree.parent / "outside.py"), worktree)
-                is None
+                and normalize_repository_read_path(str(worktree.parent / "outside.py"), worktree) is None
             )
             if not projection_ok:
                 raise ValueError("P3R repository read projection self-test failed")
@@ -211,7 +212,7 @@ def preflight(
     return PreflightResult(
         base_commit_sha,
         len(manifest.task_ids),
-        len(VERIFIERS),
+        len(manifest.task_ids),
         len(candidates),
         True,
         True,
@@ -253,16 +254,25 @@ def _provider_config_present(config) -> bool:
 
 
 def _git_ok(repository: Path, *args: str) -> bool:
-    return subprocess.run(
-        ["git", *args],  # noqa: S607 -- repository-native executable
-        cwd=repository, check=False, capture_output=True, text=True
-    ).returncode == 0
+    return (
+        subprocess.run(
+            ["git", *args],  # noqa: S607 -- repository-native executable
+            cwd=repository,
+            check=False,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 0
+    )
 
 
 def _git(repository: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args],  # noqa: S607 -- repository-native executable
-        cwd=repository, check=False, capture_output=True, text=True
+        cwd=repository,
+        check=False,
+        capture_output=True,
+        text=True,
     )
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or "git command failed")

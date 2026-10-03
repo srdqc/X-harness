@@ -9,12 +9,13 @@ from typing import Any
 
 from benchmarks.picobench.canonical import canonical_digest, to_primitive
 
-SCHEMA_VERSION = 4
-BENCHMARK_VERSION = "p3r-live-experience-reuse-v4"
+SCHEMA_VERSION = 5
+BENCHMARK_VERSION = "p3r-live-experience-reuse-v5"
 LEGACY_BENCHMARK_VERSIONS = {
     "p3r-live-experience-reuse-v1",
     "p3r-live-experience-reuse-v2",
     "p3r-live-experience-reuse-v3",
+    "p3r-live-experience-reuse-v4",
 }
 MANIFEST_SCHEMA = "pico.picobench.p3r-campaign.v1"
 RUN_RECORD_SCHEMA = "pico.picobench.p3r-run.v1"
@@ -136,6 +137,11 @@ class CampaignManifest:
     replication_questions: tuple[str, ...] = ()
     validity_policy_version: int = 1
     task_contract_version: int = 2
+    suite_version: str = ""
+    mechanical_solvability_digests: tuple[tuple[str, str], ...] = ()
+    selector_mode: str = ""
+    selector_version: int = 0
+    selector_config_digest: str = ""
     benchmark_version: str = BENCHMARK_VERSION
     manifest_digest: str = ""
     schema: str = MANIFEST_SCHEMA
@@ -167,10 +173,16 @@ class CampaignManifest:
         if self.schema_version < 3:
             payload.pop("pilot_repetition", None)
             payload.pop("replication_questions", None)
+        if self.schema_version < 5:
+            payload.pop("suite_version", None)
+            payload.pop("mechanical_solvability_digests", None)
+            payload.pop("selector_mode", None)
+            payload.pop("selector_version", None)
+            payload.pop("selector_config_digest", None)
         return payload
 
     def validate(self) -> None:
-        if self.schema != MANIFEST_SCHEMA or self.schema_version not in {1, 2, 3, SCHEMA_VERSION}:
+        if self.schema != MANIFEST_SCHEMA or self.schema_version not in {1, 2, 3, 4, SCHEMA_VERSION}:
             raise ValueError("unsupported P3R campaign manifest schema")
         if self.manifest_digest != canonical_digest(self._payload()):
             raise ValueError("P3R campaign manifest digest mismatch")
@@ -180,6 +192,16 @@ class CampaignManifest:
             raise ValueError("unsupported P3R benchmark version")
         if self.pilot_repetition < 1:
             raise ValueError("pilot_repetition must be positive")
+        if self.schema_version >= 5 and self.mode in {
+            CampaignMode.OFFICIAL_SINGLE,
+            CampaignMode.OFFICIAL_REPEAT2,
+        }:
+            if not self.suite_version or len(self.mechanical_solvability_digests) != 12:
+                raise ValueError("official P3R manifest lacks frozen suite evidence")
+            if not self.selector_mode or self.selector_version < 1:
+                raise ValueError("official P3R manifest lacks selector identity")
+            if len(self.selector_config_digest) != 64:
+                raise ValueError("official P3R selector config digest is invalid")
         run_ids = tuple(item.run_id for item in self.planned_runs)
         if len(run_ids) != len(set(run_ids)):
             raise ValueError("P3R planned run IDs must be unique")
@@ -211,31 +233,15 @@ class RunMetrics:
     failed_tool_attempts: MetricValue
     validation_failures: MetricValue
     p3_approximate_context_tokens: MetricValue
-    provider_failed_attempts: MetricValue = field(
-        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
-    )
-    known_input_tokens_sum: MetricValue = field(
-        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
-    )
-    known_output_tokens_sum: MetricValue = field(
-        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
-    )
-    known_cached_tokens_sum: MetricValue = field(
-        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
-    )
-    attempts_with_usage: MetricValue = field(
-        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
-    )
-    attempts_without_usage: MetricValue = field(
-        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
-    )
+    provider_failed_attempts: MetricValue = field(default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE))
+    known_input_tokens_sum: MetricValue = field(default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE))
+    known_output_tokens_sum: MetricValue = field(default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE))
+    known_cached_tokens_sum: MetricValue = field(default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE))
+    attempts_with_usage: MetricValue = field(default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE))
+    attempts_without_usage: MetricValue = field(default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE))
     token_accounting_status: TokenAccountingStatus = TokenAccountingStatus.NOT_AVAILABLE
-    agent_iterations: MetricValue = field(
-        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
-    )
-    first_edit_iteration: MetricValue = field(
-        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
-    )
+    agent_iterations: MetricValue = field(default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE))
+    first_edit_iteration: MetricValue = field(default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE))
     iteration_exhausted: bool = False
     final_synthesis_call_present: bool = False
 
@@ -332,7 +338,7 @@ class RunRecord:
 
     def validate(self) -> None:
         digest = self.integrity_digest
-        if self.schema != RUN_RECORD_SCHEMA or self.schema_version not in {1, 2, 3, SCHEMA_VERSION}:
+        if self.schema != RUN_RECORD_SCHEMA or self.schema_version not in {1, 2, 3, 4, SCHEMA_VERSION}:
             raise ValueError("unsupported P3R run-record schema")
         if digest != canonical_digest(self._payload()):
             raise ValueError("P3R run-record integrity mismatch")
