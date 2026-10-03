@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from benchmarks.picobench.packs.knowledge_evolution_live.artifacts import (
 )
 from benchmarks.picobench.packs.knowledge_evolution_live.knowledge import (
     CORPUS,
+    corpus_digest,
     prepare_approved_corpus,
 )
 from benchmarks.picobench.packs.knowledge_evolution_live.metrics import (
@@ -24,8 +26,12 @@ from benchmarks.picobench.packs.knowledge_evolution_live.metrics import (
     repeated_repository_reads,
     unavailable,
 )
-from benchmarks.picobench.packs.knowledge_evolution_live.prepare import preflight
+from benchmarks.picobench.packs.knowledge_evolution_live.prepare import (
+    _assert_replication_frozen,
+    preflight,
+)
 from benchmarks.picobench.packs.knowledge_evolution_live.protocol import (
+    REPLICATION_QUESTIONS,
     arm_order,
     assert_fair_plan,
     create_manifest,
@@ -61,8 +67,10 @@ from benchmarks.picobench.packs.knowledge_evolution_live.tasks import PILOT_TASK
 from benchmarks.picobench.packs.knowledge_evolution_live.validity import classify_run_validity
 from benchmarks.picobench.packs.knowledge_evolution_live.verifiers import (
     VERIFIERS,
+    HiddenVerifierSpec,
     changed_path_findings,
     integration_proof_findings,
+    verify_workspace,
 )
 from pico.agent.tools.registry import normalize_repository_read_path
 from pico.knowledge_evolution import (
@@ -75,7 +83,12 @@ from pico.tracing import evidence
 from pico.tracing.store import TraceStore
 
 
-def _manifest(mode: CampaignMode = CampaignMode.PILOT, *, base_sha: str = "a" * 40):
+def _manifest(
+    mode: CampaignMode = CampaignMode.PILOT,
+    *,
+    base_sha: str = "a" * 40,
+    pilot_repetition: int = 1,
+):
     return create_manifest(
         mode=mode,
         base_commit_sha=base_sha,
@@ -86,6 +99,7 @@ def _manifest(mode: CampaignMode = CampaignMode.PILOT, *, base_sha: str = "a" * 
         tool_config_digest="c" * 64,
         runtime_config_digest="d" * 64,
         created_at="2026-10-02T00:00:00Z",
+        pilot_repetition=pilot_repetition,
     )
 
 
@@ -183,6 +197,28 @@ def test_arm_order_is_deterministic_balanced_and_reversed_for_repeat() -> None:
     assert {order[0] for order in first} == {Arm.NO_REUSE, Arm.APPROVED_REUSE}
     for task, order in zip(TASKS, first, strict=True):
         assert arm_order(task_id=task.task_id, repetition=2, seed=9) == tuple(reversed(order))
+
+
+def test_pilot_repetition_two_reverses_order_and_freezes_questions() -> None:
+    first = _manifest(pilot_repetition=1)
+    second = _manifest(pilot_repetition=2)
+    assert second.campaign_id != first.campaign_id
+    assert second.replication_questions == REPLICATION_QUESTIONS
+    assert {item.repetition for item in second.planned_runs} == {2}
+    for task_id in second.task_ids:
+        first_order = tuple(item.arm for item in first.planned_runs if item.task_id == task_id)
+        second_order = tuple(item.arm for item in second.planned_runs if item.task_id == task_id)
+        assert second_order == tuple(reversed(first_order))
+
+
+def test_replication_lock_preserves_pilot_inputs_except_verifier_version() -> None:
+    first = _manifest(pilot_repetition=1)
+    second = _manifest(pilot_repetition=2)
+    _assert_replication_frozen(first, second)
+    with pytest.raises(ValueError, match="tool_config_digest"):
+        _assert_replication_frozen(first, replace(second, tool_config_digest="f" * 64))
+    assert second.knowledge_corpus_digest == first.knowledge_corpus_digest
+    assert second.task_prompt_digests == first.task_prompt_digests
 
 
 def test_fairness_digest_excludes_only_arm_and_detects_material_drift() -> None:
@@ -306,6 +342,48 @@ def test_structured_metric_extraction_counts_calls_attempts_tools_reads_usage(tm
     assert (metrics.input_tokens.value, metrics.output_tokens.value) == (8, 4)
     assert refs["usage_refs"] == ("usage-1",)
     assert refs["referenced_ids"] == ("candidate-1",)
+    assert refs["repository_read_paths"] == ("pico/a.py", "pico/a.py", "pico/b.py")
+
+
+def test_first_edit_iteration_is_derived_from_durable_tool_receipt(tmp_path: Path) -> None:
+    turn_id = "turn-edit"
+    recorder = evidence.TurnEvidenceRecorder(
+        turn_id=turn_id,
+        conversation_id="p3r:test",
+        trace_id="trace-edit",
+        root_span_id="span-edit",
+        writer=TraceStore(tmp_path).append_event,
+    )
+    recorder.emit(evidence.TURN_STARTED)
+    correlations = {"receipt_id": "edit-1", "model_call_id": "call-1"}
+    recorder.emit(
+        evidence.TOOL_EXECUTION_STARTED,
+        correlations=correlations,
+        metadata={
+            "receipt_schema": evidence.TOOL_RECEIPT_SCHEMA,
+            "requested_name": "edit_file",
+            "resolved_name": "edit_file",
+            "effect": "write",
+            "argument_digest": "a" * 64,
+            "agent_iteration": 3,
+        },
+    )
+    recorder.emit(
+        evidence.TOOL_EXECUTION_COMPLETED,
+        correlations=correlations,
+        metadata={
+            "receipt_schema": evidence.TOOL_RECEIPT_SCHEMA,
+            "outcome": "success",
+            "result_digest": "b" * 64,
+        },
+    )
+    recorder.emit(evidence.TURN_TERMINAL, metadata={"outcome": "completed"})
+    metrics, _ = extract_run_metrics(
+        trace_root=tmp_path,
+        turn_id=turn_id,
+        knowledge_state_root=tmp_path,
+    )
+    assert metrics.first_edit_iteration == available(3)
 
 
 @pytest.mark.parametrize(
@@ -346,6 +424,45 @@ def test_pilot_reducer_is_not_eligible_for_benefit_claim() -> None:
     assert result["claim_eligible"] is False
     assert result["classification"] == BenefitClassification.NOT_EVALUATED.value
     assert result["diagnostic_classification"] == BenefitClassification.BENEFICIAL.value
+
+
+def test_reducer_reports_candidate_overlap_and_replication_evidence() -> None:
+    manifest = _manifest(pilot_repetition=2)
+    records = []
+    candidate_ids = tuple(f"candidate-{index}" for index in range(6))
+    injected_ids = candidate_ids[:5]
+    for planned in manifest.planned_runs:
+        treatment = planned.arm is Arm.APPROVED_REUSE
+        metrics = replace(
+            _metrics(2 if treatment else 1),
+            agent_iterations=available(4 if treatment else 2),
+            first_edit_iteration=available(3 if treatment else 1),
+            skills_referenced=available(1 if treatment else 0),
+        )
+        records.append(
+            _record(
+                manifest,
+                planned,
+                2 if treatment else 1,
+                metrics=metrics,
+                retrieved_candidate_ids=candidate_ids if treatment else (),
+                injected_candidate_ids=injected_ids if treatment else (),
+                referenced_candidate_ids=("candidate-0",) if treatment else (),
+                repository_read_paths=("pico/common.py", "pico/treatment.py") if treatment else ("pico/common.py",),
+                changed_paths=("pico/change.py",),
+            )
+        )
+    result = reduce_campaign(manifest, tuple(records))
+    assert result["candidate_set_overlap"]["retrieved"]["identical_pair_count"] == 3
+    assert result["candidate_set_overlap"]["injected"]["identical_pair_count"] == 3
+    assert all(
+        item["jaccard"] == 1.0
+        for item in result["candidate_set_overlap"]["retrieved"]["comparisons"]
+    )
+    nav = result["nav_cost_replication"][0]
+    assert nav["deltas"]["first_edit_iteration"]["absolute"] == 2.0
+    assert nav["treatment_only_explored_path_count"] == 1
+    assert nav["arms"][Arm.APPROVED_REUSE.value]["referenced_skill_ids"] == ["candidate-0"]
 
 
 def test_resume_uses_only_missing_immutable_run_ids(tmp_path: Path) -> None:
@@ -610,7 +727,59 @@ def test_repaired_verifier_digest_does_not_replace_historical_digest() -> None:
     manifest = _manifest()
     assert spec.digest != historical_digest
     assert dict(manifest.verifier_digests)["p3r-int-01"] == spec.digest
-    assert manifest.benchmark_version.endswith("-v2")
+    assert manifest.benchmark_version.endswith("-v3")
+
+
+def test_debug_verifier_is_semantic_version_three_and_preserves_old_digest() -> None:
+    historical = HiddenVerifierSpec(
+        "p3r-v-debug-guard",
+        ("pico/knowledge_evolution/canonicalize.py", "tests/*"),
+        (("pico/knowledge_evolution/canonicalize.py", "guard:"),),
+        ("tests/test_knowledge_canonicalization.py", "tests/test_knowledge_applicability.py"),
+        version=2,
+    )
+    assert historical.digest == "7fe01a075a597289156261d8eeb619104a308bae8f60ca49dc4cc8d848fb57b6"
+    assert VERIFIERS["p3r-v-debug-guard"].version == 3
+    assert VERIFIERS["p3r-v-debug-guard"].digest != historical.digest
+    assert corpus_digest() == "39b04fca4f6aa9e54568594b1c18dfe9f71c2292c643469197a96c8977368fbf"
+
+
+def test_debug_verifier_requires_regression_coverage() -> None:
+    spec = VERIFIERS["p3r-v-debug-guard"]
+    assert changed_path_findings(
+        spec,
+        ["pico/knowledge_evolution/canonicalize.py"],
+    ) == ("regression_test_missing",)
+
+
+def test_debug_verifier_preserves_targeted_test_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import benchmarks.picobench.packs.knowledge_evolution_live.verifiers as module
+
+    monkeypatch.setattr(
+        module,
+        "_git",
+        lambda _workspace, command, *_args: (
+            "pico/knowledge_evolution/canonicalize.py\ntests/test_guard.py"
+            if command == "diff"
+            else ""
+        ),
+    )
+    monkeypatch.setattr(module, "debug_semantic_findings", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="failed"),
+    )
+    result = verify_workspace(
+        "p3r-v-debug-guard",
+        tmp_path,
+        python_executable="python",
+    )
+    assert result.passed is False
+    assert result.findings == ("targeted_test_failed",)
 
 
 def test_hidden_verifier_findings_round_trip_but_are_not_turn_input(tmp_path: Path) -> None:

@@ -80,6 +80,8 @@ def load_manifest(path: Path) -> CampaignManifest:
             for item in raw["planned_runs"]
         ),
         created_at=str(raw["created_at"]),
+        pilot_repetition=int(raw.get("pilot_repetition", 1)),
+        replication_questions=tuple(raw.get("replication_questions", ())),
         validity_policy_version=int(raw.get("validity_policy_version", 1)),
         task_contract_version=int(raw.get("task_contract_version", 1)),
         benchmark_version=str(raw["benchmark_version"]),
@@ -121,6 +123,8 @@ def load_run(path: Path) -> RunRecord:
         "terminal_provider_failure": bool(raw.get("terminal_provider_failure", False)),
         "verifier_findings": tuple(raw.get("verifier_findings", ())),
         "replacement_for_run_id": raw.get("replacement_for_run_id"),
+        "repository_read_paths": tuple(raw.get("repository_read_paths", ())),
+        "changed_paths": tuple(raw.get("changed_paths", ())),
     }
     record = RunRecord(
         **{
@@ -138,6 +142,8 @@ def load_run(path: Path) -> RunRecord:
                     "terminal_provider_failure",
                     "verifier_findings",
                     "replacement_for_run_id",
+                    "repository_read_paths",
+                    "changed_paths",
                 }
             },
             "arm": Arm(raw["arm"]),

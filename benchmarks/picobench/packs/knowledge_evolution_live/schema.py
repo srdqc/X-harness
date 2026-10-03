@@ -9,9 +9,12 @@ from typing import Any
 
 from benchmarks.picobench.canonical import canonical_digest, to_primitive
 
-SCHEMA_VERSION = 2
-BENCHMARK_VERSION = "p3r-live-experience-reuse-v2"
-LEGACY_BENCHMARK_VERSION = "p3r-live-experience-reuse-v1"
+SCHEMA_VERSION = 3
+BENCHMARK_VERSION = "p3r-live-experience-reuse-v3"
+LEGACY_BENCHMARK_VERSIONS = {
+    "p3r-live-experience-reuse-v1",
+    "p3r-live-experience-reuse-v2",
+}
 MANIFEST_SCHEMA = "pico.picobench.p3r-campaign.v1"
 RUN_RECORD_SCHEMA = "pico.picobench.p3r-run.v1"
 
@@ -125,6 +128,8 @@ class CampaignManifest:
     knowledge_corpus_digest: str
     planned_runs: tuple[PlannedRun, ...]
     created_at: str
+    pilot_repetition: int = 1
+    replication_questions: tuple[str, ...] = ()
     validity_policy_version: int = 1
     task_contract_version: int = 2
     benchmark_version: str = BENCHMARK_VERSION
@@ -155,17 +160,22 @@ class CampaignManifest:
             for planned in payload["planned_runs"]:
                 planned.pop("replacement_for_run_id", None)
                 planned.pop("replacement_ordinal", None)
+        if self.schema_version < 3:
+            payload.pop("pilot_repetition", None)
+            payload.pop("replication_questions", None)
         return payload
 
     def validate(self) -> None:
-        if self.schema != MANIFEST_SCHEMA or self.schema_version not in {1, SCHEMA_VERSION}:
+        if self.schema != MANIFEST_SCHEMA or self.schema_version not in {1, 2, SCHEMA_VERSION}:
             raise ValueError("unsupported P3R campaign manifest schema")
         if self.manifest_digest != canonical_digest(self._payload()):
             raise ValueError("P3R campaign manifest digest mismatch")
         if len(self.base_commit_sha) != 40:
             raise ValueError("base_commit_sha must be a full Git SHA")
-        if self.benchmark_version not in {LEGACY_BENCHMARK_VERSION, BENCHMARK_VERSION}:
+        if self.benchmark_version not in {*LEGACY_BENCHMARK_VERSIONS, BENCHMARK_VERSION}:
             raise ValueError("unsupported P3R benchmark version")
+        if self.pilot_repetition < 1:
+            raise ValueError("pilot_repetition must be positive")
         run_ids = tuple(item.run_id for item in self.planned_runs)
         if len(run_ids) != len(set(run_ids)):
             raise ValueError("P3R planned run IDs must be unique")
@@ -219,6 +229,9 @@ class RunMetrics:
     agent_iterations: MetricValue = field(
         default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
     )
+    first_edit_iteration: MetricValue = field(
+        default_factory=lambda: MetricValue(None, Availability.NOT_AVAILABLE)
+    )
     iteration_exhausted: bool = False
     final_synthesis_call_present: bool = False
 
@@ -260,6 +273,8 @@ class RunRecord:
     terminal_provider_failure: bool = False
     verifier_findings: tuple[str, ...] = ()
     replacement_for_run_id: str | None = None
+    repository_read_paths: tuple[str, ...] = ()
+    changed_paths: tuple[str, ...] = ()
     integrity_digest: str = ""
     schema: str = RUN_RECORD_SCHEMA
     schema_version: int = SCHEMA_VERSION
@@ -267,15 +282,15 @@ class RunRecord:
     @classmethod
     def create(cls, **values: Any) -> RunRecord:
         value = cls(**values, integrity_digest="")
-        payload = to_primitive(value)
-        payload.pop("integrity_digest", None)
-        return replace(value, integrity_digest=canonical_digest(payload))
+        return replace(value, integrity_digest=canonical_digest(value._payload()))
 
-    def validate(self) -> None:
+    def _payload(self) -> dict[str, Any]:
         payload = to_primitive(self)
-        digest = payload.pop("integrity_digest", None)
-        if self.schema != RUN_RECORD_SCHEMA or self.schema_version not in {1, SCHEMA_VERSION}:
-            raise ValueError("unsupported P3R run-record schema")
+        payload.pop("integrity_digest", None)
+        if self.schema_version < 3:
+            payload.pop("repository_read_paths", None)
+            payload.pop("changed_paths", None)
+            payload["metrics"].pop("first_edit_iteration", None)
         if self.schema_version == 1:
             for key in (
                 "run_validity",
@@ -300,7 +315,13 @@ class RunRecord:
                 "final_synthesis_call_present",
             ):
                 payload["metrics"].pop(key, None)
-        if digest != canonical_digest(payload):
+        return payload
+
+    def validate(self) -> None:
+        digest = self.integrity_digest
+        if self.schema != RUN_RECORD_SCHEMA or self.schema_version not in {1, 2, SCHEMA_VERSION}:
+            raise ValueError("unsupported P3R run-record schema")
+        if digest != canonical_digest(self._payload()):
             raise ValueError("P3R run-record integrity mismatch")
 
 

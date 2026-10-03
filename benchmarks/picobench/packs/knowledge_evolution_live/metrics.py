@@ -69,15 +69,15 @@ def extract_run_metrics(
         TokenAccountingStatus.NOT_AVAILABLE: lambda _value: unavailable(),
     }[token_status]
 
+    read_receipts = tuple(
+        item for item in replayed.tool_executions if item.resolved_name == "read_file"
+    )
+    evidence_paths = tuple(
+        item.repository_read_path
+        for item in read_receipts
+        if item.repository_read_path is not None
+    )
     if repository_read_paths is None:
-        read_receipts = tuple(
-            item for item in replayed.tool_executions if item.resolved_name == "read_file"
-        )
-        evidence_paths = tuple(
-            item.repository_read_path
-            for item in read_receipts
-            if item.repository_read_path is not None
-        )
         # The receipt field is authoritative. A run with complete Tool receipts
         # and no read_file calls has a measured zero, not missing data.
         if replayed.evidence_status.value == "complete" and len(evidence_paths) == len(read_receipts):
@@ -154,6 +154,14 @@ def extract_run_metrics(
         else len(logical_calls)
     )
     failed_attempts = tuple(item for item in attempts if item.outcome == "error")
+    edit_iterations = tuple(
+        item.metadata.get("agent_iteration")
+        for item in readback.events
+        if item.event_type == evidence.TOOL_EXECUTION_STARTED
+        and item.metadata.get("resolved_name") in {"edit_file", "write_file"}
+        and isinstance(item.metadata.get("agent_iteration"), int)
+        and int(item.metadata["agent_iteration"]) > 0
+    )
 
     metrics = RunMetrics(
         provider_logical_calls=available(len(logical_calls)),
@@ -186,6 +194,9 @@ def extract_run_metrics(
         attempts_without_usage=available(attempts_without_usage),
         token_accounting_status=token_status,
         agent_iterations=available(agent_iterations),
+        first_edit_iteration=(
+            available(min(edit_iterations)) if edit_iterations else unavailable()
+        ),
         iteration_exhausted=exhausted is not None,
         final_synthesis_call_present=final_synthesis,
     )
@@ -201,6 +212,11 @@ def extract_run_metrics(
             item.normalized_error_category
             or evidence.normalize_provider_failure(item.error_category)
             for item in failed_attempts
+        ),
+        "repository_read_paths": (
+            tuple(repository_read_paths)
+            if repository_read_paths is not None
+            else evidence_paths
         ),
     }
     return metrics, refs

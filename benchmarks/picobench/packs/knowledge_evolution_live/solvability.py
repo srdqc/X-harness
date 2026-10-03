@@ -119,11 +119,13 @@ def _execute_reference_verifiers(
     results: dict[str, tuple[str, ...]] = {}
     with tempfile.TemporaryDirectory(prefix="p3r-solvability-") as temporary:
         root = Path(temporary)
-        for task_id, verifier_id, apply_fixture in (
-            ("p3r-debug-01", "p3r-v-debug-guard", _apply_debug_reference),
-            ("p3r-int-01", "p3r-v-integration-skill", _apply_integration_reference),
+        for fixture_id, task_id, verifier_id, apply_fixture, expected_pass in (
+            ("debug-inline", "p3r-debug-01", "p3r-v-debug-guard", _apply_debug_reference, True),
+            ("debug-shared", "p3r-debug-01", "p3r-v-debug-guard", _apply_debug_shared_reference, True),
+            ("debug-invalid", "p3r-debug-01", "p3r-v-debug-guard", _apply_debug_invalid_reference, False),
+            ("integration", "p3r-int-01", "p3r-v-integration-skill", _apply_integration_reference, True),
         ):
-            worktree = root / task_id
+            worktree = root / fixture_id
             try:
                 _git(repository, "worktree", "add", "--detach", str(worktree), "HEAD")
                 apply_fixture(worktree)
@@ -132,7 +134,13 @@ def _execute_reference_verifiers(
                     worktree,
                     python_executable=python_executable,
                 )
-                results[task_id] = () if result.passed else result.findings
+                fixture_passed = result.passed is expected_pass
+                if fixture_passed:
+                    results.setdefault(task_id, ())
+                else:
+                    results[task_id] = tuple(
+                        dict.fromkeys((*results.get(task_id, ()), *result.findings, "reference_fixture_failed"))
+                    )
             except (OSError, RuntimeError):
                 results[task_id] = ("reference_fixture_failed",)
             finally:
@@ -164,6 +172,34 @@ def _apply_debug_reference(worktree: Path) -> None:
         + '    assert result.proposal.applicability_fingerprints[0][0] == "guard:file:pyproject.toml"\n',
         encoding="utf-8",
     )
+
+
+def _apply_debug_shared_reference(worktree: Path) -> None:
+    _apply_debug_reference(worktree)
+    source_path = worktree / "pico/knowledge_evolution/canonicalize.py"
+    source = source_path.read_text(encoding="utf-8")
+    source = source.replace(
+        "from .types import CandidateType, ContentClass, structural_digest",
+        "from .guards import GUARD_PREFIX\nfrom .types import CandidateType, ContentClass, structural_digest",
+        1,
+    ).replace('f"guard:{guard}"', 'f"{GUARD_PREFIX}{guard}"', 1).replace(
+        'f"guard:{index}"', 'f"{GUARD_PREFIX}{index}"', 1
+    )
+    source_path.write_text(source, encoding="utf-8")
+    (source_path.parent / "guards.py").write_text('GUARD_PREFIX = "guard:"\n', encoding="utf-8")
+
+
+def _apply_debug_invalid_reference(worktree: Path) -> None:
+    _apply_debug_reference(worktree)
+    source_path = worktree / "pico/knowledge_evolution/canonicalize.py"
+    source = source_path.read_text(encoding="utf-8")
+    source = source.replace(
+        'key = f"guard:{guard}" if guard.startswith('
+        '("tool:", "binary:", "file:", "dependency:")) else f"guard:{index}"',
+        'key = f"guard:{index}"',
+        1,
+    )
+    source_path.write_text(source, encoding="utf-8")
 
 
 def _apply_integration_reference(worktree: Path) -> None:

@@ -433,6 +433,8 @@ async def _execute_turn(*, paths, manifest, planned, worktree, state, reviewer_i
         terminal_provider_failure=runtime_outcome == "provider_failed",
         verifier_findings=verifier_result.findings,
         replacement_for_run_id=planned.replacement_for_run_id,
+        repository_read_paths=refs["repository_read_paths"],
+        changed_paths=_changed_paths(worktree),
     )
 
 
@@ -501,6 +503,8 @@ def _infrastructure_failure_record(*, manifest, planned, reason: InfraInvalidRea
         infra_invalid_reason=reason,
         verifier_findings=(),
         replacement_for_run_id=planned.replacement_for_run_id,
+        repository_read_paths=(),
+        changed_paths=(),
     )
 
 
@@ -519,6 +523,12 @@ def _workspace_patch(worktree: Path) -> dict[str, object]:
         "tracked_binary_diff": _git(worktree, "diff", "--binary", "HEAD"),
         "untracked_files": files,
     }
+
+
+def _changed_paths(worktree: Path) -> tuple[str, ...]:
+    tracked = _git(worktree, "diff", "--name-only", "HEAD").splitlines()
+    untracked = _git(worktree, "ls-files", "--others", "--exclude-standard").splitlines()
+    return tuple(sorted({path.replace("\\", "/") for path in (*tracked, *untracked)}))
 
 
 def _git(repository: Path, *args: str) -> str:

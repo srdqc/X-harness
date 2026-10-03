@@ -30,6 +30,22 @@ CORE_EFFICIENCY_METRICS = (
     "input_tokens",
     "turn_latency_ms",
 )
+REPLICATION_METRICS = (
+    "provider_logical_calls",
+    "tool_calls_total",
+    "agent_iterations",
+    "first_edit_iteration",
+    "input_tokens",
+    "output_tokens",
+    "total_repo_file_reads",
+    "unique_repo_files_read",
+    "repeated_repo_file_reads",
+    "skill_candidates_retrieved",
+    "skills_referenced",
+    "skills_activated",
+    "p3_approximate_context_tokens",
+    "turn_latency_ms",
+)
 
 
 def paired_delta(control: float, treatment: float) -> dict[str, float | None]:
@@ -116,24 +132,38 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
         b_pass = b.verifier_outcome == "pass"
         outcomes[("a_pass_" if a_pass else "a_fail_") + ("b_pass" if b_pass else "b_fail")] += 1
         deltas: dict[str, Any] = {}
-        for name in CORE_EFFICIENCY_METRICS:
+        for name in REPLICATION_METRICS:
             av = getattr(a.metrics, name)
             bv = getattr(b.metrics, name)
             if av.availability is Availability.AVAILABLE and bv.availability is Availability.AVAILABLE:
                 delta = paired_delta(float(av.value), float(bv.value))
                 deltas[name] = delta
-                per_task_values[task_id][Arm.NO_REUSE][name].append(float(av.value))
-                per_task_values[task_id][Arm.APPROVED_REUSE][name].append(float(bv.value))
+                if name in CORE_EFFICIENCY_METRICS:
+                    per_task_values[task_id][Arm.NO_REUSE][name].append(float(av.value))
+                    per_task_values[task_id][Arm.APPROVED_REUSE][name].append(float(bv.value))
             else:
                 deltas[name] = {"absolute": None, "relative": None}
-        pairs.append({"task_id": task_id, "repetition": repetition, "valid": pair_valid, "deltas": deltas})
-    expected_pair_keys = {
-        (task_id, repetition)
-        for task_id in manifest.task_ids
-        for repetition in range(
-            1,
-            (2 if manifest.mode is CampaignMode.OFFICIAL_REPEAT2 else 1) + 1,
+        treatment_only_paths = sorted(set(b.repository_read_paths) - set(a.repository_read_paths))
+        pairs.append(
+            {
+                "task_id": task_id,
+                "repetition": repetition,
+                "valid": pair_valid,
+                "verified_success": {
+                    Arm.NO_REUSE.value: a_pass,
+                    Arm.APPROVED_REUSE.value: b_pass,
+                },
+                "deltas": deltas,
+                "arms": {
+                    Arm.NO_REUSE.value: _replication_evidence(a),
+                    Arm.APPROVED_REUSE.value: _replication_evidence(b),
+                },
+                "treatment_only_explored_paths": treatment_only_paths,
+                "treatment_only_explored_path_count": len(treatment_only_paths),
+            }
         )
+    expected_pair_keys = {
+        (item.task_id, item.repetition) for item in manifest.planned_runs
     }
     incomplete_keys = {(item["task_id"], item["repetition"]) for item in incomplete_pairs}
     completed_pair_keys = {(item["task_id"], item["repetition"]) for item in pairs}
@@ -170,9 +200,7 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
     )
     safety_passed = all(record.safety_outcome == "pass" for record in selected_records)
     valid_complete_pairs = len(pairs)
-    expected_pair_count = len(manifest.task_ids) * (
-        2 if manifest.mode is CampaignMode.OFFICIAL_REPEAT2 else 1
-    )
+    expected_pair_count = len(expected_pair_keys)
     efficacy_complete = complete and valid_complete_pairs == expected_pair_count
     diagnostic_classification = classify(
         valid=efficacy_complete and fairness_valid,
@@ -213,6 +241,18 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
         "paired_outcomes": outcomes,
         "success_rates": rates,
         "pairs": pairs,
+        "replication_questions": manifest.replication_questions,
+        "candidate_set_overlap": {
+            "retrieved": _candidate_set_overlap(
+                arm_records[Arm.APPROVED_REUSE], "retrieved_candidate_ids"
+            ),
+            "injected": _candidate_set_overlap(
+                arm_records[Arm.APPROVED_REUSE], "injected_candidate_ids"
+            ),
+        },
+        "nav_cost_replication": tuple(
+            item for item in pairs if item["task_id"] == "p3r-nav-01"
+        ),
         "per_task_arm_median_pairs": task_pairs,
         "median_relative_deltas": medians,
         "mean_relative_deltas": means,
@@ -256,4 +296,53 @@ def reduce_campaign(manifest: CampaignManifest, records: tuple[RunRecord, ...]) 
     return to_primitive(result)
 
 
-__all__ = ["CORE_EFFICIENCY_METRICS", "classify", "paired_delta", "reduce_campaign"]
+def _replication_evidence(record: RunRecord) -> dict[str, Any]:
+    return {
+        "metrics": {
+            name: to_primitive(getattr(record.metrics, name)) for name in REPLICATION_METRICS
+        },
+        "retrieved_candidate_ids": record.retrieved_candidate_ids,
+        "injected_candidate_ids": record.injected_candidate_ids,
+        "referenced_skill_ids": record.referenced_candidate_ids,
+        "activated_skill_ids": record.activated_candidate_ids,
+        "changed_paths": record.changed_paths,
+        "repository_read_paths": record.repository_read_paths,
+        "iteration_exhausted": record.metrics.iteration_exhausted,
+        "verifier_findings": record.verifier_findings,
+    }
+
+
+def _candidate_set_overlap(
+    records: tuple[RunRecord, ...],
+    field: str,
+) -> dict[str, Any]:
+    values = tuple(
+        (f"{item.task_id}:r{item.repetition}", frozenset(getattr(item, field)))
+        for item in sorted(records, key=lambda value: (value.task_id, value.repetition))
+    )
+    comparisons: list[dict[str, Any]] = []
+    for index, (left_id, left) in enumerate(values):
+        for right_id, right in values[index + 1 :]:
+            union = left | right
+            comparisons.append(
+                {
+                    "left": left_id,
+                    "right": right_id,
+                    "jaccard": len(left & right) / len(union) if union else 1.0,
+                    "identical": left == right,
+                }
+            )
+    return {
+        "comparisons": comparisons,
+        "identical_pair_count": sum(item["identical"] for item in comparisons),
+        "distinct_set_count": len({tuple(sorted(items)) for _, items in values}),
+    }
+
+
+__all__ = [
+    "CORE_EFFICIENCY_METRICS",
+    "REPLICATION_METRICS",
+    "classify",
+    "paired_delta",
+    "reduce_campaign",
+]

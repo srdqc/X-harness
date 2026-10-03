@@ -27,6 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--base-commit", required=True)
     prepare.add_argument("--campaign-seed", type=int, default=31_415)
     prepare.add_argument("--reviewer-id", required=True)
+    prepare.add_argument("--pilot-repetition", type=int, default=1)
+    prepare.add_argument(
+        "--replicate-campaign-root",
+        type=Path,
+        help="lock a new Pilot repetition to an existing frozen campaign",
+    )
 
     check = commands.add_parser("preflight", help="recheck a frozen campaign without Provider calls")
     check.add_argument("--repository", type=Path, default=Path.cwd())
@@ -66,6 +72,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "prepare":
         from pico.config.loader import load_config
 
+        replication_source = (
+            load_manifest(
+                CampaignPaths.at(args.replicate_campaign_root.resolve()).manifest
+            )
+            if args.replicate_campaign_root is not None
+            else None
+        )
         paths, manifest, result = prepare_campaign(
             repository=args.repository.resolve(),
             output_root=args.output_root.resolve(),
@@ -74,6 +87,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             seed=args.campaign_seed,
             reviewer_id=args.reviewer_id,
             config=load_config(),
+            pilot_repetition=args.pilot_repetition,
+            replication_source=replication_source,
         )
         print(
             canonical_json(

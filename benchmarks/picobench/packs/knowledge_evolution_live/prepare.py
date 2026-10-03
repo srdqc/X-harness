@@ -83,6 +83,8 @@ def prepare_campaign(
     seed: int,
     reviewer_id: str,
     config,
+    pilot_repetition: int = 1,
+    replication_source: CampaignManifest | None = None,
 ) -> tuple[CampaignPaths, CampaignManifest, PreflightResult]:
     budget = RuntimeBudget(
         max_agent_iterations=config.agents.defaults.max_tool_iterations,
@@ -102,7 +104,10 @@ def prepare_campaign(
         tool_config_digest=identity["tool_digest"],
         runtime_config_digest=identity["runtime_digest"],
         budget=budget,
+        pilot_repetition=pilot_repetition,
     )
+    if replication_source is not None:
+        _assert_replication_frozen(replication_source, manifest)
     result = preflight(
         repository=repository,
         base_commit_sha=base_sha,
@@ -114,6 +119,37 @@ def prepare_campaign(
     paths.root.mkdir(parents=True, exist_ok=True)
     freeze_manifest(paths, manifest)
     return paths, manifest, result
+
+
+def _assert_replication_frozen(
+    source: CampaignManifest,
+    candidate: CampaignManifest,
+) -> None:
+    """Reject a Pilot repetition if any non-verifier treatment input drifted."""
+
+    source.validate()
+    if source.mode is not CampaignMode.PILOT or candidate.mode is not CampaignMode.PILOT:
+        raise ValueError("P3R replication source and candidate must both be Pilot campaigns")
+    frozen_fields = (
+        "base_commit_sha",
+        "campaign_seed",
+        "provider_id",
+        "actual_model_id",
+        "provider_model_config_digest",
+        "tool_config_digest",
+        "runtime_config_digest",
+        "budget",
+        "task_ids",
+        "task_prompt_digests",
+        "knowledge_corpus_digest",
+    )
+    drift = tuple(
+        field for field in frozen_fields if getattr(source, field) != getattr(candidate, field)
+    )
+    if drift:
+        raise ValueError(f"P3R Pilot replication drift: {', '.join(drift)}")
+    if candidate.pilot_repetition <= source.pilot_repetition:
+        raise ValueError("P3R Pilot repetition must advance the source campaign")
 
 
 def preflight(
@@ -236,6 +272,7 @@ def _git(repository: Path, *args: str) -> str:
 __all__ = [
     "PreflightResult",
     "configuration_identity",
+    "_assert_replication_frozen",
     "preflight",
     "prepare_campaign",
     "resolve_base_commit",

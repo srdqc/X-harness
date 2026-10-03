@@ -27,6 +27,14 @@ EXPERIMENT_QUESTION = (
 BENEFICIAL_MEDIAN_IMPROVEMENT = -0.15
 MATERIAL_MEDIAN_REGRESSION = 0.20
 REPEATED_BASELINE_PASS_TREATMENT_FAIL = 2
+REPLICATION_QUESTIONS = (
+    "Does nav-01 treatment again explore materially longer than baseline?",
+    "Does nav-01 again receive all six candidates?",
+    "Does treatment again delay first edit compared with baseline?",
+    "Does debug treatment still take a broader cross-module path after the semantic verifier repair?",
+    "Does int-01 treatment again reduce repository reads/tokens relative to baseline?",
+    "Do all treatment tasks still show identical 6-retrieved / 5-injected / 1-referenced behavior?",
+)
 
 
 def selected_task_ids(mode: CampaignMode) -> tuple[str, ...]:
@@ -46,10 +54,20 @@ def arm_order(*, task_id: str, repetition: int, seed: int) -> tuple[Arm, Arm]:
     return (Arm.NO_REUSE, Arm.APPROVED_REUSE) if parity == 0 else (Arm.APPROVED_REUSE, Arm.NO_REUSE)
 
 
-def make_plan(mode: CampaignMode, *, seed: int) -> tuple[PlannedRun, ...]:
+def make_plan(
+    mode: CampaignMode,
+    *,
+    seed: int,
+    pilot_repetition: int = 1,
+) -> tuple[PlannedRun, ...]:
     runs: list[PlannedRun] = []
     order = 0
-    for repetition in range(1, repetitions(mode) + 1):
+    repetition_values = (
+        (pilot_repetition,)
+        if mode is CampaignMode.PILOT
+        else tuple(range(1, repetitions(mode) + 1))
+    )
+    for repetition in repetition_values:
         for task_id in selected_task_ids(mode):
             for arm in arm_order(task_id=task_id, repetition=repetition, seed=seed):
                 order += 1
@@ -92,10 +110,15 @@ def fairness_digest(manifest: CampaignManifest, task_id: str, repetition: int) -
 
 
 def assert_fair_plan(manifest: CampaignManifest) -> None:
+    repetition_values = (
+        (manifest.pilot_repetition,)
+        if manifest.mode is CampaignMode.PILOT
+        else tuple(range(1, repetitions(manifest.mode) + 1))
+    )
     expected = {
         (task_id, repetition, arm)
         for task_id in manifest.task_ids
-        for repetition in range(1, repetitions(manifest.mode) + 1)
+        for repetition in repetition_values
         for arm in Arm
     }
     actual = {(item.task_id, item.repetition, item.arm) for item in manifest.planned_runs}
@@ -115,6 +138,7 @@ def create_manifest(
     runtime_config_digest: str,
     budget: RuntimeBudget | None = None,
     created_at: str | None = None,
+    pilot_repetition: int = 1,
 ) -> CampaignManifest:
     task_ids = selected_task_ids(mode)
     tasks = tuple(item for item in TASKS if item.task_id in task_ids)
@@ -132,6 +156,8 @@ def create_manifest(
         "tool_config_digest": tool_config_digest,
         "runtime_config_digest": runtime_config_digest,
         "knowledge_corpus_digest": corpus_digest(),
+        "pilot_repetition": pilot_repetition,
+        "replication_questions": REPLICATION_QUESTIONS,
     }
     manifest = CampaignManifest.create(
         campaign_id=f"p3r-{canonical_digest(identity)[:16]}",
@@ -148,8 +174,10 @@ def create_manifest(
         task_prompt_digests=tuple((item.task_id, item.prompt_digest) for item in tasks),
         verifier_digests=tuple((item.task_id, item.verifier_digest) for item in tasks),
         knowledge_corpus_digest=corpus_digest(),
-        planned_runs=make_plan(mode, seed=seed),
+        planned_runs=make_plan(mode, seed=seed, pilot_repetition=pilot_repetition),
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
+        pilot_repetition=pilot_repetition,
+        replication_questions=REPLICATION_QUESTIONS,
     )
     manifest.validate()
     assert_fair_plan(manifest)
@@ -161,6 +189,7 @@ __all__ = [
     "EXPERIMENT_QUESTION",
     "MATERIAL_MEDIAN_REGRESSION",
     "REPEATED_BASELINE_PASS_TREATMENT_FAIL",
+    "REPLICATION_QUESTIONS",
     "arm_order",
     "assert_fair_plan",
     "create_manifest",
