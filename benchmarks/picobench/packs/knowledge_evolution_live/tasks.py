@@ -129,7 +129,7 @@ EXPLORATORY_TASKS = (
 
 
 # Frozen official P3R.4 held-out contract. Prompts describe public behavior only.
-OFFICIAL_TASKS = (
+OFFICIAL_TASKS_V1 = (
     _task(
         "p3r4-nav-01",
         "repository_navigation",
@@ -228,7 +228,47 @@ OFFICIAL_TASKS = (
     ),
 )
 
-TASKS = OFFICIAL_TASKS
+_OFFICIAL_V2_OVERRIDES = {
+    "p3r4-nav-01": _task(
+        "p3r4-nav-01",
+        "repository_navigation",
+        "Add a public KnowledgeRecordStore method named list_retrievals that returns validated retrieval receipts in deterministic retrieval-ID order and accepts an optional turn_id filter. Preserve record/path identity integrity, fail closed on malformed records, return an empty result for an empty store or no matches, and add focused tests.",
+        "p3r4-v-nav-retrieval-list",
+        ("memory_fact",),
+        "Requires discovery across durable storage, immutable receipts, and tests while making the public API explicit.",
+    ),
+    "p3r4-nav-02": _task(
+        "p3r4-nav-02",
+        "repository_navigation",
+        "Add a public KnowledgeRecordStore method named list_outcome_associations that returns validated outcome-association records in deterministic association-ID order and accepts an optional turn_id filter. Preserve record/path identity integrity, fail closed on malformed records, return an empty result for an empty store or no matches, and add focused tests.",
+        "p3r4-v-nav-outcome-list",
+        ("memory_fact",),
+        "Requires tracing outcome evidence through the store and usage model while making the public API explicit.",
+    ),
+    "p3r4-nav-03": _task(
+        "p3r4-nav-03",
+        "repository_navigation",
+        "Add a public KnowledgeRecordStore method named list_applicability_results that returns validated applicability-result records in deterministic applicability-ID order and accepts optional candidate_id and ApplicabilityStatus status filters that compose. Preserve record/path identity integrity, return an empty result for an empty store or no matches, and add focused tests.",
+        "p3r4-v2-nav-applicability-list",
+        ("memory_fact",),
+        "Requires locating applicability serialization and enum contracts while making the public API explicit.",
+    ),
+    "p3r4-int-03": _task(
+        "p3r4-int-03",
+        "cross_module_integration",
+        "Register a p3_official_contract test suite whose targets are tests/test_knowledge_retrieval.py followed by tests/test_knowledge_usage.py, each exactly once, and prove stable resolution with focused runner tests.",
+        "p3r4-v-integration-suite-registration",
+        ("skill_candidate",),
+        "Requires canonical test-matrix and runner integration while making target identity and order explicit.",
+    ),
+}
+
+OFFICIAL_TASKS_V2 = tuple(
+    _OFFICIAL_V2_OVERRIDES.get(task.task_id, task) for task in OFFICIAL_TASKS_V1
+)
+
+OFFICIAL_TASKS = OFFICIAL_TASKS_V2
+TASKS = OFFICIAL_TASKS_V2
 PILOT_TASK_IDS = ("p3r-nav-01", "p3r-debug-01", "p3r-int-01")
 
 
@@ -237,14 +277,25 @@ def task_set_digest() -> str:
 
 
 def task_by_id(task_id: str) -> LiveTask:
-    return next(task for task in (*EXPLORATORY_TASKS, *OFFICIAL_TASKS) if task.task_id == task_id)
+    return next(task for task in (*EXPLORATORY_TASKS, *OFFICIAL_TASKS_V2) if task.task_id == task_id)
+
+
+def official_tasks_for_suite(suite_version: str) -> tuple[LiveTask, ...]:
+    if suite_version == "p3r4-held-out-v1":
+        return OFFICIAL_TASKS_V1
+    if suite_version == "p3r4-held-out-v2":
+        return OFFICIAL_TASKS_V2
+    raise ValueError(f"unsupported official suite version: {suite_version}")
 
 
 __all__ = [
     "EXPLORATORY_TASKS",
     "OFFICIAL_TASKS",
+    "OFFICIAL_TASKS_V1",
+    "OFFICIAL_TASKS_V2",
     "PILOT_TASK_IDS",
     "TASKS",
     "task_by_id",
+    "official_tasks_for_suite",
     "task_set_digest",
 ]

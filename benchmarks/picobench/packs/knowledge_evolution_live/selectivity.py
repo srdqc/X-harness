@@ -17,6 +17,7 @@ from pico.knowledge_evolution import (
 )
 
 from .knowledge import CORPUS, corpus_digest, prepare_approved_corpus
+from .schema import LiveTask
 from .tasks import OFFICIAL_TASKS, PILOT_TASK_IDS, task_by_id
 
 
@@ -39,6 +40,7 @@ def evaluate_selectivity(
     workspace: Path,
     reviewer_id: str = "human:offline",
     task_ids: tuple[str, ...] = PILOT_TASK_IDS,
+    tasks: tuple[LiveTask, ...] | None = None,
 ) -> dict[str, Any]:
     """Compare modes with identical corpus, applicability inputs, and limits."""
 
@@ -53,9 +55,10 @@ def evaluate_selectivity(
     store = KnowledgeRecordStore(state_root)
     corpus_id_by_candidate = dict(zip(candidate_ids, (item.corpus_id for item in CORPUS), strict=True))
     proposal_by_corpus = {item.corpus_id: item.proposal for item in CORPUS}
+    prompt_by_task = {task.task_id: task.prompt for task in tasks or ()}
     modes: dict[str, Any] = {}
     for mode in KnowledgeSelectionMode:
-        tasks: dict[str, Any] = {}
+        task_results: dict[str, Any] = {}
         for task_id in task_ids:
             selected: set[str] = set()
             for index, candidate_types in enumerate(
@@ -75,7 +78,7 @@ def evaluate_selectivity(
                     selection_mode=mode,
                 )
                 items, _ = retriever.retrieve(
-                    task_by_id(task_id).prompt,
+                    prompt_by_task.get(task_id, task_by_id(task_id).prompt),
                     retrieval_id=f"offline-{mode.value}-{task_id}-{index}",
                     turn_id=f"offline-{mode.value}-{task_id}",
                     candidate_types=candidate_types,
@@ -88,7 +91,7 @@ def evaluate_selectivity(
                 if proposal_by_corpus[corpus_id].candidate_type != CandidateType.SKILL_CANDIDATE.value
             }
             selections = store.list_relevance_selections(turn_id=f"offline-{mode.value}-{task_id}")
-            tasks[task_id] = {
+            task_results[task_id] = {
                 "candidate_count_before_relevance": len(CORPUS),
                 "selected_count": len(selected),
                 "abstained_count": len(CORPUS) - len(selected),
@@ -112,8 +115,8 @@ def evaluate_selectivity(
                     "left": left,
                     "right": right,
                     "jaccard": _jaccard(
-                        set(tasks[left]["selected_candidate_ids"]),
-                        set(tasks[right]["selected_candidate_ids"]),
+                        set(task_results[left]["selected_candidate_ids"]),
+                        set(task_results[right]["selected_candidate_ids"]),
                     ),
                 }
             )
@@ -122,13 +125,13 @@ def evaluate_selectivity(
                     "left": left,
                     "right": right,
                     "jaccard": _jaccard(
-                        set(tasks[left]["injected_candidate_ids"]),
-                        set(tasks[right]["injected_candidate_ids"]),
+                        set(task_results[left]["injected_candidate_ids"]),
+                        set(task_results[right]["injected_candidate_ids"]),
                     ),
                 }
             )
         modes[mode.value] = {
-            "tasks": tasks,
+            "tasks": task_results,
             "selected_set_jaccard": tuple(selected_pairs),
             "injected_set_jaccard": tuple(injected_pairs),
         }
@@ -144,13 +147,18 @@ def evaluate_selectivity(
 
 
 def evaluate_official_selectivity(
-    *, state_root: Path, workspace: Path, reviewer_id: str = "human:offline"
+    *,
+    state_root: Path,
+    workspace: Path,
+    reviewer_id: str = "human:offline",
+    tasks: tuple[LiveTask, ...] = OFFICIAL_TASKS,
 ) -> dict[str, Any]:
     return evaluate_selectivity(
         state_root=state_root,
         workspace=workspace,
         reviewer_id=reviewer_id,
-        task_ids=tuple(task.task_id for task in OFFICIAL_TASKS),
+        task_ids=tuple(task.task_id for task in tasks),
+        tasks=tasks,
     )
 
 

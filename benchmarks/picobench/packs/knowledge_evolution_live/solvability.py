@@ -11,7 +11,9 @@ from pathlib import Path
 from benchmarks.picobench.canonical import canonical_digest
 
 from .official_fixtures import (
+    NAV03_SEMANTIC_FIXTURES,
     OFFICIAL_REFERENCE_BASE,
+    apply_nav03_semantic_fixture,
     apply_official_reference,
     official_reference_digest,
 )
@@ -32,6 +34,68 @@ class SolvabilityAudit:
     reference_digest: str = ""
     changed_path_count: int = 0
     changed_line_count: int = 0
+
+
+@dataclass(frozen=True)
+class SemanticFixtureAudit:
+    fixture_id: str
+    expect_verifier_pass: bool
+    verifier_passed: bool
+    audit_passed: bool
+    findings: tuple[str, ...]
+
+
+def audit_nav03_semantic_fixtures(
+    repository: Path,
+    *,
+    python_executable: str = sys.executable,
+) -> tuple[SemanticFixtureAudit, ...]:
+    """Prove v2 nav-03 accepts equivalent implementations and rejects defects."""
+
+    audits: list[SemanticFixtureAudit] = []
+    with tempfile.TemporaryDirectory(prefix="p3r4-nav03-contract-") as temporary:
+        root = Path(temporary)
+        for fixture_id, _, expected_pass in NAV03_SEMANTIC_FIXTURES:
+            worktree = root / fixture_id
+            findings: tuple[str, ...] = ("fixture_execution_failed",)
+            verifier_passed = False
+            try:
+                _git(
+                    repository,
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(worktree),
+                    OFFICIAL_REFERENCE_BASE,
+                )
+                apply_nav03_semantic_fixture(fixture_id, worktree)
+                result = verify_workspace(
+                    "p3r4-v2-nav-applicability-list",
+                    worktree,
+                    python_executable=python_executable,
+                )
+                verifier_passed = result.passed
+                findings = result.findings
+            except (OSError, RuntimeError, ValueError):
+                pass
+            finally:
+                if worktree.exists():
+                    try:
+                        _git(repository, "worktree", "remove", "--force", str(worktree))
+                    except (OSError, RuntimeError):
+                        findings = (*findings, "reference_cleanup_failed")
+            audits.append(
+                SemanticFixtureAudit(
+                    fixture_id,
+                    expected_pass,
+                    verifier_passed,
+                    verifier_passed is expected_pass
+                    and "fixture_execution_failed" not in findings
+                    and "reference_cleanup_failed" not in findings,
+                    findings,
+                )
+            )
+    return tuple(audits)
 
 
 def audit_official_solvability(
@@ -326,6 +390,8 @@ def _git(repository: Path, *args: str) -> str:
 
 __all__ = [
     "SolvabilityAudit",
+    "SemanticFixtureAudit",
+    "audit_nav03_semantic_fixtures",
     "audit_official_solvability",
     "audit_pilot_solvability",
     "official_solvability_digest",

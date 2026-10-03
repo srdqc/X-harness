@@ -8,9 +8,10 @@ from typing import Callable
 
 from benchmarks.picobench.canonical import canonical_digest
 
-from .tasks import OFFICIAL_TASKS
+from .tasks import OFFICIAL_TASKS_V1, OFFICIAL_TASKS_V2
 
-OFFICIAL_SUITE_VERSION = "p3r4-held-out-v1"
+OFFICIAL_SUITE_VERSION_V1 = "p3r4-held-out-v1"
+OFFICIAL_SUITE_VERSION = "p3r4-held-out-v2"
 OFFICIAL_REFERENCE_BASE = "f5ac937b091905786a88cfc9abfbe0c2fa9bb22d"
 
 
@@ -94,6 +95,82 @@ def _nav_applicability(root: Path) -> None:
             values.append(value)
         return tuple(values)
 """,
+    )
+
+
+def _nav_applicability_alternate(root: Path) -> None:
+    _store_method(
+        root,
+        "    def write_retrieval(self, receipt: Any) -> ImmutableWriteStatus:\n",
+        """    def list_applicability_results(self, *, candidate_id: str | None = None, status: Any | None = None) -> tuple[Any, ...]:
+        from .applicability import KnowledgeApplicabilityResult
+        def matches(value: Any) -> bool:
+            return ((candidate_id is None or value.candidate_id == candidate_id) and (status is None or value.status == status))
+        if not self.applicability_results.exists():
+            return ()
+        results = []
+        for path in sorted(self.applicability_results.glob("*.json")):
+            value = _load(path, KnowledgeApplicabilityResult.from_dict)
+            if path.stem != value.applicability_id:
+                raise KnowledgeStoreError("applicability result path binding mismatch")
+            if matches(value):
+                results.append(value)
+        return tuple(results)
+""",
+    )
+
+
+def _nav_applicability_missing(root: Path) -> None:
+    _touch_test(root, "tests/test_knowledge_applicability.py", "p3r4-nav-03-missing")
+
+
+def _nav_applicability_broken_candidate(root: Path) -> None:
+    _nav_applicability(root)
+    path = root / "pico/knowledge_evolution/store.py"
+    _replace(
+        path,
+        "            if candidate_id is not None and value.candidate_id != candidate_id:\n",
+        "            if False and candidate_id is not None and value.candidate_id != candidate_id:\n",
+    )
+
+
+def _nav_applicability_broken_status(root: Path) -> None:
+    _nav_applicability(root)
+    path = root / "pico/knowledge_evolution/store.py"
+    _replace(
+        path,
+        "            if status is not None and value.status != status:\n",
+        "            if False and status is not None and value.status != status:\n",
+    )
+
+
+def _nav_applicability_noncomposable(root: Path) -> None:
+    _nav_applicability(root)
+    path = root / "pico/knowledge_evolution/store.py"
+    _replace(
+        path,
+        "        from .applicability import KnowledgeApplicabilityResult\n        values = []\n",
+        "        from .applicability import KnowledgeApplicabilityResult\n        if candidate_id is not None and status is not None:\n            status = None\n        values = []\n",
+    )
+
+
+def _nav_applicability_unordered(root: Path) -> None:
+    _nav_applicability(root)
+    path = root / "pico/knowledge_evolution/store.py"
+    _replace(
+        path,
+        '        for path in sorted(self.applicability_results.glob("*.json"), key=lambda item: item.name):\n',
+        '        for path in sorted(self.applicability_results.glob("*.json"), key=lambda item: item.name, reverse=True):\n',
+    )
+
+
+def _nav_applicability_broken_identity(root: Path) -> None:
+    _nav_applicability(root)
+    path = root / "pico/knowledge_evolution/store.py"
+    _replace(
+        path,
+        '            if value.applicability_id != path.stem:\n                raise KnowledgeStoreError("applicability result path binding mismatch")\n',
+        "",
     )
 
 
@@ -231,26 +308,70 @@ _APPLIERS: dict[str, tuple[Callable[[Path], None], str]] = {
 }
 
 
-def apply_official_reference(task_id: str, workspace: Path) -> None:
+def apply_official_reference(
+    task_id: str, workspace: Path, *, suite_version: str = OFFICIAL_SUITE_VERSION
+) -> None:
+    if suite_version not in {OFFICIAL_SUITE_VERSION_V1, OFFICIAL_SUITE_VERSION}:
+        raise ValueError(f"unsupported official suite version: {suite_version}")
     apply, test = _APPLIERS[task_id]
     apply(workspace)
     _touch_test(workspace, test, task_id)
 
 
-def official_reference_digest(task_id: str) -> str:
-    task = next(item for item in OFFICIAL_TASKS if item.task_id == task_id)
+def official_reference_digest(
+    task_id: str, *, suite_version: str = OFFICIAL_SUITE_VERSION
+) -> str:
+    tasks = OFFICIAL_TASKS_V1 if suite_version == OFFICIAL_SUITE_VERSION_V1 else OFFICIAL_TASKS_V2
+    task = next(item for item in tasks if item.task_id == task_id)
     return canonical_digest(
-        {"suite": OFFICIAL_SUITE_VERSION, "task_id": task_id, "verifier": task.verifier_digest, "fixture_version": 1}
+        {
+            "suite": suite_version,
+            "task_id": task_id,
+            "verifier": task.verifier_digest,
+            "fixture_version": 1 if suite_version == OFFICIAL_SUITE_VERSION_V1 else 2,
+        }
     )
 
 
-def official_reference_digests() -> tuple[tuple[str, str], ...]:
-    return tuple((task.task_id, official_reference_digest(task.task_id)) for task in OFFICIAL_TASKS)
+def official_reference_digests(
+    *, suite_version: str = OFFICIAL_SUITE_VERSION
+) -> tuple[tuple[str, str], ...]:
+    tasks = OFFICIAL_TASKS_V1 if suite_version == OFFICIAL_SUITE_VERSION_V1 else OFFICIAL_TASKS_V2
+    return tuple(
+        (task.task_id, official_reference_digest(task.task_id, suite_version=suite_version))
+        for task in tasks
+    )
+
+
+NAV03_SEMANTIC_FIXTURES: tuple[tuple[str, Callable[[Path], None], bool], ...] = (
+    ("canonical", _nav_applicability, True),
+    ("alternate-helper", _nav_applicability_alternate, True),
+    ("missing-api", _nav_applicability_missing, False),
+    ("broken-candidate", _nav_applicability_broken_candidate, False),
+    ("broken-status", _nav_applicability_broken_status, False),
+    ("noncomposable", _nav_applicability_noncomposable, False),
+    ("unordered", _nav_applicability_unordered, False),
+    ("broken-identity", _nav_applicability_broken_identity, False),
+)
+
+
+def apply_nav03_semantic_fixture(fixture_id: str, workspace: Path) -> None:
+    apply, _expected = next(
+        (apply, expected)
+        for name, apply, expected in NAV03_SEMANTIC_FIXTURES
+        if name == fixture_id
+    )
+    apply(workspace)
+    if fixture_id != "missing-api":
+        _touch_test(workspace, "tests/test_knowledge_applicability.py", fixture_id)
 
 
 __all__ = [
     "OFFICIAL_REFERENCE_BASE",
     "OFFICIAL_SUITE_VERSION",
+    "OFFICIAL_SUITE_VERSION_V1",
+    "NAV03_SEMANTIC_FIXTURES",
+    "apply_nav03_semantic_fixture",
     "apply_official_reference",
     "official_reference_digest",
     "official_reference_digests",

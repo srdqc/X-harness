@@ -211,6 +211,37 @@ with TemporaryDirectory() as root:
 """,
     ),
     OfficialVerifierSpec(
+        "p3r4-v2-nav-applicability-list",
+        ("pico/knowledge_evolution/store.py", "tests/*"),
+        ("tests/test_knowledge_applicability.py",),
+        r"""
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from pico.knowledge_evolution import ApplicabilityReason, ApplicabilityStatus, KnowledgeApplicabilityResult, KnowledgeRecordStore, KnowledgeStoreError, LifecycleState
+def item(identity, candidate, status):
+    reason=ApplicabilityReason.APPLICABLE if status is ApplicabilityStatus.APPLICABLE else ApplicabilityReason.NOT_ACTIVE
+    return KnowledgeApplicabilityResult.create(applicability_id=identity,candidate_id=candidate,candidate_manifest_digest="a"*64,repository_scope_id="b"*64,lifecycle_state=LifecycleState.ACTIVE,lifecycle_transition_digest="c"*64,materialization_id="m",materialization_digest="d"*64,status=status,reasons=(reason,),guard_evidence=(),evaluated_at="2026-10-03T00:00:00Z",evaluator_policy="probe",evaluator_version=1)
+with TemporaryDirectory() as root:
+    store=KnowledgeRecordStore(Path(root))
+    assert store.list_applicability_results() == ()
+    store.write_applicability(item("a-c","c-a",ApplicabilityStatus.NOT_APPLICABLE))
+    store.write_applicability(item("a-b","c-b",ApplicabilityStatus.NOT_APPLICABLE))
+    store.write_applicability(item("a-a","c-a",ApplicabilityStatus.APPLICABLE))
+    assert tuple(x.applicability_id for x in store.list_applicability_results()) == ("a-a","a-b","a-c")
+    assert tuple(x.applicability_id for x in store.list_applicability_results(candidate_id="c-b")) == ("a-b",)
+    assert tuple(x.applicability_id for x in store.list_applicability_results(status=ApplicabilityStatus.APPLICABLE)) == ("a-a",)
+    assert tuple(x.applicability_id for x in store.list_applicability_results(candidate_id="c-a",status=ApplicabilityStatus.NOT_APPLICABLE)) == ("a-c",)
+    assert store.list_applicability_results(candidate_id="missing") == ()
+    reloaded=KnowledgeRecordStore(Path(root))
+    assert tuple(x.applicability_id for x in reloaded.list_applicability_results()) == ("a-a","a-b","a-c")
+    original=store.applicability_results / "a-a.json"
+    original.rename(store.applicability_results / "mismatched.json")
+    try: store.list_applicability_results()
+    except KnowledgeStoreError: pass
+    else: raise AssertionError("record/path identity mismatch accepted")
+""",
+    ),
+    OfficialVerifierSpec(
         "p3r4-v-impl-retrieval-summary",
         ("pico/knowledge_evolution/retrieval.py", "tests/*"),
         ("tests/test_knowledge_retrieval.py",),
