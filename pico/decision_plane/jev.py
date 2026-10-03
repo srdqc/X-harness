@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pico.decision_plane.types import (
     DECISION_SCHEMA,
@@ -21,6 +21,9 @@ from pico.decision_plane.types import (
     DecisionResult,
     validate_decision_result,
 )
+
+if TYPE_CHECKING:
+    from pico.decision_plane.utility import JevUtilityBackendResponse, JevUtilityRequest
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,10 @@ class JevBackend(Protocol):
     """Narrow injectable ranking backend with no Runtime authority."""
 
     async def rank_skill_candidates(self, request: DecisionRequest) -> JevBackendResponse: ...
+
+    async def decide_knowledge_utility(
+        self, request: JevUtilityRequest
+    ) -> JevUtilityBackendResponse: ...
 
 
 class JevDecisionAdapter:

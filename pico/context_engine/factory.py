@@ -104,6 +104,7 @@ def build_context_engine(
     p3_builder = None
     p3_skill_source = None
     try:
+        from pico.decision_plane.utility import JevUtilityDecisionAdapter
         from pico.knowledge_evolution import (
             ApplicabilityEnvironment,
             KnowledgeRecordStore,
@@ -112,6 +113,7 @@ def build_context_engine(
         )
         from pico.knowledge_evolution.relevance import KnowledgeSelectionMode
         from pico.knowledge_evolution.runtime import KnowledgeContextSegmentBuilder
+        from pico.knowledge_evolution.utility import KnowledgeUtilityCoordinator
         from pico.memory_engine.skill_forge.knowledge_source import (
             ApplicableKnowledgeSkillSource,
         )
@@ -136,8 +138,22 @@ def build_context_engine(
                 )
 
             selection_mode = KnowledgeSelectionMode(config.knowledge_selection_mode)
+            utility_coordinator = (
+                KnowledgeUtilityCoordinator(
+                    JevUtilityDecisionAdapter(
+                        jev_backend,
+                        timeout_seconds=config.knowledge_utility_timeout_seconds,
+                    )
+                )
+                if selection_mode
+                is KnowledgeSelectionMode.TASK_RELEVANCE_V1_JEV_UTILITY
+                else None
+            )
             p3_builder = KnowledgeContextSegmentBuilder(
-                store, environment_factory, selection_mode=selection_mode
+                store,
+                environment_factory,
+                selection_mode=selection_mode,
+                utility_coordinator=utility_coordinator,
             )
             source_label = f"experience:{scope_id}"
             p3_registry = SkillRegistry(
@@ -150,6 +166,7 @@ def build_context_engine(
                 environment_factory=environment_factory,
                 physical_source=source_label,
                 selection_mode=selection_mode,
+                utility_coordinator=utility_coordinator,
             )
     except Exception:
         # P3 knowledge is optional guidance. Resolution/storage failure keeps

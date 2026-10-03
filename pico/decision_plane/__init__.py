@@ -14,6 +14,20 @@ from pico.decision_plane.types import (
     DecisionType,
     validate_decision_result,
 )
+from pico.decision_plane.utility import (
+    JEV_UTILITY_RECEIPT_SCHEMA,
+    JEV_UTILITY_REQUEST_SCHEMA,
+    JEV_UTILITY_RESPONSE_SCHEMA,
+    JevUtilityAdvice,
+    JevUtilityBackendResponse,
+    JevUtilityCandidate,
+    JevUtilityCandidateDecision,
+    JevUtilityDecisionAdapter,
+    JevUtilityDecisionReceipt,
+    JevUtilityRequest,
+    JevUtilityResult,
+    UtilityDecision,
+)
 
 __all__ = [
     "DECISION_SCHEMA",
@@ -30,5 +44,17 @@ __all__ = [
     "JevBackend",
     "JevBackendResponse",
     "JevDecisionAdapter",
+    "JEV_UTILITY_RECEIPT_SCHEMA",
+    "JEV_UTILITY_REQUEST_SCHEMA",
+    "JEV_UTILITY_RESPONSE_SCHEMA",
+    "JevUtilityAdvice",
+    "JevUtilityBackendResponse",
+    "JevUtilityCandidate",
+    "JevUtilityCandidateDecision",
+    "JevUtilityDecisionAdapter",
+    "JevUtilityDecisionReceipt",
+    "JevUtilityRequest",
+    "JevUtilityResult",
+    "UtilityDecision",
     "validate_decision_result",
 ]

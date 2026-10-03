@@ -22,6 +22,7 @@ MAX_EVIDENCE_TOKENS = 12
 class KnowledgeSelectionMode(StrEnum):
     LEGACY_APPLICABLE = "legacy_applicable"
     TASK_RELEVANCE_V1 = "task_relevance_v1"
+    TASK_RELEVANCE_V1_JEV_UTILITY = "task_relevance_v1_jev_utility"
 
 
 class RelevanceDecision(StrEnum):

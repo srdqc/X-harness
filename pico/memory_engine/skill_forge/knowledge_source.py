@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pico.knowledge_evolution.applicability import ApplicabilityEnvironment
 from pico.knowledge_evolution.relevance import KnowledgeSelectionMode
@@ -14,6 +14,9 @@ from pico.knowledge_evolution.types import CandidateType, structural_digest
 from pico.tracing import evidence
 
 from .types import RouterHit
+
+if TYPE_CHECKING:
+    from pico.knowledge_evolution.utility import KnowledgeUtilityCoordinator
 
 
 @dataclass
@@ -25,6 +28,7 @@ class ApplicableKnowledgeSkillSource:
     environment_factory: Callable[[], ApplicabilityEnvironment]
     physical_source: str
     selection_mode: KnowledgeSelectionMode = KnowledgeSelectionMode.LEGACY_APPLICABLE
+    utility_coordinator: KnowledgeUtilityCoordinator | None = None
     name: str = "experience"
     weight: float = 1.0
 
@@ -53,6 +57,15 @@ class ApplicableKnowledgeSkillSource:
             candidate_types=(CandidateType.SKILL_CANDIDATE,),
             top_k=k,
         )
+        if self.utility_coordinator is not None:
+            refinement = await self.utility_coordinator.refine(
+                items,
+                query=query,
+                turn_id=turn_id,
+                repository_scope_id=receipt.repository_scope_id,
+                group_id=receipt.retrieval_id,
+            )
+            items = refinement.items
         hits: list[RouterHit] = []
         for item in items:
             meta = self.registry.get(item.candidate.candidate_id, source=self.physical_source)

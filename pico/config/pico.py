@@ -73,10 +73,24 @@ class ContextConfig(_Base):
     仍可加载；``build_context_engine`` 忽略其 Value。
     """
 
-    knowledge_selection_mode: Literal["legacy_applicable", "task_relevance_v1"] = (
-        "legacy_applicable"
-    )
+    knowledge_selection_mode: Literal[
+        "legacy_applicable",
+        "task_relevance_v1",
+        "task_relevance_v1_jev_utility",
+    ] = "legacy_applicable"
     """P3 candidate selection; legacy remains the production default."""
+
+    knowledge_utility_timeout_seconds: float = Field(
+        default=0.25, gt=0.0, le=30.0, allow_inf_nan=False
+    )
+    """Timeout for one opt-in Jev utility request per Turn."""
+
+    @field_validator("knowledge_utility_timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_knowledge_utility_timeout(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("knowledge_utility_timeout_seconds must be a number")
+        return value
 
     # Curator 历史路径参数。
     fast_path_threshold: float = 0.60

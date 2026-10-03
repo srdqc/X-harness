@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pico.context_engine.base import AssemblyContext, Segment
 from pico.tracing import evidence, spans
@@ -15,6 +15,9 @@ from .retrieval import KnowledgeRetriever, RetrievedKnowledge
 from .store import KnowledgeRecordStore
 from .types import CandidateType, structural_digest
 from .usage import KnowledgeUsageMode, KnowledgeUsageReceipt, persist_usage
+
+if TYPE_CHECKING:
+    from .utility import KnowledgeUtilityCoordinator
 
 
 def _usage_receipt(
@@ -76,6 +79,7 @@ class KnowledgeContextSegmentBuilder:
         max_experiences: int = 3,
         max_tokens: int = 900,
         selection_mode: KnowledgeSelectionMode = KnowledgeSelectionMode.LEGACY_APPLICABLE,
+        utility_coordinator: KnowledgeUtilityCoordinator | None = None,
     ) -> None:
         self._store = store
         self._environment_factory = environment_factory
@@ -83,6 +87,7 @@ class KnowledgeContextSegmentBuilder:
         self._max_experiences = max(0, max_experiences)
         self._max_tokens = max(0, max_tokens)
         self._selection_mode = selection_mode
+        self._utility_coordinator = utility_coordinator
 
     async def build(self, ctx: AssemblyContext) -> Segment | None:
         recorder = evidence.current()
@@ -106,6 +111,16 @@ class KnowledgeContextSegmentBuilder:
                 turn_id=turn_id,
                 candidate_types=(CandidateType.MEMORY_FACT, CandidateType.EXPERIENCE),
             )
+            refinement = None
+            if self._utility_coordinator is not None:
+                refinement = await self._utility_coordinator.refine(
+                    items,
+                    query=ctx.current_message,
+                    turn_id=turn_id,
+                    repository_scope_id=receipt.repository_scope_id,
+                    group_id=receipt.retrieval_id,
+                )
+                items = refinement.items
         except Exception as exc:  # noqa: BLE001 -- optional knowledge must fail isolated
             return Segment(
                 text="",
@@ -156,6 +171,15 @@ class KnowledgeContextSegmentBuilder:
                 "p3_retrieved_candidate_ids": list(receipt.selected_candidate_ids),
                 "p3_injected_candidate_ids": [item.candidate.candidate_id for item in injected],
                 "p3_suppressed_count": receipt.suppressed_count,
+                "p3_utility_kept_candidate_ids": (
+                    list(refinement.retained_candidate_ids) if refinement is not None else []
+                ),
+                "p3_utility_abstained_candidate_ids": (
+                    list(refinement.abstained_candidate_ids) if refinement is not None else []
+                ),
+                "p3_utility_fallback_used": (
+                    refinement.fallback_used if refinement is not None else False
+                ),
             },
         )
 

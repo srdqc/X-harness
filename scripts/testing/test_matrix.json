@@ -51,6 +51,7 @@
       "targets": [
         "tests/test_decision_plane.py",
         "tests/test_jev_decision_adapter.py",
+        "tests/test_jev_utility_gate.py",
         "tests/test_picobench_skill_decision_evaluation.py",
         "tests/test_skill_decision_integration.py",
         "tests/test_skill_router_sr1.py",
@@ -83,6 +84,7 @@
         "tests/test_knowledge_relevance.py",
         "tests/test_knowledge_usage.py",
         "tests/test_knowledge_runtime_integration.py",
+        "tests/test_jev_utility_gate.py",
         "tests/test_picobench_knowledge_evolution.py",
         "tests/test_trace_verifier.py",
         "tests/test_trace_replay.py"
@@ -94,6 +96,7 @@
         "tests/test_p3r4_official_suite.py",
         "tests/test_knowledge_relevance.py",
         "tests/test_knowledge_runtime_integration.py",
+        "tests/test_jev_utility_gate.py",
         "tests/test_execution_receipts.py",
         "tests/test_knowledge_canonicalization.py",
         "tests/test_picobench_runtime_baseline.py",

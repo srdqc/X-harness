@@ -11,6 +11,8 @@ from pico.tracing import evidence, replay
 
 from .schema import Availability, MetricValue, RunMetrics, TokenAccountingStatus
 
+_UTILITY_RECEIPT_SCHEMA = "pico.jev-utility-decision.v1"
+
 
 def available(value: int | float) -> MetricValue:
     return MetricValue(value, Availability.AVAILABLE)
@@ -28,6 +30,44 @@ def repeated_repository_reads(paths: tuple[str, ...]) -> tuple[int, int, int]:
     normalized = tuple(Path(path.replace("\\", "/")).as_posix().casefold() for path in paths)
     counts = Counter(normalized)
     return len(counts), len(normalized), sum(max(count - 1, 0) for count in counts.values())
+
+
+def extract_utility_observability(events) -> dict[str, object]:
+    """Project additive Jev utility receipts without changing historical runs."""
+
+    receipts = tuple(
+        item.metadata
+        for item in events
+        if item.event_type == evidence.DECISION_RECEIPT
+        and item.metadata.get("receipt_schema") == _UTILITY_RECEIPT_SCHEMA
+    )
+    return {
+        "utility_decision_refs": tuple(str(item.get("decision_id")) for item in receipts),
+        "utility_kept_candidate_ids": tuple(
+            sorted({str(value) for item in receipts for value in item.get("retained_candidate_ids", ())})
+        ),
+        "utility_abstained_candidate_ids": tuple(
+            sorted({str(value) for item in receipts for value in item.get("abstained_candidate_ids", ())})
+        ),
+        "utility_invoked_count": sum(item.get("request_digest") is not None for item in receipts),
+        "utility_skipped_count": sum(
+            item.get("fallback_reason") == "skipped_no_relevant_candidates" for item in receipts
+        ),
+        "utility_fallback_count": sum(item.get("fallback_used") is True for item in receipts),
+        "utility_fallback_reasons": tuple(
+            sorted(
+                Counter(
+                    str(item["fallback_reason"])
+                    for item in receipts
+                    if item.get("fallback_used") is True and item.get("fallback_reason")
+                ).items()
+            )
+        ),
+        "utility_latency_ms": round(
+            sum(float(item.get("latency_ms", 0.0)) for item in receipts), 6
+        ),
+        "utility_candidate_count": sum(len(item.get("input_candidate_ids", ())) for item in receipts),
+    }
 
 
 def extract_run_metrics(
@@ -252,8 +292,15 @@ def extract_run_metrics(
                 ).items()
             )
         ),
+        **extract_utility_observability(readback.events),
     }
     return metrics, refs
 
 
-__all__ = ["available", "extract_run_metrics", "repeated_repository_reads", "unavailable"]
+__all__ = [
+    "available",
+    "extract_run_metrics",
+    "extract_utility_observability",
+    "repeated_repository_reads",
+    "unavailable",
+]

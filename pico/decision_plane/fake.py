@@ -7,6 +7,12 @@ from enum import Enum
 
 from pico.decision_plane.jev import JevBackendResponse, JevCostMetadata, JevRankingAdvice
 from pico.decision_plane.types import DecisionOutcome, DecisionRequest
+from pico.decision_plane.utility import (
+    JevUtilityAdvice,
+    JevUtilityBackendResponse,
+    JevUtilityRequest,
+    UtilityDecision,
+)
 
 
 class JevFakeMode(str, Enum):
@@ -21,10 +27,19 @@ class JevFakeMode(str, Enum):
     INCOMPLETE_RANKING = "incomplete_ranking"
     INVALID_SCORE = "invalid_score"
     INVALID_CONFIDENCE = "invalid_confidence"
+    INVALID_DECISION = "invalid_decision"
+    INVALID_RANK = "invalid_rank"
+    KEEP_ALL = "keep_all"
+    ABSTAIN_ONE = "abstain_one"
+    ABSTAIN_ALL = "abstain_all"
+    REORDER = "reorder"
 
 
 class ScriptedJevBackend:
     """Return one selected response shape without inspecting expected answers."""
+
+    backend_id = "scripted_jev"
+    backend_version = "1"
 
     def __init__(
         self,
@@ -39,6 +54,7 @@ class ScriptedJevBackend:
         self.confidence = confidence
         self.cost = cost or JevCostMetadata()
         self.calls = 0
+        self.utility_calls = 0
         self.cancelled = False
 
     async def rank_skill_candidates(self, request: DecisionRequest) -> JevBackendResponse:
@@ -87,6 +103,103 @@ class ScriptedJevBackend:
             ranking=tuple(ranking),
             outcome=outcome,
             cost=self.cost,
+        )
+
+    async def decide_knowledge_utility(
+        self, request: JevUtilityRequest
+    ) -> JevUtilityBackendResponse:
+        self.calls += 1
+        self.utility_calls += 1
+        if self.mode is JevFakeMode.TIMEOUT:
+            try:
+                await asyncio.sleep(3_600)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+        if self.mode is JevFakeMode.EXCEPTION:
+            raise RuntimeError("scripted Jev utility failure")
+        if self.mode is JevFakeMode.MALFORMED:
+            return object()  # type: ignore[return-value]
+        if self.mode is JevFakeMode.UNAVAILABLE:
+            return JevUtilityBackendResponse(
+                request.decision_id,
+                request.request_digest,
+                (),
+                outcome=DecisionOutcome.UNAVAILABLE,
+            )
+
+        values = list(request.candidates)
+        decisions = [
+            JevUtilityAdvice(
+                item.candidate_id,
+                UtilityDecision.KEEP,
+                utility_score=1.0,
+                confidence=self.confidence,
+                reason_code="scripted_keep",
+                backend_rank=index,
+            )
+            for index, item in enumerate(values, start=1)
+        ]
+        if self.mode is JevFakeMode.ABSTAIN_ONE and decisions:
+            decisions[-1] = JevUtilityAdvice(
+                decisions[-1].candidate_id,
+                UtilityDecision.ABSTAIN,
+                utility_score=0.0,
+                reason_code="scripted_abstain",
+                backend_rank=len(decisions),
+            )
+        elif self.mode is JevFakeMode.ABSTAIN_ALL:
+            decisions = [
+                JevUtilityAdvice(
+                    item.candidate_id,
+                    UtilityDecision.ABSTAIN,
+                    utility_score=0.0,
+                    reason_code="scripted_abstain",
+                    backend_rank=index,
+                )
+                for index, item in enumerate(values, start=1)
+            ]
+        elif self.mode is JevFakeMode.REORDER:
+            decisions = [
+                JevUtilityAdvice(
+                    item.candidate_id,
+                    UtilityDecision.KEEP,
+                    utility_score=1.0,
+                    reason_code="scripted_keep",
+                    backend_rank=index,
+                )
+                for index, item in enumerate(reversed(values), start=1)
+            ]
+        elif self.mode is JevFakeMode.UNKNOWN_CANDIDATE and decisions:
+            decisions[-1] = JevUtilityAdvice("unknown/candidate", UtilityDecision.KEEP)
+        elif self.mode is JevFakeMode.DUPLICATE_CANDIDATE and decisions:
+            decisions[-1] = decisions[0]
+        elif self.mode is JevFakeMode.INCOMPLETE_RANKING:
+            decisions = decisions[:-1]
+        elif self.mode is JevFakeMode.INVALID_SCORE and decisions:
+            decisions[0] = JevUtilityAdvice(
+                decisions[0].candidate_id,
+                UtilityDecision.KEEP,
+                utility_score=float("nan"),
+            )
+        elif self.mode is JevFakeMode.INVALID_CONFIDENCE and decisions:
+            decisions[0] = JevUtilityAdvice(
+                decisions[0].candidate_id,
+                UtilityDecision.KEEP,
+                confidence=2.0,
+            )
+        elif self.mode is JevFakeMode.INVALID_DECISION and decisions:
+            decisions[0] = JevUtilityAdvice(decisions[0].candidate_id, "promote")
+        elif self.mode is JevFakeMode.INVALID_RANK and decisions:
+            decisions[0] = JevUtilityAdvice(
+                decisions[0].candidate_id,
+                UtilityDecision.KEEP,
+                backend_rank=len(decisions) + 1,
+            )
+        return JevUtilityBackendResponse(
+            request.decision_id,
+            request.request_digest,
+            tuple(decisions),
         )
 
 

@@ -226,7 +226,10 @@ class KnowledgeRetriever:
             relevance_query = TaskRelevanceQuery.from_task("")
             unsupported_query = True
         selections: tuple[KnowledgeRelevanceSelection, ...]
-        if self.selection_mode is KnowledgeSelectionMode.TASK_RELEVANCE_V1:
+        if self.selection_mode in {
+            KnowledgeSelectionMode.TASK_RELEVANCE_V1,
+            KnowledgeSelectionMode.TASK_RELEVANCE_V1_JEV_UTILITY,
+        }:
             selected, selections = select_relevant_candidates(
                 relevance_query,
                 (item[0] for item in applicable),
@@ -313,7 +316,11 @@ class KnowledgeRetriever:
             repository_scope_id=self.environment.repository_scope_id,
             query_digest=(
                 relevance_query.query_digest
-                if self.selection_mode is KnowledgeSelectionMode.TASK_RELEVANCE_V1
+                if self.selection_mode
+                in {
+                    KnowledgeSelectionMode.TASK_RELEVANCE_V1,
+                    KnowledgeSelectionMode.TASK_RELEVANCE_V1_JEV_UTILITY,
+                }
                 else structural_digest({"query": query})
             ),
             candidate_set_digest=structural_digest(

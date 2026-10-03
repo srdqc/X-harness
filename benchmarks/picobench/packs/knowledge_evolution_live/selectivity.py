@@ -57,7 +57,13 @@ def evaluate_selectivity(
     proposal_by_corpus = {item.corpus_id: item.proposal for item in CORPUS}
     prompt_by_task = {task.task_id: task.prompt for task in tasks or ()}
     modes: dict[str, Any] = {}
-    for mode in KnowledgeSelectionMode:
+    # Historical P3R selector audits compare only the frozen deterministic
+    # baseline modes. Jev utility is a later additive experiment, not a third
+    # selector implementation in these immutable reports.
+    for mode in (
+        KnowledgeSelectionMode.LEGACY_APPLICABLE,
+        KnowledgeSelectionMode.TASK_RELEVANCE_V1,
+    ):
         task_results: dict[str, Any] = {}
         for task_id in task_ids:
             selected: set[str] = set()
