@@ -99,6 +99,34 @@ def test_run_local_python_and_pip_environment_does_not_target_shared_sites(tmp_p
     }
 
 
+def test_explicit_config_path_survives_run_local_pico_home(tmp_path: Path) -> None:
+    from pico.config.schema import Config
+
+    config = Config()
+    config.agents.defaults.model = "deepseek/frozen-test-model"
+    config_path = tmp_path / "source-config.json"
+    config_path.write_text(config.model_dump_json(by_alias=True), encoding="utf-8")
+    roots = AgentRunRoots.create(tmp_path / "campaign", "config", 1)
+    roots.prepare_non_worktree_roots()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; from pathlib import Path; "
+                "from pico.config.loader import load_config, set_config_path; "
+                "set_config_path(Path(sys.argv[1])); "
+                "print(load_config().agents.defaults.model)"
+            ),
+            str(config_path),
+        ],
+        cwd=Path.cwd(), env=roots.child_environment(), check=False,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "deepseek/frozen-test-model"
+
+
 def test_direct_executor_propagates_run_local_python_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,12 +197,44 @@ def test_historical_campaign_loads_and_reduces_from_copy(tmp_path: Path) -> None
 
 
 def test_jev4r_delta_rejects_behavioral_changes_and_requires_new_runner() -> None:
-    source = {key: f"frozen-{key}" for key in jev4_pilot._BEHAVIORAL_MANIFEST_KEYS}
-    candidate = {**source, "runner_version": RUNNER_VERSION}
+    source = jev4_pilot.load_manifest(Path(".p3r/jev4-9168e909e0c47dfb"))
+    candidate = {
+        **source,
+        "schema": jev4_pilot.SCHEMA,
+        "schema_version": jev4_pilot.SCHEMA_VERSION,
+        "runner_version": RUNNER_VERSION,
+        "source_campaign_id": source["campaign_id"],
+        "source_campaign_semantic_digest": source["campaign_semantic_digest"],
+        "utility_max_tokens": 1024,
+        "behavioral_input_digest": jev4_pilot.canonical_digest(
+            jev4_pilot._behavioral_input_payload(source)
+        ),
+    }
     jev4_pilot.assert_infrastructure_only_rerun(source, candidate)
-    candidate["utility_prompt_digest"] = "changed"
+    candidate["base_commit_sha"] = "0" * 40
     with pytest.raises(ValueError, match="behavioral inputs changed"):
         jev4_pilot.assert_infrastructure_only_rerun(source, candidate)
+
+
+def test_zero_selection_contract_fails_closed_for_b_and_c() -> None:
+    common = {"task_id": jev4_pilot.TASKS[2].task_id}
+    assert jev4_pilot._zero_selection_contract_failure({
+        **common,
+        "arm": jev4_pilot.Arm.TASK_RELEVANCE_V1.value,
+        "relevance_selected_candidate_ids": ("unexpected",),
+    }) == "zero_selection_contract_failure"
+    assert jev4_pilot._zero_selection_contract_failure({
+        **common,
+        "arm": jev4_pilot.Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value,
+        "relevance_selected_candidate_ids": (),
+        "utility_metrics": {"utility_logical_calls": 1},
+    }) == "zero_selection_utility_invoked"
+    assert jev4_pilot._zero_selection_contract_failure({
+        **common,
+        "arm": jev4_pilot.Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value,
+        "relevance_selected_candidate_ids": (),
+        "utility_metrics": {"utility_logical_calls": 0},
+    }) is None
 
 
 def test_original_campaign_remains_immutable_and_hold() -> None:

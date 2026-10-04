@@ -28,6 +28,7 @@ from pico.config.paths import RuntimePaths
 from pico.decision_plane.provider_utility import (
     PROVIDER_UTILITY_PROMPT_DIGEST,
     PROVIDER_UTILITY_TEMPLATE_VERSION,
+    ProviderUtilityConfig,
 )
 from pico.knowledge_evolution import (
     ApplicabilityEnvironment,
@@ -62,12 +63,19 @@ SCHEMA = "pico.jev4r-agent-pilot.v2"
 SCHEMA_VERSION = 2
 RUN_SCHEMA = "pico.jev4-agent-run.v1"
 UTILITY_TIMEOUT_SECONDS = 15.0
+UTILITY_MAX_TOKENS = ProviderUtilityConfig().max_tokens
 CAMPAIGN_SEED = 40_904
 PRIMARY_COMPARISON = ("task_relevance_v1", "task_relevance_v1_provider_utility")
 PILOT_CLASSIFICATIONS = {
     "GO_NEW_HELDOUT_BENCHMARK",
     "HOLD_AND_FORENSIC",
     "STOP_PROVIDER_UTILITY",
+}
+JEV4R_CLASSIFICATIONS = {
+    "INFRA_PASS_BEHAVIOR_PROMISING",
+    "INFRA_PASS_BEHAVIOR_MIXED",
+    "INFRA_PASS_BEHAVIOR_CONCERNING",
+    "HOLD_INFRA",
 }
 
 
@@ -233,24 +241,25 @@ def _treatment_identity() -> dict[str, str]:
     }
 
 
-def _semantic_payload(*, base_sha: str, identity: dict[str, str], budget: RuntimeBudget,
+def _behavioral_input_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Normalize v1/v2 manifests to the frozen behavior surface."""
+    return {
+        key: value[key]
+        for key in (
+            "base_commit_sha", "campaign_seed", "primary_comparison", "task_order",
+            "task_prompt_digests", "verifier_digests", "reference_fixture_digests",
+            "contract_audit_digest", "provider_id", "actual_model_id",
+            "provider_model_config_digest", "tool_config_digest", "runtime_config_digest",
+            "budget", "utility_prompt_digest", "utility_schema_version",
+            "utility_timeout_seconds", "knowledge_corpus_digest", "selector_digest",
+            "treatment_identity", "planned_runs", "preflight_relevance_selected_candidate_ids",
+            "replacement_policy",
+        )
+    } | {"utility_max_tokens": int(value.get("utility_max_tokens", 1024))}
+
+
+def _semantic_payload(*, source: dict[str, Any], identity: dict[str, str],
                       selected_sets: dict[str, tuple[str, ...]]) -> dict[str, Any]:
-    behavioral = {
-        "task_order": tuple(task.task_id for task in TASKS),
-        "task_prompt_digests": tuple((task.task_id, task.prompt_digest) for task in TASKS),
-        "verifier_digests": tuple((task.task_id, task.verifier_digest) for task in TASKS),
-        "reference_fixture_digests": tuple((task.task_id, task.reference_digest) for task in TASKS),
-        "provider_id": identity["provider_id"],
-        "actual_model_id": identity["model"],
-        "provider_model_config_digest": identity["provider_digest"],
-        "utility_prompt_digest": PROVIDER_UTILITY_PROMPT_DIGEST,
-        "utility_schema_version": PROVIDER_UTILITY_TEMPLATE_VERSION,
-        "utility_timeout_seconds": UTILITY_TIMEOUT_SECONDS,
-        "knowledge_corpus_digest": corpus_digest(),
-        "selector_digest": _selector_digest(),
-        "treatment_identity": _treatment_identity(),
-        "preflight_relevance_selected_candidate_ids": selected_sets,
-    }
     infrastructure_delta = {
         "runner_version": RUNNER_VERSION,
         "child_process_per_run": True,
@@ -259,14 +268,15 @@ def _semantic_payload(*, base_sha: str, identity: dict[str, str], budget: Runtim
         "python_install_scope": "run_local",
         "malformed_diagnostics": True,
     }
-    return {
+    result = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "runner_version": RUNNER_VERSION,
         "campaign_purpose": "non_claim_eligible_infrastructure_behavioral_rerun",
-        "behavioral_input_digest": canonical_digest(behavioral),
         "infrastructure_delta_digest": canonical_digest(infrastructure_delta),
-        "base_commit_sha": base_sha,
+        "source_campaign_id": source["campaign_id"],
+        "source_campaign_semantic_digest": source["campaign_semantic_digest"],
+        "base_commit_sha": source["base_commit_sha"],
         "campaign_seed": CAMPAIGN_SEED,
         "primary_comparison": PRIMARY_COMPARISON,
         "task_order": tuple(task.task_id for task in TASKS),
@@ -279,10 +289,11 @@ def _semantic_payload(*, base_sha: str, identity: dict[str, str], budget: Runtim
         "provider_model_config_digest": identity["provider_digest"],
         "tool_config_digest": identity["tool_digest"],
         "runtime_config_digest": identity["runtime_digest"],
-        "budget": budget,
+        "budget": source["budget"],
         "utility_prompt_digest": PROVIDER_UTILITY_PROMPT_DIGEST,
         "utility_schema_version": PROVIDER_UTILITY_TEMPLATE_VERSION,
         "utility_timeout_seconds": UTILITY_TIMEOUT_SECONDS,
+        "utility_max_tokens": UTILITY_MAX_TOKENS,
         "knowledge_corpus_digest": corpus_digest(),
         "selector_digest": _selector_digest(),
         "treatment_identity": _treatment_identity(),
@@ -290,33 +301,34 @@ def _semantic_payload(*, base_sha: str, identity: dict[str, str], budget: Runtim
         "preflight_relevance_selected_candidate_ids": selected_sets,
         "replacement_policy": "forbidden_stop_on_infra_invalid",
     }
+    result["behavioral_input_digest"] = canonical_digest(_behavioral_input_payload(result))
+    return result
 
 
 def _store(root: Path) -> ArtifactStore:
     return ArtifactStore(ExperimentRef(root.name, root))
 
 
-def prepare_campaign(repository: Path, output_root: Path, reviewer_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+def prepare_campaign(repository: Path, output_root: Path, source_root: Path,
+                     reviewer_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     from pico.config.loader import load_config
 
     config = load_config()
-    budget = RuntimeBudget(
-        max_agent_iterations=config.agents.defaults.max_tool_iterations,
-        provider_logical_calls_observational=config.agents.defaults.max_tool_iterations,
-        tool_calls_observational=40,
-        context_window_tokens=config.agents.defaults.context_window_tokens,
-    )
+    source = load_manifest(source_root)
+    if source["schema_version"] != LEGACY_SCHEMA_VERSION:
+        raise ValueError("JEV.4R source must be the frozen JEV.4 v1 campaign")
+    budget = RuntimeBudget(**source["budget"])
     identity = configuration_identity(config, budget)
     if identity["provider_id"] != "deepseek" or not identity["model"].startswith("deepseek/"):
         raise ValueError("JEV.4 requires the configured DeepSeek Agent provider/model")
-    base_sha = resolve_base_commit(repository, "HEAD")
+    base_sha = resolve_base_commit(repository, source["base_commit_sha"])
     audit = preflight(repository, base_sha, reviewer_id)
     semantic = _semantic_payload(
-        base_sha=base_sha,
+        source=source,
         identity=identity,
-        budget=budget,
         selected_sets=audit["relevance_selected_candidate_ids"],
     )
+    assert_infrastructure_only_rerun(source, semantic)
     semantic_digest = canonical_digest(semantic)
     campaign_id = f"jev4r-{semantic_digest[:16]}"
     manifest = {
@@ -328,6 +340,14 @@ def prepare_campaign(repository: Path, output_root: Path, reviewer_id: str) -> t
     manifest["manifest_digest"] = canonical_digest(manifest)
     root = output_root / campaign_id
     _store(root).freeze_manifest(manifest)
+    audit.update(
+        immutable_input_delta="PASS",
+        source_campaign_id=source["campaign_id"],
+        environment_fingerprint=environment_fingerprint(),
+        stale_run_roots=False,
+        child_process_runner_available=True,
+        utility_max_tokens=UTILITY_MAX_TOKENS,
+    )
     return root, manifest, audit
 
 
@@ -521,36 +541,44 @@ def _semantic_payload_keys(version: int = SCHEMA_VERSION) -> tuple[str, ...]:
         return common
     return (
         "schema", "schema_version", "runner_version", "campaign_purpose",
-        "behavioral_input_digest", "infrastructure_delta_digest", *common[2:],
+        "behavioral_input_digest", "infrastructure_delta_digest", "source_campaign_id",
+        "source_campaign_semantic_digest", *common[2:16], "utility_max_tokens", *common[16:],
     )
 
 
-_BEHAVIORAL_MANIFEST_KEYS = (
-    "task_order", "task_prompt_digests", "verifier_digests", "reference_fixture_digests",
-    "provider_id", "actual_model_id", "provider_model_config_digest", "utility_prompt_digest",
-    "utility_schema_version", "utility_timeout_seconds", "knowledge_corpus_digest",
-    "selector_digest", "treatment_identity", "preflight_relevance_selected_candidate_ids",
-)
-
-
 def assert_infrastructure_only_rerun(source: dict[str, Any], candidate: dict[str, Any]) -> None:
-    changed = tuple(key for key in _BEHAVIORAL_MANIFEST_KEYS if source.get(key) != candidate.get(key))
-    if changed:
-        raise ValueError(f"JEV.4R behavioral inputs changed: {','.join(changed)}")
+    expected = _behavioral_input_payload(source)
+    actual = _behavioral_input_payload(candidate)
+    changed = tuple(
+        key for key in expected
+        if canonical_digest(expected[key]) != canonical_digest(actual[key])
+    )
+    if changed or candidate.get("behavioral_input_digest") != canonical_digest(expected):
+        detail = ",".join(changed) or "behavioral_input_digest"
+        raise ValueError(f"JEV.4R behavioral inputs changed: {detail}")
+    if candidate.get("source_campaign_id") != source.get("campaign_id"):
+        raise ValueError("JEV.4R source campaign identity changed")
+    if candidate.get("source_campaign_semantic_digest") != source.get("campaign_semantic_digest"):
+        raise ValueError("JEV.4R source semantic digest changed")
     if candidate.get("runner_version") != RUNNER_VERSION:
         raise ValueError("JEV.4R runner version is not current")
 
 
 def run_campaign(repository: Path, root: Path, reviewer_id: str, *, execute_live: bool) -> tuple[str, ...]:
+    from pico.config.loader import get_config_path
+
     if not execute_live:
         raise PermissionError("JEV.4 live execution requires explicit --execute-live")
     manifest = load_manifest(root)
     if manifest["schema_version"] != SCHEMA_VERSION:
         raise ValueError("historical JEV.4 campaigns are immutable and cannot use the JEV.4R runner")
+    source = load_manifest(root.parent / manifest["source_campaign_id"])
+    assert_infrastructure_only_rerun(source, manifest)
     run_dir = root / "runs"
     if run_dir.exists() and tuple(run_dir.glob("*.json")):
         raise FileExistsError("JEV.4 is one-shot; existing run records forbid resume or replacement")
     completed: list[str] = []
+    config_path = get_config_path().resolve()
     for planned in manifest["planned_runs"]:
         roots = AgentRunRoots.create(root, planned["run_id"], planned["order"])
         roots.prepare_non_worktree_roots()
@@ -560,7 +588,8 @@ def run_campaign(repository: Path, root: Path, reviewer_id: str, *, execute_live
                 sys.executable, "-m",
                 "benchmarks.picobench.packs.knowledge_evolution_live.jev4_pilot",
                 "_run-one", "--repository", str(repository), "--campaign-root", str(root),
-                "--run-id", planned["run_id"], "--reviewer-id", reviewer_id, "--execute-live",
+                "--run-id", planned["run_id"], "--reviewer-id", reviewer_id,
+                "--config-path", str(config_path), "--execute-live",
             ],
             cwd=repository,
             env=roots.child_environment(),
@@ -587,12 +616,67 @@ def run_campaign(repository: Path, root: Path, reviewer_id: str, *, execute_live
                 infra_invalid_reason="benchmark_host_failure",
                 verified_success=False,
             )
+        isolation = _cross_run_isolation(root, record)
+        record["cross_run_isolation"] = isolation
+        if not isolation["passed"] and record["run_validity"] != "infra_invalid":
+            record.update(
+                run_validity="infra_invalid",
+                infra_invalid_reason="cross_run_trace_contamination",
+                verified_success=False,
+            )
+        zero_failure = _zero_selection_contract_failure(record)
+        if zero_failure:
+            record.update(
+                run_validity="infra_invalid",
+                infra_invalid_reason=zero_failure,
+                verified_success=False,
+            )
+        record["run_outcome"] = (
+            "INFRA_INVALID" if record["run_validity"] == "infra_invalid"
+            else "PASS" if record["verified_success"] else "FAIL"
+        )
         record["integrity_digest"] = canonical_digest(record)
         _write_run(root, record)
         completed.append(record["run_id"])
         if record["run_validity"] == "infra_invalid":
             raise RuntimeError("JEV.4 stopped after INFRA_INVALID; replacement runs are forbidden")
     return tuple(completed)
+
+
+def _cross_run_isolation(root: Path, current: dict[str, Any]) -> dict[str, Any]:
+    turn_id = current.get("turn_id")
+    current_ref = current.get("isolation_roots", {}).get("state", {}).get("ref")
+    if not turn_id or not current_ref:
+        return {"passed": False, "reason": "missing_current_root_identity"}
+    current_root = root / str(current_ref)
+    foreign_current = []
+    prior_in_current = []
+    for previous in load_runs(root):
+        previous_ref = previous.get("isolation_roots", {}).get("state", {}).get("ref")
+        previous_turn = previous.get("turn_id")
+        if previous_ref and evidence.read_turn_evidence(root / str(previous_ref), str(turn_id)).events:
+            foreign_current.append(previous["run_id"])
+        if previous_turn and evidence.read_turn_evidence(current_root, str(previous_turn)).events:
+            prior_in_current.append(previous["run_id"])
+    return {
+        "passed": not foreign_current and not prior_in_current,
+        "current_turn_foreign_run_ids": tuple(foreign_current),
+        "prior_turn_ids_in_current_root": tuple(prior_in_current),
+    }
+
+
+def _zero_selection_contract_failure(record: dict[str, Any]) -> str | None:
+    if record.get("task_id") != TASKS[2].task_id:
+        return None
+    arm = record.get("arm")
+    selected = tuple(record.get("relevance_selected_candidate_ids", ()))
+    if arm in {Arm.TASK_RELEVANCE_V1.value, Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value} and selected:
+        return "zero_selection_contract_failure"
+    if arm == Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value:
+        calls = record.get("utility_metrics", {}).get("utility_logical_calls")
+        if calls != 0:
+            return "zero_selection_utility_invoked"
+    return None
 
 
 def execute_one(
@@ -646,8 +730,9 @@ def execute_one(
     try:
         try:
             record = asyncio.run(_execute_turn(root, manifest, planned, worktree, state, reviewer_id))
-        except Exception:  # noqa: BLE001 - immutable host-failure boundary
+        except Exception as exc:  # noqa: BLE001 - immutable host-failure boundary
             record = _infra_record(manifest, planned, "benchmark_host_failure")
+            record["bounded_host_failure_type"] = type(exc).__name__
         record.update(
             isolation_roots=roots.public_identity(),
             trace_canary=canary,
@@ -695,6 +780,7 @@ async def _execute_turn(root: Path, manifest: dict[str, Any], planned: dict[str,
             knowledge_utility_provider="agent",
             knowledge_utility_model=manifest["actual_model_id"],
             knowledge_utility_timeout_seconds=UTILITY_TIMEOUT_SECONDS,
+            knowledge_utility_max_tokens=UTILITY_MAX_TOKENS,
         )
     pico_config = PicoConfig.model_validate(
         {**pico_config.model_dump(mode="python"), "memory": {"backend": None}, "context": context}
@@ -738,6 +824,13 @@ async def _execute_turn(root: Path, manifest: dict[str, Any], planned: dict[str,
     _store(root).append_immutable(patch_path, {"run_id": planned["run_id"], "patch_digest": patch_digest, **patch})
     metrics, refs = extract_run_metrics(trace_root=state, turn_id=turn_id, knowledge_state_root=state)
     readback = evidence.read_turn_evidence(state, turn_id)
+    mandatory = {
+        "complete": readback.completeness is evidence.EvidenceCompleteness.COMPLETE,
+        "completeness": readback.completeness.value,
+        "findings": readback.findings,
+        "event_count": len(readback.events),
+        "run_root_digest": canonical_digest(str(state.resolve())),
+    }
     validity = classify_run_validity(
         runtime_outcome=runtime_outcome,
         normalized_provider_failures=tuple(refs["normalized_provider_failure_categories"]),
@@ -760,6 +853,11 @@ async def _execute_turn(root: Path, manifest: dict[str, Any], planned: dict[str,
         "run_validity": validity.validity.value,
         "infra_invalid_reason": validity.reason.value if validity.reason else None,
         "verified_success": bool(verified["passed"]),
+        "run_outcome": (
+            "INFRA_INVALID" if validity.validity.value == "infra_invalid"
+            else "PASS" if verified["passed"] else "FAIL"
+        ),
+        "mandatory_evidence": mandatory,
         "verifier_findings": verified["findings"],
         "main_agent_metrics": main,
         "utility_metrics": utility,
@@ -775,6 +873,7 @@ async def _execute_turn(root: Path, manifest: dict[str, Any], planned: dict[str,
         "patch_artifact_ref": patch_path.relative_to(root).as_posix(),
         "skill_activation_count": main["skills_activated"]["value"],
         "typesafe_enabled": False,
+        "configured_utility_max_tokens": UTILITY_MAX_TOKENS,
     }
     record["integrity_digest"] = canonical_digest(record)
     return record
@@ -836,9 +935,11 @@ def _infra_record(manifest: dict[str, Any], planned: dict[str, Any], reason: str
     record = {
         "schema": RUN_SCHEMA, "schema_version": 1, "campaign_id": manifest["campaign_id"],
         **planned, "run_validity": "infra_invalid", "infra_invalid_reason": reason,
+        "run_outcome": "INFRA_INVALID",
         "verified_success": False, "verifier_findings": (), "main_agent_metrics": {},
         "utility_metrics": {}, "combined_provider_cost": {}, "changed_paths": (),
         "typesafe_enabled": False,
+        "mandatory_evidence": {"complete": False, "findings": ("run_not_completed",)},
     }
     record["integrity_digest"] = canonical_digest(record)
     return record
@@ -862,11 +963,18 @@ def reduce_campaign(root: Path) -> dict[str, Any]:
     by_key = {(item["task_id"], item["arm"]): item for item in runs}
     pairs = []
     b_pass_c_fail = c_pass_b_fail = 0
+    pair_outcomes = Counter()
     over_abstention = []
     for task in TASKS:
         row = {arm.value: by_key.get((task.task_id, arm.value)) for arm in Arm}
         b, c = row[Arm.TASK_RELEVANCE_V1.value], row[Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value]
         if b and c:
+            if b["run_validity"] == "infra_invalid" or c["run_validity"] == "infra_invalid":
+                pair_outcomes["INFRA_INVALID"] += 1
+            else:
+                pair_outcomes[
+                    f"B_{'PASS' if b['verified_success'] else 'FAIL'}_C_{'PASS' if c['verified_success'] else 'FAIL'}"
+                ] += 1
             bp, cp = bool(b["verified_success"]), bool(c["verified_success"])
             b_pass_c_fail += int(bp and not cp)
             c_pass_b_fail += int(cp and not bp)
@@ -874,13 +982,130 @@ def reduce_campaign(root: Path) -> dict[str, Any]:
                 over_abstention.append(task.task_id)
         pairs.append({"task_id": task.task_id, "arms": row})
     infra = sum(item["run_validity"] == "infra_invalid" for item in runs)
+    zero_b = by_key.get((TASKS[2].task_id, Arm.TASK_RELEVANCE_V1.value))
     zero = by_key.get((TASKS[2].task_id, Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value))
     zero_ok = bool(
-        zero and not zero["relevance_selected_candidate_ids"]
+        zero_b and not zero_b["relevance_selected_candidate_ids"]
+        and zero and not zero["relevance_selected_candidate_ids"]
         and zero["utility_metrics"]["utility_logical_calls"] == 0
     )
     fallbacks = sum(item.get("utility_metrics", {}).get("fallback_count", 0) for item in runs)
     utility_calls = sum(item.get("utility_metrics", {}).get("utility_logical_calls", 0) for item in runs)
+    if manifest["schema_version"] == LEGACY_SCHEMA_VERSION:
+        return _reduce_legacy(
+            root, manifest, runs, pairs, infra, zero_ok, b_pass_c_fail, c_pass_b_fail,
+            over_abstention, fallbacks, utility_calls,
+        )
+
+    c_runs = tuple(item for item in runs if item["arm"] == Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value)
+    length_finish_count = sum(
+        str(reason).upper() == "LENGTH"
+        for item in c_runs for reason in item.get("utility_metrics", {}).get("finish_reasons", ())
+    )
+    truncated_output_count = sum(
+        str(category).upper() == "TRUNCATED_OUTPUT"
+        for item in c_runs for category in item.get("utility_metrics", {}).get("malformed_categories", ())
+    )
+    malformed_response_count = sum(
+        bool(item.get("utility_metrics", {}).get("malformed_categories")) for item in c_runs
+    )
+    all_abstain = tuple(
+        item["task_id"] for item in c_runs
+        if item.get("utility_metrics", {}).get("relevance_selected_count", 0) > 0
+        and item.get("utility_metrics", {}).get("effective_choice_counts", {}).get("KEEP", 0) == 0
+    )
+    utility_removed = sum(
+        len(item.get("utility_metrics", {}).get("abstained_candidate_ids", ())) for item in c_runs
+    )
+    raw_uncertain = sum(
+        item.get("utility_metrics", {}).get("raw_choice_counts", {}).get("UNCERTAIN", 0)
+        for item in c_runs
+    )
+    p2_abstain = any(
+        item["task_id"] == TASKS[1].task_id
+        and item.get("utility_metrics", {}).get("raw_choice_counts", {}).get("ABSTAIN", 0)
+        for item in c_runs
+    )
+    unique_pids = {item.get("child_process_id") for item in runs if item.get("child_process_id")}
+    infra_checks = {
+        "all_nine_artifacts_loaded": len(runs) == 9,
+        "unique_child_process_per_run": len(unique_pids) == len(runs) == 9,
+        "trace_canaries_passed": all(item.get("trace_canary", {}).get("passed") for item in runs),
+        "mandatory_evidence_complete": all(item.get("mandatory_evidence", {}).get("complete") for item in runs),
+        "environment_drift_absent": all(not item.get("environment_drift_detected", True) for item in runs),
+        "cross_run_contamination_absent": all(item.get("cross_run_isolation", {}).get("passed") for item in runs),
+        "typesafe_disabled": all(item.get("typesafe_enabled") is False for item in runs),
+        "zero_selection_control": zero_ok,
+    }
+    infrastructure_valid = infra == 0 and all(infra_checks.values())
+    if not infrastructure_valid:
+        classification = "HOLD_INFRA"
+        reasons = tuple(name for name, passed in infra_checks.items() if not passed) or ("infra invalid run",)
+    elif b_pass_c_fail:
+        classification = "INFRA_PASS_BEHAVIOR_CONCERNING"
+        reasons = ("infrastructure boundaries held", "B_PASS/C_FAIL correctness regression observed")
+    elif fallbacks or malformed_response_count or truncated_output_count or all_abstain:
+        classification = "INFRA_PASS_BEHAVIOR_MIXED"
+        reasons = ("infrastructure boundaries held", "utility fallback/malformed/all-abstain variability observed")
+    else:
+        classification = "INFRA_PASS_BEHAVIOR_PROMISING"
+        reasons = ("infrastructure boundaries held", "no B_PASS/C_FAIL or repeated harmful behavior observed")
+    if classification not in JEV4R_CLASSIFICATIONS:
+        raise AssertionError("invalid JEV.4R classification")
+    c_diagnostics = tuple(
+        {
+            "task_id": item["task_id"],
+            "output_tokens": item.get("utility_metrics", {}).get("output_tokens"),
+            "configured_max_tokens": item.get("configured_utility_max_tokens", UTILITY_MAX_TOKENS),
+            "finish_reasons": item.get("utility_metrics", {}).get("finish_reasons", ()),
+            "malformed_categories": item.get("utility_metrics", {}).get("malformed_categories", ()),
+        }
+        for item in c_runs
+    )
+    summary = {
+        "schema": "pico.jev4r-agent-pilot-summary.v2",
+        "campaign_id": manifest["campaign_id"],
+        "campaign_semantic_digest": manifest["campaign_semantic_digest"],
+        "source_campaign_id": manifest["source_campaign_id"],
+        "behavioral_input_digest": manifest["behavioral_input_digest"],
+        "infrastructure_delta_digest": manifest["infrastructure_delta_digest"],
+        "planned_agent_runs": 9,
+        "actual_agent_runs": len(runs),
+        "child_process_count": len(unique_pids),
+        "child_process_ids": tuple(sorted(unique_pids)),
+        "actual_utility_logical_calls": utility_calls,
+        "infra_invalid_count": infra,
+        "infrastructure_checks": infra_checks,
+        "per_task": pairs,
+        "pair_outcomes": {name: pair_outcomes[name] for name in (
+            "B_PASS_C_PASS", "B_PASS_C_FAIL", "B_FAIL_C_PASS", "B_FAIL_C_FAIL", "INFRA_INVALID"
+        )},
+        "b_pass_c_fail_count": b_pass_c_fail,
+        "c_pass_b_fail_count": c_pass_b_fail,
+        "suspected_over_abstention_tasks": tuple(over_abstention),
+        "utility_removed_candidate_count": utility_removed,
+        "all_abstain_tasks": all_abstain,
+        "raw_uncertain_count": raw_uncertain,
+        "precondition_ambiguous_task_received_abstain": p2_abstain,
+        "fallback_count": fallbacks,
+        "zero_selection_control_passed": zero_ok,
+        "length_finish_count": length_finish_count,
+        "truncated_output_count": truncated_output_count,
+        "malformed_response_count": malformed_response_count,
+        "utility_truncation_diagnostics": c_diagnostics,
+        "classification": classification,
+        "classification_reasons": reasons,
+        "rerun_count": 0,
+        "latency_semantics": "utility decision time is nested inside Turn wall time and is not added to it",
+    }
+    _store(root).write_summary(root / "reduced.json", summary)
+    return summary
+
+
+def _reduce_legacy(root: Path, manifest: dict[str, Any], runs: tuple[dict[str, Any], ...],
+                   pairs: list[dict[str, Any]], infra: int, zero_ok: bool,
+                   b_pass_c_fail: int, c_pass_b_fail: int, over_abstention: list[str],
+                   fallbacks: int, utility_calls: int) -> dict[str, Any]:
     if infra or not zero_ok or b_pass_c_fail or over_abstention:
         classification = "HOLD_AND_FORENSIC"
         reasons = tuple(filter(None, (
@@ -923,6 +1148,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = commands.add_parser("prepare")
     prepare.add_argument("--repository", type=Path, default=Path.cwd())
     prepare.add_argument("--output-root", type=Path, default=Path(".p3r"))
+    prepare.add_argument("--source-campaign-root", type=Path, required=True)
     prepare.add_argument("--reviewer-id", required=True)
     run = commands.add_parser("run")
     run.add_argument("--repository", type=Path, default=Path.cwd())
@@ -936,6 +1162,7 @@ def build_parser() -> argparse.ArgumentParser:
     internal.add_argument("--campaign-root", type=Path, required=True)
     internal.add_argument("--run-id", required=True)
     internal.add_argument("--reviewer-id", required=True)
+    internal.add_argument("--config-path", type=Path, required=True)
     internal.add_argument("--execute-live", action="store_true")
     return parser
 
@@ -943,7 +1170,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "prepare":
-        root, manifest, audit = prepare_campaign(args.repository.resolve(), args.output_root.resolve(), args.reviewer_id)
+        root, manifest, audit = prepare_campaign(
+            args.repository.resolve(), args.output_root.resolve(),
+            args.source_campaign_root.resolve(), args.reviewer_id,
+        )
         print(canonical_json({"campaign_id": manifest["campaign_id"], "campaign_root": root,
                               "semantic_digest": manifest["campaign_semantic_digest"],
                               "preflight": audit, "live_provider_invoked": False}))
@@ -954,8 +1184,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(canonical_json({"completed_agent_runs": runs}))
         return 0
     if args.command == "_run-one":
+        from pico.config.loader import set_config_path
+
         if not args.execute_live:
             raise PermissionError("JEV.4R child execution requires explicit --execute-live")
+        set_config_path(args.config_path.resolve())
         root = args.campaign_root.resolve()
         manifest = load_manifest(root)
         planned = next(
