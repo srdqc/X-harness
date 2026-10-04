@@ -29,6 +29,7 @@ _REASON_CODE = re.compile(r"^[a-z0-9_.-]+$")
 class UtilityDecision(StrEnum):
     KEEP = "keep"
     ABSTAIN = "abstain"
+    UNCERTAIN = "uncertain"
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,16 @@ class JevUtilityBackendResponse:
     outcome: object = DecisionOutcome.SUCCESS
     schema: object = JEV_UTILITY_RESPONSE_SCHEMA
     schema_version: object = JEV_UTILITY_SCHEMA_VERSION
+    failure_reason: object | None = None
+    backend_id: object | None = None
+    backend_model: object | None = None
+    backend_version: object | None = None
+    logical_calls: object = 0
+    provider_attempts: object = 0
+    input_tokens: object | None = None
+    output_tokens: object | None = None
+    latency_ms: object | None = None
+    logical_call_id: object | None = None
 
 
 @dataclass(frozen=True)
@@ -131,10 +142,15 @@ class JevUtilityCandidateDecision:
     reason_code: str | None = None
     backend_rank: int | None = None
 
+    @property
+    def effective_decision(self) -> UtilityDecision:
+        return UtilityDecision.ABSTAIN if self.decision is UtilityDecision.ABSTAIN else UtilityDecision.KEEP
+
     def canonical_payload(self) -> dict[str, Any]:
         return {
             "candidate_id": self.candidate_id,
             "decision": self.decision.value,
+            "effective_decision": self.effective_decision.value,
             "utility_score": self.utility_score,
             "confidence": self.confidence,
             "reason_code": self.reason_code,
@@ -150,6 +166,15 @@ class JevUtilityResult:
     outcome: DecisionOutcome
     decisions: tuple[JevUtilityCandidateDecision, ...] = ()
     reason: str | None = None
+    backend_id: str | None = None
+    backend_model: str | None = None
+    backend_version: str | None = None
+    logical_calls: int = 0
+    provider_attempts: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    latency_ms: float | None = None
+    logical_call_id: str | None = None
     result_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -164,6 +189,15 @@ class JevUtilityResult:
                     "outcome": self.outcome.value,
                     "decisions": [item.canonical_payload() for item in self.decisions],
                     "reason": self.reason,
+                    "backend_id": self.backend_id,
+                    "backend_model": self.backend_model,
+                    "backend_version": self.backend_version,
+                    "logical_calls": self.logical_calls,
+                    "provider_attempts": self.provider_attempts,
+                    "input_tokens": self.input_tokens,
+                    "output_tokens": self.output_tokens,
+                    "latency_ms": self.latency_ms,
+                    "logical_call_id": self.logical_call_id,
                 }
             ),
         )
@@ -182,6 +216,7 @@ class JevUtilityDecisionAdapter:
         self.backend_id = str(getattr(backend, "backend_id", type(backend).__name__ if backend else "unavailable"))
         self.backend_model = getattr(backend, "model_id", None)
         self.backend_version = getattr(backend, "backend_version", None)
+        backend_config = getattr(backend, "config", None)
         self.config_digest = canonical_digest(
             {
                 "mode": "task_relevance_v1_jev_utility",
@@ -189,6 +224,11 @@ class JevUtilityDecisionAdapter:
                 "backend_model": self.backend_model,
                 "backend_version": self.backend_version,
                 "timeout_seconds": self.timeout_seconds,
+                "max_candidates": getattr(backend_config, "max_candidates", None),
+                "prompt_template_digest": getattr(backend, "prompt_digest", None),
+                "typed_choice_policy_version": getattr(backend, "policy_version", None),
+                "response_schema": JEV_UTILITY_RESPONSE_SCHEMA,
+                "response_schema_version": JEV_UTILITY_SCHEMA_VERSION,
             }
         )
 
@@ -217,9 +257,17 @@ class JevUtilityDecisionAdapter:
             return self._failure(request, DecisionOutcome.INVALID_RESULT, "decision_id_mismatch")
         if response.request_digest != request.request_digest:
             return self._failure(request, DecisionOutcome.INVALID_RESULT, "request_digest_mismatch")
-        if response.outcome is DecisionOutcome.UNAVAILABLE:
-            return self._failure(request, DecisionOutcome.UNAVAILABLE, "backend_unavailable")
-        if response.outcome is not DecisionOutcome.SUCCESS or not isinstance(response.decisions, (list, tuple)):
+        metadata = self._parse_backend_metadata(response)
+        if isinstance(metadata, str):
+            return self._failure(request, DecisionOutcome.INVALID_RESULT, metadata)
+        if response.outcome is not DecisionOutcome.SUCCESS:
+            if not isinstance(response.outcome, DecisionOutcome):
+                return self._failure(request, DecisionOutcome.INVALID_RESULT, "unsupported_outcome")
+            reason = response.failure_reason
+            if not isinstance(reason, str) or not reason or len(reason) > MAX_UTILITY_REASON_CHARS:
+                reason = f"backend_{response.outcome.value}"
+            return self._failure(request, response.outcome, reason, metadata=metadata)
+        if not isinstance(response.decisions, (list, tuple)):
             return self._failure(request, DecisionOutcome.INVALID_RESULT, "malformed_response")
         parsed: list[JevUtilityCandidateDecision] = []
         for raw in response.decisions:
@@ -245,6 +293,48 @@ class JevUtilityDecisionAdapter:
             self.kind,
             DecisionOutcome.SUCCESS,
             tuple(parsed),
+            backend_id=metadata[0],
+            backend_model=metadata[1],
+            backend_version=metadata[2],
+            logical_calls=metadata[3],
+            provider_attempts=metadata[4],
+            input_tokens=metadata[5],
+            output_tokens=metadata[6],
+            latency_ms=metadata[7],
+            logical_call_id=metadata[8],
+        )
+
+    @staticmethod
+    def _parse_backend_metadata(response: JevUtilityBackendResponse) -> tuple[
+        str | None, str | None, str | None, int, int, int | None, int | None, float | None, str | None
+    ] | str:
+        identities = (response.backend_id, response.backend_model, response.backend_version)
+        if any(value is not None and (not isinstance(value, str) or len(value) > 128) for value in identities):
+            return "invalid_backend_identity"
+        counts = (response.logical_calls, response.provider_attempts)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+            return "invalid_provider_counts"
+        tokens = (response.input_tokens, response.output_tokens)
+        if any(value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0) for value in tokens):
+            return "invalid_provider_usage"
+        latency = response.latency_ms
+        if latency is not None and (
+            isinstance(latency, bool) or not isinstance(latency, (int, float)) or not math.isfinite(latency) or latency < 0
+        ):
+            return "invalid_provider_latency"
+        logical_call_id = response.logical_call_id
+        if logical_call_id is not None and (not isinstance(logical_call_id, str) or len(logical_call_id) > 128):
+            return "invalid_logical_call_id"
+        return (
+            response.backend_id,
+            response.backend_model,
+            response.backend_version,
+            response.logical_calls,
+            response.provider_attempts,
+            response.input_tokens,
+            response.output_tokens,
+            float(latency) if latency is not None else None,
+            logical_call_id,
         )
 
     @staticmethod
@@ -273,8 +363,31 @@ class JevUtilityDecisionAdapter:
             return "invalid_backend_rank"
         return JevUtilityCandidateDecision(raw.candidate_id, raw.decision, score, confidence, reason, rank)
 
-    def _failure(self, request: JevUtilityRequest, outcome: DecisionOutcome, reason: str) -> JevUtilityResult:
-        return JevUtilityResult(request.decision_id, request.request_digest, self.kind, outcome, reason=reason)
+    def _failure(
+        self,
+        request: JevUtilityRequest,
+        outcome: DecisionOutcome,
+        reason: str,
+        *,
+        metadata: tuple[str | None, str | None, str | None, int, int, int | None, int | None, float | None, str | None] | None = None,
+    ) -> JevUtilityResult:
+        values = metadata or (None, None, None, 0, 0, None, None, None, None)
+        return JevUtilityResult(
+            request.decision_id,
+            request.request_digest,
+            self.kind,
+            outcome,
+            reason=reason,
+            backend_id=values[0],
+            backend_model=values[1],
+            backend_version=values[2],
+            logical_calls=values[3],
+            provider_attempts=values[4],
+            input_tokens=values[5],
+            output_tokens=values[6],
+            latency_ms=values[7],
+            logical_call_id=values[8],
+        )
 
 
 @dataclass(frozen=True)
@@ -294,6 +407,12 @@ class JevUtilityDecisionReceipt:
     latency_ms: float
     fallback_used: bool
     fallback_reason: str | None
+    utility_logical_calls: int = 0
+    utility_provider_attempts: int = 0
+    utility_input_tokens: int | None = None
+    utility_output_tokens: int | None = None
+    utility_provider_latency_ms: float | None = None
+    utility_logical_call_id: str | None = None
     selector_version: int = 1
     receipt_version: int = 1
     schema: str = JEV_UTILITY_RECEIPT_SCHEMA
@@ -321,8 +440,19 @@ class JevUtilityDecisionReceipt:
             raise ValueError("utility receipt decision is outside the input set")
         if self.fallback_reason is not None and len(self.fallback_reason) > MAX_UTILITY_REASON_CHARS:
             raise ValueError("utility fallback reason exceeds its bound")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (self.utility_logical_calls, self.utility_provider_attempts)
+        ):
+            raise ValueError("invalid utility provider counts")
+        if any(
+            value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+            for value in (self.utility_input_tokens, self.utility_output_tokens)
+        ):
+            raise ValueError("invalid utility provider usage")
 
     def metadata(self) -> Mapping[str, Any]:
+        backend_kind, _, provider_id = self.backend_id.partition(":")
         return MappingProxyType(
             {
                 "receipt_schema": self.schema,
@@ -331,6 +461,8 @@ class JevUtilityDecisionReceipt:
                 "decision_id": self.decision_id,
                 "decision_mode": "task_relevance_v1_jev_utility",
                 "backend_id": self.backend_id,
+                "backend": backend_kind,
+                "provider_id": provider_id or None,
                 "backend_model": self.backend_model,
                 "backend_version": self.backend_version,
                 "config_digest": self.config_digest,
@@ -342,6 +474,12 @@ class JevUtilityDecisionReceipt:
                 "latency_ms": self.latency_ms,
                 "fallback_used": self.fallback_used,
                 "fallback_reason": self.fallback_reason,
+                "utility_logical_calls": self.utility_logical_calls,
+                "utility_provider_attempts": self.utility_provider_attempts,
+                "utility_input_tokens": self.utility_input_tokens,
+                "utility_output_tokens": self.utility_output_tokens,
+                "utility_provider_latency_ms": self.utility_provider_latency_ms,
+                "utility_logical_call_id": self.utility_logical_call_id,
                 "selector_version": self.selector_version,
                 "receipt_version": self.receipt_version,
             }

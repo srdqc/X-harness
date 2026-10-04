@@ -534,6 +534,7 @@ class LLMProvider(ABC):
                     metadata={
                         "receipt_schema": evidence.PROVIDER_RECEIPT_SCHEMA,
                         "provider": type(self).__name__,
+                        "call_role": evidence_call.call_role,
                         "requested_model": evidence_call.requested_model,
                         "attempted_model": model,
                         "request_digest": evidence.canonical_digest(
@@ -725,6 +726,7 @@ class LLMProvider(ABC):
         | None = None,
         response_observer: Callable[[LLMResponse, str | None], Awaitable[None]] | None = None,
         attempt_started: Callable[[str | None], None] | None = None,
+        call_role: str = "main_agent",
     ) -> LLMResponse:
         """先对 ``chat()`` 的 Transient Failure 重试，再按配置 Model Chain Fallback。
 
@@ -743,7 +745,7 @@ class LLMProvider(ABC):
         if reasoning_effort is self._SENTINEL:
             reasoning_effort = self.generation.reasoning_effort
 
-        with evidence.provider_call_scope(model) as evidence_call:
+        with evidence.provider_call_scope(model, call_role=call_role) as evidence_call:
             model_chain = [model, *(fallback_models or [])]
             response: LLMResponse | None = None
             for idx, current_model in enumerate(model_chain):

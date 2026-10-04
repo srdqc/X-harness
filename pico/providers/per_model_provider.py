@@ -63,14 +63,18 @@ class PerModelProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
         fallback_models: list[str] | None = None,
+        call_role: str = "main_agent",
         **kwargs: Any,
     ) -> LLMResponse:
-        with evidence.provider_call_scope(model or self.get_default_model()):
+        with evidence.provider_call_scope(
+            model or self.get_default_model(), call_role=call_role
+        ):
             return await self._chat_with_retry_routed(
                 messages,
                 tools,
                 model=model,
                 fallback_models=fallback_models,
+                call_role=call_role,
                 **kwargs,
             )
 
@@ -81,10 +85,13 @@ class PerModelProvider(LLMProvider):
         *,
         model: str | None,
         fallback_models: list[str] | None,
+        call_role: str = "main_agent",
         **kwargs: Any,
     ) -> LLMResponse:
         if not fallback_models:
-            return await self._pick(model).chat_with_retry(messages, tools, model=model, **kwargs)
+            return await self._pick(model).chat_with_retry(
+                messages, tools, model=model, call_role=call_role, **kwargs
+            )
 
         model_chain = [model, *fallback_models]
         response: LLMResponse | None = None
@@ -95,6 +102,7 @@ class PerModelProvider(LLMProvider):
                 tools,
                 model=current_model,
                 fallback_models=None,
+                call_role=call_role,
                 **kwargs,
             )
             if response.finish_reason != "error":

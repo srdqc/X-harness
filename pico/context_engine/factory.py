@@ -138,15 +138,33 @@ def build_context_engine(
                 )
 
             selection_mode = KnowledgeSelectionMode(config.knowledge_selection_mode)
+            utility_backend = jev_backend
+            if (
+                selection_mode is KnowledgeSelectionMode.TASK_RELEVANCE_V1_JEV_UTILITY
+                and config.knowledge_utility_backend == "provider"
+            ):
+                from pico.decision_plane.provider_utility import (
+                    ProviderUtilityBackend,
+                    ProviderUtilityConfig,
+                )
+
+                utility_backend = ProviderUtilityBackend(
+                    provider,
+                    ProviderUtilityConfig(
+                        provider_id=config.knowledge_utility_provider,
+                        model_id=config.knowledge_utility_model or model,
+                        max_candidates=config.knowledge_utility_max_candidates,
+                        max_tokens=config.knowledge_utility_max_tokens,
+                    ),
+                )
             utility_coordinator = (
                 KnowledgeUtilityCoordinator(
                     JevUtilityDecisionAdapter(
-                        jev_backend,
+                        utility_backend,
                         timeout_seconds=config.knowledge_utility_timeout_seconds,
                     )
                 )
-                if selection_mode
-                is KnowledgeSelectionMode.TASK_RELEVANCE_V1_JEV_UTILITY
+                if selection_mode is KnowledgeSelectionMode.TASK_RELEVANCE_V1_JEV_UTILITY
                 else None
             )
             p3_builder = KnowledgeContextSegmentBuilder(

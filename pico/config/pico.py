@@ -85,6 +85,21 @@ class ContextConfig(_Base):
     )
     """Timeout for one opt-in Jev utility request per Turn."""
 
+    knowledge_utility_backend: Literal["injected", "provider"] = "injected"
+    """Explicit utility backend; injected preserves the JEV.1 deterministic test seam."""
+
+    knowledge_utility_provider: str = Field(default="agent", min_length=1, max_length=128)
+    """Provider reference label. ``agent`` reuses the configured Agent Provider instance."""
+
+    knowledge_utility_model: str | None = Field(default=None, min_length=1, max_length=128)
+    """Optional utility model override routed through the existing Provider abstraction."""
+
+    knowledge_utility_max_candidates: int = Field(default=16, ge=1, le=64)
+    """Maximum candidates allowed in one typed Provider utility request."""
+
+    knowledge_utility_max_tokens: int = Field(default=1024, ge=64, le=4096)
+    """Bounded Provider output budget for the strict JSON response."""
+
     @field_validator("knowledge_utility_timeout_seconds", mode="before")
     @classmethod
     def _reject_boolean_knowledge_utility_timeout(cls, value: Any) -> Any:

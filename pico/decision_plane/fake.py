@@ -33,6 +33,9 @@ class JevFakeMode(str, Enum):
     ABSTAIN_ONE = "abstain_one"
     ABSTAIN_ALL = "abstain_all"
     REORDER = "reorder"
+    UNCERTAIN_ONE = "uncertain_one"
+    UNCERTAIN_ALL = "uncertain_all"
+    MIXED_UTILITY = "mixed_utility"
 
 
 class ScriptedJevBackend:
@@ -159,6 +162,26 @@ class ScriptedJevBackend:
                 )
                 for index, item in enumerate(values, start=1)
             ]
+        elif self.mode in {JevFakeMode.UNCERTAIN_ONE, JevFakeMode.UNCERTAIN_ALL, JevFakeMode.MIXED_UTILITY}:
+            for index, decision in enumerate(decisions):
+                if self.mode is JevFakeMode.UNCERTAIN_ALL or (
+                    self.mode is JevFakeMode.UNCERTAIN_ONE and index == 0
+                ) or (self.mode is JevFakeMode.MIXED_UTILITY and index % 3 == 2):
+                    decisions[index] = JevUtilityAdvice(
+                        decision.candidate_id,
+                        UtilityDecision.UNCERTAIN,
+                        confidence=self.confidence,
+                        reason_code="scripted_uncertain",
+                        backend_rank=index + 1,
+                    )
+                elif self.mode is JevFakeMode.MIXED_UTILITY and index % 3 == 1:
+                    decisions[index] = JevUtilityAdvice(
+                        decision.candidate_id,
+                        UtilityDecision.ABSTAIN,
+                        confidence=self.confidence,
+                        reason_code="scripted_abstain",
+                        backend_rank=index + 1,
+                    )
         elif self.mode is JevFakeMode.REORDER:
             decisions = [
                 JevUtilityAdvice(

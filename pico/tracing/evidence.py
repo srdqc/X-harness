@@ -211,6 +211,7 @@ class ProviderAttemptEvidence:
     trace_id: str | None
     span_id: str | None
     normalized_error_category: str | None = None
+    call_role: str = "main_agent"
 
     @property
     def complete(self) -> bool:
@@ -357,10 +358,16 @@ class TurnEvidenceRecorder:
 class ProviderCallEvidenceContext:
     """Ephemeral identity shared by retry and model-fallback attempts."""
 
-    def __init__(self, recorder: TurnEvidenceRecorder, requested_model: str | None) -> None:
+    def __init__(
+        self,
+        recorder: TurnEvidenceRecorder,
+        requested_model: str | None,
+        call_role: str = "main_agent",
+    ) -> None:
         self.recorder = recorder
         self.logical_call_id = recorder.next_identity("provider-call")
         self.requested_model = requested_model
+        self.call_role = call_role
         self._lock = threading.Lock()
         self._attempt_ordinal = 0
 
@@ -393,7 +400,10 @@ def turn_scope(recorder: TurnEvidenceRecorder) -> Iterator[TurnEvidenceRecorder]
 
 
 @contextlib.contextmanager
-def provider_call_scope(requested_model: str | None) -> Iterator[ProviderCallEvidenceContext | None]:
+def provider_call_scope(
+    requested_model: str | None,
+    call_role: str = "main_agent",
+) -> Iterator[ProviderCallEvidenceContext | None]:
     existing = _PROVIDER_CALL.get()
     if existing is not None:
         yield existing
@@ -402,7 +412,7 @@ def provider_call_scope(requested_model: str | None) -> Iterator[ProviderCallEvi
     if recorder is None:
         yield None
         return
-    value = ProviderCallEvidenceContext(recorder, requested_model)
+    value = ProviderCallEvidenceContext(recorder, requested_model, call_role)
     token = _PROVIDER_CALL.set(value)
     try:
         yield value
@@ -516,6 +526,11 @@ def _provider_attempts(events: tuple[TurnEvidenceEvent, ...]) -> tuple[ProviderA
                 finish_reason=end_meta.get("finish_reason"),
                 error_category=end_meta.get("error_category"),
                 normalized_error_category=end_meta.get("normalized_error_category"),
+                call_role=(
+                    start_meta.get("call_role")
+                    if isinstance(start_meta.get("call_role"), str)
+                    else "main_agent"
+                ),
                 request_digest=start_meta.get("request_digest"),
                 response_digest=end_meta.get("response_digest"),
                 usage_available=end_meta.get("usage_available"),

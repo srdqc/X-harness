@@ -2,6 +2,13 @@
 
 from pico.decision_plane.adapter import DecisionAdapter, DeterministicSkillRankingAdapter
 from pico.decision_plane.jev import JevBackend, JevBackendResponse, JevDecisionAdapter
+from pico.decision_plane.provider_utility import (
+    PROVIDER_UTILITY_INSTRUCTION,
+    PROVIDER_UTILITY_POLICY_VERSION,
+    PROVIDER_UTILITY_PROMPT_DIGEST,
+    ProviderUtilityBackend,
+    ProviderUtilityConfig,
+)
 from pico.decision_plane.types import (
     DECISION_SCHEMA,
     DECISION_SCHEMA_VERSION,
@@ -56,5 +63,10 @@ __all__ = [
     "JevUtilityRequest",
     "JevUtilityResult",
     "UtilityDecision",
+    "PROVIDER_UTILITY_INSTRUCTION",
+    "PROVIDER_UTILITY_POLICY_VERSION",
+    "PROVIDER_UTILITY_PROMPT_DIGEST",
+    "ProviderUtilityBackend",
+    "ProviderUtilityConfig",
     "validate_decision_result",
 ]

@@ -140,7 +140,11 @@ class KnowledgeUtilityCoordinator:
         fallback_used = result.outcome.value != "success"
         fallback_reason = result.reason if fallback_used else None
         keep_ids = (
-            {item.candidate_id for item in result.decisions if item.decision is UtilityDecision.KEEP}
+            {
+                item.candidate_id
+                for item in result.decisions
+                if item.effective_decision is UtilityDecision.KEEP
+            }
             if not fallback_used
             else {item.candidate.candidate_id for item in combined}
         )
@@ -152,9 +156,9 @@ class KnowledgeUtilityCoordinator:
                 turn_id=turn_id,
                 decision_id=request.decision_id,
                 repository_scope_id=pending.repository_scope_id,
-                backend_id=self._adapter.backend_id,
-                backend_model=self._adapter.backend_model,
-                backend_version=self._adapter.backend_version,
+                backend_id=result.backend_id or self._adapter.backend_id,
+                backend_model=result.backend_model or self._adapter.backend_model,
+                backend_version=result.backend_version or self._adapter.backend_version,
                 config_digest=self._adapter.config_digest,
                 request_digest=request.request_digest,
                 input_candidate_ids=input_ids,
@@ -164,6 +168,12 @@ class KnowledgeUtilityCoordinator:
                 latency_ms=latency_ms,
                 fallback_used=fallback_used,
                 fallback_reason=fallback_reason,
+                utility_logical_calls=result.logical_calls,
+                utility_provider_attempts=result.provider_attempts,
+                utility_input_tokens=result.input_tokens,
+                utility_output_tokens=result.output_tokens,
+                utility_provider_latency_ms=result.latency_ms,
+                utility_logical_call_id=result.logical_call_id,
             )
         )
         for token, values in pending.groups.items():

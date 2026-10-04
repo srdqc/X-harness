@@ -41,6 +41,31 @@ def extract_utility_observability(events) -> dict[str, object]:
         if item.event_type == evidence.DECISION_RECEIPT
         and item.metadata.get("receipt_schema") == _UTILITY_RECEIPT_SCHEMA
     )
+    utility_started = tuple(
+        item
+        for item in events
+        if item.event_type == evidence.PROVIDER_ATTEMPT_STARTED
+        and item.metadata.get("call_role") == "utility"
+    )
+    evidence_call_ids = tuple(
+        sorted(
+            {
+                str(item.correlations["logical_call_id"])
+                for item in utility_started
+                if item.correlations.get("logical_call_id")
+            }
+        )
+    )
+    input_values = tuple(
+        item.get("utility_input_tokens")
+        for item in receipts
+        if isinstance(item.get("utility_input_tokens"), int)
+    )
+    output_values = tuple(
+        item.get("utility_output_tokens")
+        for item in receipts
+        if isinstance(item.get("utility_output_tokens"), int)
+    )
     return {
         "utility_decision_refs": tuple(str(item.get("decision_id")) for item in receipts),
         "utility_kept_candidate_ids": tuple(
@@ -66,6 +91,31 @@ def extract_utility_observability(events) -> dict[str, object]:
         "utility_latency_ms": round(
             sum(float(item.get("latency_ms", 0.0)) for item in receipts), 6
         ),
+        "utility_provider_latency_ms": round(
+            sum(float(item.get("utility_provider_latency_ms") or 0.0) for item in receipts), 6
+        ),
+        "utility_provider_calls": (
+            len(evidence_call_ids)
+            if evidence_call_ids
+            else sum(int(item.get("utility_logical_calls", 0)) for item in receipts)
+        ),
+        "utility_provider_attempts": (
+            len(utility_started)
+            if utility_started
+            else sum(int(item.get("utility_provider_attempts", 0)) for item in receipts)
+        ),
+        "utility_input_tokens": sum(input_values) if len(input_values) == len(receipts) and receipts else None,
+        "utility_output_tokens": sum(output_values) if len(output_values) == len(receipts) and receipts else None,
+        "utility_logical_call_ids": evidence_call_ids or tuple(
+            str(item["utility_logical_call_id"])
+            for item in receipts
+            if item.get("utility_logical_call_id")
+        ),
+        "utility_provider_identities": tuple(
+            (item.get("provider_id"), item.get("backend_model"), item.get("backend_version"))
+            for item in receipts
+            if item.get("backend") == "provider"
+        ),
         "utility_candidate_count": sum(len(item.get("input_candidate_ids", ())) for item in receipts),
     }
 
@@ -81,7 +131,13 @@ def extract_run_metrics(
 
     readback = evidence.read_turn_evidence(trace_root, turn_id)
     replayed = replay.replay_turn(trace_root, turn_id)
-    attempts = readback.provider_attempts
+    utility_observability = extract_utility_observability(readback.events)
+    utility_logical_call_ids = set(utility_observability["utility_logical_call_ids"])
+    attempts = tuple(
+        item
+        for item in readback.provider_attempts
+        if item.call_role != "utility" and item.logical_call_id not in utility_logical_call_ids
+    )
     logical_calls = {item.logical_call_id for item in attempts if item.logical_call_id}
     attempts_with_usage = sum(item.usage_available is True for item in attempts)
     attempts_without_usage = len(attempts) - attempts_with_usage
@@ -292,7 +348,7 @@ def extract_run_metrics(
                 ).items()
             )
         ),
-        **extract_utility_observability(readback.events),
+        **utility_observability,
     }
     return metrics, refs
 
