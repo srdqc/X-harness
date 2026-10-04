@@ -219,6 +219,7 @@ def test_full_pre_live_rehearsal_spawns_one_bootstrap_then_stops(tmp_path: Path)
         Path.cwd(),
         Path(".p3r/jev4-9168e909e0c47dfb").resolve(),
         Path(".p3r/jev4r-3f7c246afe462f5e").resolve(),
+        Path(".p3r/jev4r2-868dd3997095b407").resolve(),
         "human:test",
         config_path=config_path,
     )

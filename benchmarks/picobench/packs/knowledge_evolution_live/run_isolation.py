@@ -13,7 +13,7 @@ from typing import Iterable
 from benchmarks.picobench.canonical import canonical_digest
 from pico.tracing import evidence
 
-RUNNER_VERSION = 3
+RUNNER_VERSION = 4
 CONFIG_BOOTSTRAP_VERSION = 1
 
 
