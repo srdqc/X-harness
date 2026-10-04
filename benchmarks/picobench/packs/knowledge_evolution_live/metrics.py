@@ -66,6 +66,12 @@ def extract_utility_observability(events) -> dict[str, object]:
         for item in receipts
         if isinstance(item.get("utility_output_tokens"), int)
     )
+    decisions = tuple(
+        dict(decision)
+        for item in receipts
+        for decision in item.get("decisions", ())
+        if isinstance(decision, dict)
+    )
     return {
         "utility_decision_refs": tuple(str(item.get("decision_id")) for item in receipts),
         "utility_kept_candidate_ids": tuple(
@@ -117,6 +123,7 @@ def extract_utility_observability(events) -> dict[str, object]:
             if item.get("backend") == "provider"
         ),
         "utility_candidate_count": sum(len(item.get("input_candidate_ids", ())) for item in receipts),
+        "utility_decisions": decisions,
     }
 
 
@@ -126,7 +133,7 @@ def extract_run_metrics(
     turn_id: str,
     knowledge_state_root: Path,
     repository_read_paths: tuple[str, ...] | None = None,
-) -> tuple[RunMetrics, dict[str, tuple[str, ...]]]:
+) -> tuple[RunMetrics, dict[str, object]]:
     """Use durable receipts only; unavailable evidence remains unavailable."""
 
     readback = evidence.read_turn_evidence(trace_root, turn_id)
