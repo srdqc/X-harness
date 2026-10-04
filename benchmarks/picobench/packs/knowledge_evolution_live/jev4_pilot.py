@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -47,6 +48,7 @@ from .knowledge import corpus_digest, prepare_approved_corpus
 from .metrics import extract_run_metrics
 from .prepare import configuration_identity, resolve_base_commit
 from .run_isolation import (
+    CONFIG_BOOTSTRAP_VERSION,
     RUNNER_VERSION,
     AgentRunRoots,
     environment_fingerprint,
@@ -59,8 +61,10 @@ from .validity import classify_run_validity
 
 LEGACY_SCHEMA = "pico.jev4-agent-pilot.v1"
 LEGACY_SCHEMA_VERSION = 1
-SCHEMA = "pico.jev4r-agent-pilot.v2"
-SCHEMA_VERSION = 2
+REPAIRED_SCHEMA = "pico.jev4r-agent-pilot.v2"
+REPAIRED_SCHEMA_VERSION = 2
+SCHEMA = "pico.jev4r2-agent-pilot.v3"
+SCHEMA_VERSION = 3
 RUN_SCHEMA = "pico.jev4-agent-run.v1"
 UTILITY_TIMEOUT_SECONDS = 15.0
 UTILITY_MAX_TOKENS = ProviderUtilityConfig().max_tokens
@@ -258,7 +262,8 @@ def _behavioral_input_payload(value: dict[str, Any]) -> dict[str, Any]:
     } | {"utility_max_tokens": int(value.get("utility_max_tokens", 1024))}
 
 
-def _semantic_payload(*, source: dict[str, Any], identity: dict[str, str],
+def _semantic_payload(*, source: dict[str, Any], failed_source: dict[str, Any],
+                      identity: dict[str, str], config_identity: dict[str, Any],
                       selected_sets: dict[str, tuple[str, ...]]) -> dict[str, Any]:
     infrastructure_delta = {
         "runner_version": RUNNER_VERSION,
@@ -267,15 +272,24 @@ def _semantic_payload(*, source: dict[str, Any], identity: dict[str, str],
         "environment_drift_guard": True,
         "python_install_scope": "run_local",
         "malformed_diagnostics": True,
+        "explicit_config_source": True,
+        "sanitized_config_identity_guard": True,
+        "offline_child_bootstrap": True,
+        "config_bootstrap_version": CONFIG_BOOTSTRAP_VERSION,
     }
     result = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "runner_version": RUNNER_VERSION,
+        "config_bootstrap_version": CONFIG_BOOTSTRAP_VERSION,
         "campaign_purpose": "non_claim_eligible_infrastructure_behavioral_rerun",
         "infrastructure_delta_digest": canonical_digest(infrastructure_delta),
         "source_campaign_id": source["campaign_id"],
         "source_campaign_semantic_digest": source["campaign_semantic_digest"],
+        "failed_campaign_id": failed_source["campaign_id"],
+        "failed_campaign_semantic_digest": failed_source["campaign_semantic_digest"],
+        "config_identity_digest": config_identity["config_identity_digest"],
+        "config_source_digest": config_identity["config_source_digest"],
         "base_commit_sha": source["base_commit_sha"],
         "campaign_seed": CAMPAIGN_SEED,
         "primary_comparison": PRIMARY_COMPARISON,
@@ -309,28 +323,91 @@ def _store(root: Path) -> ArtifactStore:
     return ArtifactStore(ExperimentRef(root.name, root))
 
 
-def prepare_campaign(repository: Path, output_root: Path, source_root: Path,
-                     reviewer_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
-    from pico.config.loader import load_config
+def _config_source_digest(path: Path) -> str:
+    if not path.is_file():
+        raise ValueError("explicit Provider config source does not exist")
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ValueError("explicit Provider config source is not readable") from exc
 
-    config = load_config()
+
+def _sanitized_config_identity(config_path: Path, budget: RuntimeBudget) -> dict[str, Any]:
+    """Resolve Provider configuration without retaining raw config or secrets."""
+    from pico.config.loader import load_config
+    from pico.providers.registry import find_by_model, find_by_name
+
+    source_digest = _config_source_digest(config_path)
+    config = load_config(config_path)
+    identity = configuration_identity(config, budget)
+    provider_id = identity["provider_id"]
+    model_id = identity["model"]
+    provider_spec = find_by_name(provider_id)
+    model_spec = find_by_model(model_id)
+    provider_config = config.get_provider(model_id)
+    credential_available = bool(
+        provider_config
+        and (provider_config.api_key or (provider_spec and (provider_spec.is_oauth or provider_spec.is_local)))
+    )
+    if provider_id != "deepseek" or not model_id.startswith("deepseek/"):
+        raise ValueError("JEV.4R2 requires the configured DeepSeek Provider/model")
+    if provider_spec is None or model_spec is None or model_spec.name != provider_spec.name:
+        raise ValueError("configured Provider/model does not resolve through the registry")
+    if not credential_available:
+        raise ValueError("configured DeepSeek credentials are unavailable")
+    payload = {
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "provider_model_config_digest": identity["provider_digest"],
+        "config_source_digest": source_digest,
+        "registry_provider_id": provider_spec.name,
+        "credential_available": True,
+    }
+    return {**payload, "config_identity_digest": canonical_digest(payload)}
+
+
+def _validate_child_config(manifest: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    identity = _sanitized_config_identity(config_path, RuntimeBudget(**manifest["budget"]))
+    passed = (
+        identity["config_identity_digest"] == manifest["config_identity_digest"]
+        and identity["config_source_digest"] == manifest["config_source_digest"]
+    )
+    return {**identity, "passed": passed}
+
+
+def prepare_campaign(repository: Path, output_root: Path, source_root: Path,
+                     failed_root: Path, reviewer_id: str, *,
+                     config_path: Path | None = None) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    from pico.config.loader import get_config_path, load_config
+
+    config_path = (config_path or get_config_path()).resolve()
+    config = load_config(config_path)
     source = load_manifest(source_root)
     if source["schema_version"] != LEGACY_SCHEMA_VERSION:
         raise ValueError("JEV.4R source must be the frozen JEV.4 v1 campaign")
+    failed_source = load_manifest(failed_root)
+    if failed_source.get("schema_version") != REPAIRED_SCHEMA_VERSION:
+        raise ValueError("JEV.4R2 failed source must be the frozen JEV.4R v2 campaign")
+    failed_summary = json.loads((failed_root / "reduced.json").read_text(encoding="utf-8"))
+    if failed_summary.get("classification") != "HOLD_INFRA":
+        raise ValueError("JEV.4R2 failed source must remain HOLD_INFRA")
     budget = RuntimeBudget(**source["budget"])
     identity = configuration_identity(config, budget)
     if identity["provider_id"] != "deepseek" or not identity["model"].startswith("deepseek/"):
         raise ValueError("JEV.4 requires the configured DeepSeek Agent provider/model")
     base_sha = resolve_base_commit(repository, source["base_commit_sha"])
     audit = preflight(repository, base_sha, reviewer_id)
+    config_identity = _sanitized_config_identity(config_path, budget)
     semantic = _semantic_payload(
         source=source,
+        failed_source=failed_source,
         identity=identity,
+        config_identity=config_identity,
         selected_sets=audit["relevance_selected_candidate_ids"],
     )
     assert_infrastructure_only_rerun(source, semantic)
     semantic_digest = canonical_digest(semantic)
-    campaign_id = f"jev4r-{semantic_digest[:16]}"
+    campaign_id = f"jev4r2-{semantic_digest[:16]}"
     manifest = {
         **to_primitive(semantic),
         "campaign_id": campaign_id,
@@ -340,6 +417,9 @@ def prepare_campaign(repository: Path, output_root: Path, source_root: Path,
     manifest["manifest_digest"] = canonical_digest(manifest)
     root = output_root / campaign_id
     _store(root).freeze_manifest(manifest)
+    bootstrap = run_config_bootstrap(root, config_path)
+    if not bootstrap["passed"]:
+        raise RuntimeError("JEV.4R2 offline child bootstrap failed")
     audit.update(
         immutable_input_delta="PASS",
         source_campaign_id=source["campaign_id"],
@@ -347,6 +427,9 @@ def prepare_campaign(repository: Path, output_root: Path, source_root: Path,
         stale_run_roots=False,
         child_process_runner_available=True,
         utility_max_tokens=UTILITY_MAX_TOKENS,
+        config_identity_digest=config_identity["config_identity_digest"],
+        config_source_digest=config_identity["config_source_digest"],
+        child_bootstrap=bootstrap,
     )
     return root, manifest, audit
 
@@ -518,6 +601,7 @@ def load_manifest(root: Path) -> dict[str, Any]:
     version = value.get("schema_version")
     if (value.get("schema"), version) not in {
         (LEGACY_SCHEMA, LEGACY_SCHEMA_VERSION),
+        (REPAIRED_SCHEMA, REPAIRED_SCHEMA_VERSION),
         (SCHEMA, SCHEMA_VERSION),
     }:
         raise ValueError("unsupported JEV.4 manifest")
@@ -539,10 +623,17 @@ def _semantic_payload_keys(version: int = SCHEMA_VERSION) -> tuple[str, ...]:
     )
     if version == LEGACY_SCHEMA_VERSION:
         return common
-    return (
+    repaired = (
         "schema", "schema_version", "runner_version", "campaign_purpose",
         "behavioral_input_digest", "infrastructure_delta_digest", "source_campaign_id",
         "source_campaign_semantic_digest", *common[2:16], "utility_max_tokens", *common[16:],
+    )
+    if version == REPAIRED_SCHEMA_VERSION:
+        return repaired
+    return (
+        *repaired[:8], "config_bootstrap_version", "failed_campaign_id",
+        "failed_campaign_semantic_digest", "config_identity_digest", "config_source_digest",
+        *repaired[8:],
     )
 
 
@@ -564,6 +655,127 @@ def assert_infrastructure_only_rerun(source: dict[str, Any], candidate: dict[str
         raise ValueError("JEV.4R runner version is not current")
 
 
+def _execute_config_bootstrap(root: Path, manifest: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    roots = AgentRunRoots.create(root, "config-bootstrap", 0)
+    roots.prepare_non_worktree_roots()
+    if (root / "config-bootstrap.json").exists():
+        raise FileExistsError("VERIFIED bootstrap lifecycle cannot return to RUNNING")
+    before = _config_source_digest(config_path)
+    try:
+        identity = _validate_child_config(manifest, config_path)
+        canary = verify_trace_canary(
+            roots.trace, canary_id=f"{manifest['campaign_id']}:bootstrap"
+        )
+        failure_type = None
+    except Exception as exc:  # noqa: BLE001 - bounded bootstrap boundary
+        identity = {"passed": False}
+        canary = {"passed": False, "findings": ("config_validation_failed",)}
+        failure_type = type(exc).__name__
+    after = _config_source_digest(config_path)
+    record = {
+        "schema": "pico.jev4r2-config-bootstrap.v1",
+        "bootstrap_version": CONFIG_BOOTSTRAP_VERSION,
+        "lifecycle_state": "VERIFIED" if identity.get("passed") and canary.get("passed") else "FAILED",
+        "lifecycle_transitions": ("NOT_STARTED", "RUNNING", "VERIFIED"),
+        "bootstrap_child_count": 1,
+        "child_process_id": os.getpid(),
+        "campaign_id": manifest["campaign_id"],
+        "passed": bool(identity.get("passed") and canary.get("passed") and before == after),
+        "provider_id": identity.get("provider_id"),
+        "model_id": identity.get("model_id"),
+        "config_identity_digest": identity.get("config_identity_digest"),
+        "config_source_digest_before": before,
+        "config_source_digest_after": after,
+        "config_source_unchanged": before == after,
+        "trace_canary": canary,
+        "environment_fingerprint": environment_fingerprint(),
+        "failure_type": failure_type,
+        "network_calls": 0,
+        "provider_calls": 0,
+        "agent_turns": 0,
+        "pico_home_isolated": str(Path(os.environ.get("PICO_HOME", "")).resolve()).startswith(
+            str(roots.state.resolve())
+        ),
+    }
+    record["integrity_digest"] = canonical_digest(record)
+    return record
+
+
+def run_config_bootstrap(root: Path, config_path: Path) -> dict[str, Any]:
+    from pico.config.loader import load_config
+
+    manifest = load_manifest(root)
+    roots = AgentRunRoots.create(root, "config-bootstrap", 0)
+    roots.prepare_non_worktree_roots()
+    artifact = root / "config-bootstrap.json"
+    before = _config_source_digest(config_path)
+    if artifact.is_file():
+        return validate_config_bootstrap(root, config_path)
+    command = [
+        sys.executable, "-m", "benchmarks.picobench.packs.knowledge_evolution_live.jev4_pilot",
+        "_bootstrap", "--campaign-root", str(root), "--config-path", str(config_path),
+    ]
+    completed = subprocess.run(command, cwd=Path.cwd(), env=roots.child_environment(), check=False)
+    after = _config_source_digest(config_path)
+    if completed.returncode != 0 or not artifact.is_file():
+        raise RuntimeError("JEV.4R2 child bootstrap artifact missing")
+    record = _store(root).read_json(artifact)
+    digest = record.pop("integrity_digest", None)
+    if digest != canonical_digest(record):
+        raise ValueError("JEV.4R2 child bootstrap integrity mismatch")
+    record["integrity_digest"] = digest
+    secret = load_config(config_path).get_api_key(manifest["actual_model_id"])
+    persisted = canonical_json({"manifest": manifest, "artifact": record, "command": command})
+    for path in roots.trace.rglob("*"):
+        if path.is_file():
+            persisted += path.read_text(encoding="utf-8", errors="replace")
+    secret_leak_free = not secret or secret not in persisted
+    record.update(
+        parent_config_source_digest_before=before,
+        parent_config_source_digest_after=after,
+        config_source_unchanged=record["config_source_unchanged"] and before == after,
+        secret_leak_free=secret_leak_free,
+    )
+    record["passed"] = bool(
+        record["passed"]
+        and record["config_identity_digest"] == manifest["config_identity_digest"]
+        and record["config_source_unchanged"]
+        and secret_leak_free
+    )
+    record.pop("integrity_digest", None)
+    record["integrity_digest"] = canonical_digest(record)
+    _store(root).write_summary(artifact, record)
+    return record
+
+
+def validate_config_bootstrap(root: Path, config_path: Path) -> dict[str, Any]:
+    """Read-only parent validation of a terminal bootstrap lifecycle."""
+    manifest = load_manifest(root)
+    artifact = root / "config-bootstrap.json"
+    before_bytes = artifact.read_bytes()
+    record = _store(root).read_json(artifact)
+    digest = record.pop("integrity_digest", None)
+    if digest != canonical_digest(record):
+        raise ValueError("JEV.4R2 child bootstrap integrity mismatch")
+    record["integrity_digest"] = digest
+    current = _validate_child_config(manifest, config_path)
+    passed = bool(
+        record.get("passed")
+        and record.get("lifecycle_state") == "VERIFIED"
+        and record.get("secret_leak_free")
+        and record.get("config_source_unchanged")
+        and record.get("config_identity_digest") == current["config_identity_digest"]
+        and _config_source_digest(config_path) == manifest["config_source_digest"]
+        and artifact.read_bytes() == before_bytes
+    )
+    return {
+        **record,
+        "passed": passed,
+        "revalidated_without_child_rerun": True,
+        "artifact_file_digest": hashlib.sha256(before_bytes).hexdigest(),
+    }
+
+
 def run_campaign(repository: Path, root: Path, reviewer_id: str, *, execute_live: bool) -> tuple[str, ...]:
     from pico.config.loader import get_config_path
 
@@ -574,15 +786,24 @@ def run_campaign(repository: Path, root: Path, reviewer_id: str, *, execute_live
         raise ValueError("historical JEV.4 campaigns are immutable and cannot use the JEV.4R runner")
     source = load_manifest(root.parent / manifest["source_campaign_id"])
     assert_infrastructure_only_rerun(source, manifest)
+    failed = load_manifest(root.parent / manifest["failed_campaign_id"])
+    if failed["campaign_semantic_digest"] != manifest["failed_campaign_semantic_digest"]:
+        raise ValueError("JEV.4R2 failed-campaign identity changed")
     run_dir = root / "runs"
     if run_dir.exists() and tuple(run_dir.glob("*.json")):
         raise FileExistsError("JEV.4 is one-shot; existing run records forbid resume or replacement")
     completed: list[str] = []
     config_path = get_config_path().resolve()
+    if _validate_child_config(manifest, config_path)["passed"] is not True:
+        raise ValueError("parent Provider config identity differs from frozen JEV.4R2 identity")
+    bootstrap = run_config_bootstrap(root, config_path)
+    if not bootstrap["passed"]:
+        raise RuntimeError("JEV.4R2 mandatory child bootstrap failed before live execution")
     for planned in manifest["planned_runs"]:
         roots = AgentRunRoots.create(root, planned["run_id"], planned["order"])
         roots.prepare_non_worktree_roots()
         before = environment_fingerprint()
+        config_source_before = _config_source_digest(config_path)
         completed_process = subprocess.run(
             [
                 sys.executable, "-m",
@@ -596,6 +817,7 @@ def run_campaign(repository: Path, root: Path, reviewer_id: str, *, execute_live
             check=False,
         )
         after = environment_fingerprint()
+        config_source_after = _config_source_digest(config_path)
         if roots.artifact.exists():
             record = _store(root).read_json(roots.artifact)
         else:
@@ -604,10 +826,21 @@ def run_campaign(repository: Path, root: Path, reviewer_id: str, *, execute_live
         record["environment_fingerprint_before"] = before
         record["environment_fingerprint_after"] = after
         record["environment_drift_detected"] = before["fingerprint_digest"] != after["fingerprint_digest"]
+        record["config_source_digest_before"] = config_source_before
+        record["config_source_digest_after"] = config_source_after
+        record["config_source_unchanged"] = (
+            config_source_before == config_source_after == manifest["config_source_digest"]
+        )
         if record["environment_drift_detected"]:
             record.update(
                 run_validity="infra_invalid",
                 infra_invalid_reason="environment_drift",
+                verified_success=False,
+            )
+        elif not record["config_source_unchanged"]:
+            record.update(
+                run_validity="infra_invalid",
+                infra_invalid_reason="config_source_mutation",
                 verified_success=False,
             )
         elif completed_process.returncode != 0:
@@ -695,12 +928,31 @@ def execute_one(
     roots = AgentRunRoots.create(root, run_id, planned["order"])
     roots.prepare_non_worktree_roots()
     worktree, state = roots.worktree, roots.state
+    from pico.config.loader import get_config_path
+
+    try:
+        config_validation = _validate_child_config(manifest, get_config_path().resolve())
+    except Exception as exc:  # noqa: BLE001 - no-network identity boundary
+        config_validation = {"passed": False, "failure_type": type(exc).__name__}
+    if not config_validation["passed"]:
+        record = _infra_record(manifest, planned, "config_identity_mismatch")
+        record.update(
+            isolation_roots=roots.public_identity(),
+            config_validation=config_validation,
+            child_process_id=os.getpid(),
+        )
+        record["integrity_digest"] = canonical_digest(
+            {key: value for key, value in record.items() if key != "integrity_digest"}
+        )
+        if persist:
+            _write_run(root, record)
+        return record
     other_trace_roots = tuple(
         path for path in (root / "s").glob("r*") if path.resolve() != roots.trace.resolve()
     )
     canary = verify_trace_canary(
         roots.trace,
-        canary_id=f"{run_id}-trace-canary",
+        canary_id=f"{manifest['campaign_id']}:{run_id}:agent-canary",
         other_trace_roots=other_trace_roots,
     )
     if not canary["passed"]:
@@ -708,6 +960,7 @@ def execute_one(
         record.update(
             isolation_roots=roots.public_identity(),
             trace_canary=canary,
+            config_validation=config_validation,
             child_process_id=os.getpid(),
         )
         record["integrity_digest"] = canonical_digest({key: value for key, value in record.items() if key != "integrity_digest"})
@@ -721,6 +974,7 @@ def execute_one(
         record.update(
             isolation_roots=roots.public_identity(),
             trace_canary=canary,
+            config_validation=config_validation,
             child_process_id=os.getpid(),
         )
         record["integrity_digest"] = canonical_digest({key: value for key, value in record.items() if key != "integrity_digest"})
@@ -736,6 +990,7 @@ def execute_one(
         record.update(
             isolation_roots=roots.public_identity(),
             trace_canary=canary,
+            config_validation=config_validation,
             child_process_id=os.getpid(),
         )
         record["integrity_digest"] = canonical_digest({key: value for key, value in record.items() if key != "integrity_digest"})
@@ -1037,6 +1292,15 @@ def reduce_campaign(root: Path) -> dict[str, Any]:
         "typesafe_disabled": all(item.get("typesafe_enabled") is False for item in runs),
         "zero_selection_control": zero_ok,
     }
+    if manifest["schema_version"] >= SCHEMA_VERSION:
+        bootstrap = _store(root).read_json(root / "config-bootstrap.json")
+        infra_checks.update(
+            config_bootstrap_passed=bool(bootstrap.get("passed")),
+            config_identity_matched=all(
+                item.get("config_validation", {}).get("passed") for item in runs
+            ),
+            config_source_immutable=all(item.get("config_source_unchanged") for item in runs),
+        )
     infrastructure_valid = infra == 0 and all(infra_checks.values())
     if not infrastructure_valid:
         classification = "HOLD_INFRA"
@@ -1063,10 +1327,16 @@ def reduce_campaign(root: Path) -> dict[str, Any]:
         for item in c_runs
     )
     summary = {
-        "schema": "pico.jev4r-agent-pilot-summary.v2",
+        "schema": (
+            "pico.jev4r2-agent-pilot-summary.v3"
+            if manifest["schema_version"] >= SCHEMA_VERSION
+            else "pico.jev4r-agent-pilot-summary.v2"
+        ),
         "campaign_id": manifest["campaign_id"],
         "campaign_semantic_digest": manifest["campaign_semantic_digest"],
         "source_campaign_id": manifest["source_campaign_id"],
+        "failed_campaign_id": manifest.get("failed_campaign_id"),
+        "config_identity_digest": manifest.get("config_identity_digest"),
         "behavioral_input_digest": manifest["behavioral_input_digest"],
         "infrastructure_delta_digest": manifest["infrastructure_delta_digest"],
         "planned_agent_runs": 9,
@@ -1142,6 +1412,80 @@ def _reduce_legacy(root: Path, manifest: dict[str, Any], runs: tuple[dict[str, A
     return summary
 
 
+def rehearse_pre_live(repository: Path, source_root: Path, failed_root: Path,
+                      reviewer_id: str, *, config_path: Path | None = None) -> dict[str, Any]:
+    """Exercise the production pre-live path and stop before the first Agent child."""
+    from pico.config.loader import get_config_path
+
+    parent_before = environment_fingerprint()
+    config_path = (config_path or get_config_path()).resolve()
+    with tempfile.TemporaryDirectory(prefix="jev4r2a-", dir=repository / ".tmp") as temporary:
+        output_root = Path(temporary)
+        root, manifest, audit = prepare_campaign(
+            repository, output_root, source_root, failed_root, reviewer_id,
+            config_path=config_path,
+        )
+        artifact = root / "config-bootstrap.json"
+        artifact_before = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        trace_log = root / "s" / "r00" / "logs" / "audit-events.log"
+        trace_before = len(trace_log.read_text(encoding="utf-8").splitlines())
+        validations = tuple(validate_config_bootstrap(root, config_path) for _ in range(3))
+        artifact_after = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        trace_after = len(trace_log.read_text(encoding="utf-8").splitlines())
+        bootstrap = validations[-1]
+        readiness_checks = {
+            "bootstrap_verified": bootstrap["passed"],
+            "config_identity_verified": (
+                bootstrap["config_identity_digest"] == manifest["config_identity_digest"]
+            ),
+            "config_source_immutable": bootstrap["config_source_unchanged"],
+            "trace_canary_verified": bootstrap["trace_canary"]["passed"],
+            "environment_baseline_verified": (
+                parent_before["fingerprint_digest"] == environment_fingerprint()["fingerprint_digest"]
+            ),
+            "behavioral_inputs_immutable": audit["immutable_input_delta"] == "PASS",
+            "mechanical_solvability": audit["mechanical_solvability"] == "3/3 PASS",
+            "prompt_verifier_audit": audit["contract_audit"] == "PASS",
+            "zero_selection_preflight": not audit["relevance_selected_candidate_ids"][TASKS[2].task_id],
+            "bootstrap_artifact_immutable": artifact_before == artifact_after,
+            "read_only_revalidation": trace_before == trace_after,
+        }
+        next_run = manifest["planned_runs"][0]
+        result = {
+            "schema": "pico.jev4r2a-pre-live-rehearsal.v1",
+            "bootstrap_child_count": bootstrap["bootstrap_child_count"],
+            "bootstrap_child_process_ids": (bootstrap["child_process_id"],),
+            "bootstrap_lifecycle_state": bootstrap["lifecycle_state"],
+            "bootstrap_lifecycle_transitions": bootstrap["lifecycle_transitions"],
+            "bootstrap_artifact_digest_before": artifact_before,
+            "bootstrap_artifact_digest_after": artifact_after,
+            "parent_revalidation_count": len(validations),
+            "additional_trace_event_count": trace_after - trace_before,
+            "bootstrap_canary_id": bootstrap["trace_canary"]["canary_id"],
+            "agent_canary_policy": "<campaign-id>:<run-id>:agent-canary",
+            "readiness_checks": readiness_checks,
+            "live_ready": all(readiness_checks.values()),
+            "next_action": {"action": "spawn_agent_child", **next_run},
+            "parent_provider_id": manifest["provider_id"],
+            "parent_model_id": manifest["actual_model_id"],
+            "child_provider_id": bootstrap["provider_id"],
+            "child_model_id": bootstrap["model_id"],
+            "config_identity_digest": manifest["config_identity_digest"],
+            "config_source_unchanged": bootstrap["config_source_unchanged"],
+            "secret_leak_free": bootstrap["secret_leak_free"],
+            "parent_environment_unchanged": readiness_checks["environment_baseline_verified"],
+            "main_provider_calls": bootstrap["provider_calls"],
+            "utility_provider_calls": 0,
+            "network_calls": bootstrap["network_calls"],
+            "agent_turns": bootstrap["agent_turns"],
+            "planned_total_children": 10,
+            "live_execution_started": False,
+        }
+        if not result["live_ready"]:
+            raise RuntimeError("JEV.4R2A pre-live rehearsal readiness gate failed")
+        return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m benchmarks.picobench.packs.knowledge_evolution_live.jev4_pilot")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1149,6 +1493,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--repository", type=Path, default=Path.cwd())
     prepare.add_argument("--output-root", type=Path, default=Path(".p3r"))
     prepare.add_argument("--source-campaign-root", type=Path, required=True)
+    prepare.add_argument("--failed-campaign-root", type=Path, required=True)
     prepare.add_argument("--reviewer-id", required=True)
     run = commands.add_parser("run")
     run.add_argument("--repository", type=Path, default=Path.cwd())
@@ -1157,6 +1502,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--execute-live", action="store_true")
     reduce = commands.add_parser("reduce")
     reduce.add_argument("--campaign-root", type=Path, required=True)
+    rehearse = commands.add_parser("rehearse")
+    rehearse.add_argument("--repository", type=Path, default=Path.cwd())
+    rehearse.add_argument("--source-campaign-root", type=Path, required=True)
+    rehearse.add_argument("--failed-campaign-root", type=Path, required=True)
+    rehearse.add_argument("--reviewer-id", required=True)
     internal = commands.add_parser("_run-one")
     internal.add_argument("--repository", type=Path, required=True)
     internal.add_argument("--campaign-root", type=Path, required=True)
@@ -1164,6 +1514,9 @@ def build_parser() -> argparse.ArgumentParser:
     internal.add_argument("--reviewer-id", required=True)
     internal.add_argument("--config-path", type=Path, required=True)
     internal.add_argument("--execute-live", action="store_true")
+    bootstrap = commands.add_parser("_bootstrap")
+    bootstrap.add_argument("--campaign-root", type=Path, required=True)
+    bootstrap.add_argument("--config-path", type=Path, required=True)
     return parser
 
 
@@ -1172,7 +1525,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "prepare":
         root, manifest, audit = prepare_campaign(
             args.repository.resolve(), args.output_root.resolve(),
-            args.source_campaign_root.resolve(), args.reviewer_id,
+            args.source_campaign_root.resolve(), args.failed_campaign_root.resolve(),
+            args.reviewer_id,
         )
         print(canonical_json({"campaign_id": manifest["campaign_id"], "campaign_root": root,
                               "semantic_digest": manifest["campaign_semantic_digest"],
@@ -1182,6 +1536,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         runs = run_campaign(args.repository.resolve(), args.campaign_root.resolve(), args.reviewer_id,
                             execute_live=args.execute_live)
         print(canonical_json({"completed_agent_runs": runs}))
+        return 0
+    if args.command == "rehearse":
+        result = rehearse_pre_live(
+            args.repository.resolve(), args.source_campaign_root.resolve(),
+            args.failed_campaign_root.resolve(), args.reviewer_id,
+        )
+        print(canonical_json(result))
         return 0
     if args.command == "_run-one":
         from pico.config.loader import set_config_path
@@ -1204,6 +1565,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         roots = AgentRunRoots.create(root, planned["run_id"], planned["order"])
         _store(root).write_summary(roots.artifact, record)
         return 0
+    if args.command == "_bootstrap":
+        from pico.config.loader import set_config_path
+
+        set_config_path(args.config_path.resolve())
+        root = args.campaign_root.resolve()
+        record = _execute_config_bootstrap(root, load_manifest(root), args.config_path.resolve())
+        _store(root).write_summary(root / "config-bootstrap.json", record)
+        return 0 if record["passed"] else 2
     print(json.dumps(reduce_campaign(args.campaign_root.resolve()), indent=2, sort_keys=True))
     return 0
 

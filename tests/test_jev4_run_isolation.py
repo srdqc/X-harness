@@ -102,8 +102,10 @@ def test_run_local_python_and_pip_environment_does_not_target_shared_sites(tmp_p
 def test_explicit_config_path_survives_run_local_pico_home(tmp_path: Path) -> None:
     from pico.config.schema import Config
 
+    fake_secret = "jev4r2-fake-secret-never-persist"
     config = Config()
     config.agents.defaults.model = "deepseek/frozen-test-model"
+    config.providers.deepseek.api_key = fake_secret
     config_path = tmp_path / "source-config.json"
     config_path.write_text(config.model_dump_json(by_alias=True), encoding="utf-8")
     roots = AgentRunRoots.create(tmp_path / "campaign", "config", 1)
@@ -125,6 +127,130 @@ def test_explicit_config_path_survives_run_local_pico_home(tmp_path: Path) -> No
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "deepseek/frozen-test-model"
+
+    source = jev4_pilot.load_manifest(Path(".p3r/jev4-9168e909e0c47dfb"))
+    budget = jev4_pilot.RuntimeBudget(**source["budget"])
+    identity = jev4_pilot._sanitized_config_identity(config_path, budget)
+    assert identity["provider_id"] == "deepseek"
+    assert identity["model_id"] == "deepseek/frozen-test-model"
+    assert identity["credential_available"] is True
+    assert fake_secret not in json.dumps(identity, sort_keys=True)
+    assert jev4_pilot._config_source_digest(config_path) == identity["config_source_digest"]
+
+
+def test_missing_explicit_config_path_fails_identity_guard_with_isolated_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pico.config.schema import Config
+
+    source = jev4_pilot.load_manifest(Path(".p3r/jev4-9168e909e0c47dfb"))
+    budget = jev4_pilot.RuntimeBudget(**source["budget"])
+    isolated_home = tmp_path / "isolated-pico-home"
+    monkeypatch.setenv("PICO_HOME", str(isolated_home))
+    isolated_home.mkdir()
+    default_config = Config()
+    default_config.providers.anthropic.api_key = "fake-anthropic-secret"
+    default_path = isolated_home / "config.json"
+    default_path.write_text(default_config.model_dump_json(by_alias=True), encoding="utf-8")
+    with pytest.raises(ValueError, match="DeepSeek"):
+        jev4_pilot._sanitized_config_identity(default_path, budget)
+
+
+def test_verified_bootstrap_artifact_is_revalidated_without_second_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "jev4r2-test"
+    root.mkdir()
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    source_digest = jev4_pilot._config_source_digest(config_path)
+    manifest = {
+        "actual_model_id": "deepseek/deepseek-v4-flash",
+        "config_identity_digest": "identity",
+        "config_source_digest": source_digest,
+    }
+    record = {
+        "passed": True,
+        "lifecycle_state": "VERIFIED",
+        "secret_leak_free": True,
+        "config_source_unchanged": True,
+        "config_identity_digest": "identity",
+    }
+    record["integrity_digest"] = jev4_pilot.canonical_digest(record)
+    jev4_pilot._store(root).write_summary(root / "config-bootstrap.json", record)
+    monkeypatch.setattr(jev4_pilot, "load_manifest", lambda _root: manifest)
+    monkeypatch.setattr(
+        jev4_pilot,
+        "_validate_child_config",
+        lambda _manifest, _path: {"passed": True, "config_identity_digest": "identity"},
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("verified bootstrap must not spawn a second child"),
+    )
+    result = jev4_pilot.run_config_bootstrap(root, config_path)
+    assert result["passed"] is True
+    assert result["revalidated_without_child_rerun"] is True
+
+
+def test_duplicate_bootstrap_lifecycle_is_rejected_before_evidence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "campaign"
+    root.mkdir()
+    (root / "config-bootstrap.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="cannot return to RUNNING"):
+        jev4_pilot._execute_config_bootstrap(
+            root, {"campaign_id": "campaign"}, tmp_path / "unused-config.json"
+        )
+    assert not (root / "s" / "r00" / "logs" / "audit-events.log").exists()
+
+
+def test_full_pre_live_rehearsal_spawns_one_bootstrap_then_stops(tmp_path: Path) -> None:
+    from pico.config.schema import Config
+
+    config = Config()
+    config.agents.defaults.model = "deepseek/deepseek-v4-flash"
+    config.providers.deepseek.api_key = "jev4r2a-fake-secret"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(config.model_dump_json(by_alias=True), encoding="utf-8")
+    result = jev4_pilot.rehearse_pre_live(
+        Path.cwd(),
+        Path(".p3r/jev4-9168e909e0c47dfb").resolve(),
+        Path(".p3r/jev4r-3f7c246afe462f5e").resolve(),
+        "human:test",
+        config_path=config_path,
+    )
+    assert result["bootstrap_child_count"] == 1
+    assert len(result["bootstrap_child_process_ids"]) == 1
+    assert result["bootstrap_lifecycle_transitions"] == [
+        "NOT_STARTED", "RUNNING", "VERIFIED",
+    ]
+    assert result["bootstrap_artifact_digest_before"] == result["bootstrap_artifact_digest_after"]
+    assert result["parent_revalidation_count"] == 3
+    assert result["additional_trace_event_count"] == 0
+    assert result["live_ready"] is True
+    assert result["next_action"]["run_id"] == jev4_pilot.make_plan()[0]["run_id"]
+    assert result["next_action"]["arm"] == jev4_pilot.Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value
+    assert result["main_provider_calls"] == 0
+    assert result["utility_provider_calls"] == 0
+    assert result["network_calls"] == 0
+    assert result["agent_turns"] == 0
+
+
+def test_all_historical_jev4_campaigns_keep_frozen_classifications() -> None:
+    expected = {
+        "jev4-9168e909e0c47dfb": "HOLD_AND_FORENSIC",
+        "jev4r-3f7c246afe462f5e": "HOLD_INFRA",
+        "jev4r2-868dd3997095b407": "HOLD_INFRA",
+    }
+    for campaign_id, classification in expected.items():
+        root = Path(".p3r") / campaign_id
+        jev4_pilot.load_manifest(root)
+        assert json.loads((root / "reduced.json").read_text(encoding="utf-8"))[
+            "classification"
+        ] == classification
 
 
 def test_direct_executor_propagates_run_local_python_policy(

@@ -13,7 +13,8 @@ from typing import Iterable
 from benchmarks.picobench.canonical import canonical_digest
 from pico.tracing import evidence
 
-RUNNER_VERSION = 2
+RUNNER_VERSION = 3
+CONFIG_BOOTSTRAP_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,7 @@ def verify_trace_canary(
 
 __all__ = [
     "AgentRunRoots",
+    "CONFIG_BOOTSTRAP_VERSION",
     "RUNNER_VERSION",
     "environment_fingerprint",
     "verify_trace_canary",
