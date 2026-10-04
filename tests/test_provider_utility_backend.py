@@ -19,6 +19,9 @@ from pico.decision_plane.provider_utility import (
     PROVIDER_UTILITY_PROMPT_DIGEST,
     ProviderUtilityBackend,
     ProviderUtilityConfig,
+    UtilityFinishReason,
+    UtilityMalformedCategory,
+    normalize_finish_reason,
 )
 from pico.decision_plane.types import DecisionOutcome
 from pico.decision_plane.utility import (
@@ -167,6 +170,44 @@ async def test_provider_timeout_and_exception_are_bounded_fallbacks() -> None:
     assert failed.outcome is DecisionOutcome.UNAVAILABLE
     assert failed.reason == "provider_error"
     assert "secret-bearing" not in repr(failed)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("stop", UtilityFinishReason.STOP),
+        ("end_turn", UtilityFinishReason.STOP),
+        ("length", UtilityFinishReason.LENGTH),
+        ("max_tokens", UtilityFinishReason.LENGTH),
+        ("content_filter", UtilityFinishReason.CONTENT_FILTER),
+        ("tool_calls", UtilityFinishReason.TOOL_CALL),
+        ("vendor-specific", UtilityFinishReason.UNKNOWN),
+        (None, UtilityFinishReason.UNKNOWN),
+    ],
+)
+def test_finish_reason_normalization_is_bounded(raw, expected) -> None:
+    assert normalize_finish_reason(raw) is expected
+
+
+@pytest.mark.asyncio
+async def test_truncated_output_records_bounded_diagnostics_and_falls_back_without_expansion() -> None:
+    provider = _Provider(
+        [LLMResponse(
+            content='{"decisions":[{"candidate":"candidate_0","choice":"KEEP"}',
+            finish_reason="length",
+            usage={"prompt_tokens": 853, "completion_tokens": 1024},
+            model="deepseek/test-model",
+        )]
+    )
+    result, _ = await _decide(provider)
+    assert result.outcome is DecisionOutcome.INVALID_RESULT
+    assert result.reason == "malformed_response"
+    assert result.finish_reason == UtilityFinishReason.LENGTH.value
+    assert result.malformed_category == UtilityMalformedCategory.TRUNCATED_OUTPUT.value
+    assert result.parse_stage == "json_decode"
+    assert result.response_character_count == 57
+    assert len(result.response_digest or "") == 64
+    assert result.decisions == ()
 
 
 @pytest.mark.asyncio

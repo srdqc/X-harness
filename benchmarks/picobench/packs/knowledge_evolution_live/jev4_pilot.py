@@ -45,13 +45,21 @@ from pico.tracing import evidence
 from .knowledge import corpus_digest, prepare_approved_corpus
 from .metrics import extract_run_metrics
 from .prepare import configuration_identity, resolve_base_commit
+from .run_isolation import (
+    RUNNER_VERSION,
+    AgentRunRoots,
+    environment_fingerprint,
+    verify_trace_canary,
+)
 from .runner import _changed_paths, _git, _workspace_patch
 from .schema import RuntimeBudget
 from .tasks import EXPLORATORY_TASKS, OFFICIAL_TASKS_V1, OFFICIAL_TASKS_V2
 from .validity import classify_run_validity
 
-SCHEMA = "pico.jev4-agent-pilot.v1"
-SCHEMA_VERSION = 1
+LEGACY_SCHEMA = "pico.jev4-agent-pilot.v1"
+LEGACY_SCHEMA_VERSION = 1
+SCHEMA = "pico.jev4r-agent-pilot.v2"
+SCHEMA_VERSION = 2
 RUN_SCHEMA = "pico.jev4-agent-run.v1"
 UTILITY_TIMEOUT_SECONDS = 15.0
 CAMPAIGN_SEED = 40_904
@@ -227,9 +235,37 @@ def _treatment_identity() -> dict[str, str]:
 
 def _semantic_payload(*, base_sha: str, identity: dict[str, str], budget: RuntimeBudget,
                       selected_sets: dict[str, tuple[str, ...]]) -> dict[str, Any]:
+    behavioral = {
+        "task_order": tuple(task.task_id for task in TASKS),
+        "task_prompt_digests": tuple((task.task_id, task.prompt_digest) for task in TASKS),
+        "verifier_digests": tuple((task.task_id, task.verifier_digest) for task in TASKS),
+        "reference_fixture_digests": tuple((task.task_id, task.reference_digest) for task in TASKS),
+        "provider_id": identity["provider_id"],
+        "actual_model_id": identity["model"],
+        "provider_model_config_digest": identity["provider_digest"],
+        "utility_prompt_digest": PROVIDER_UTILITY_PROMPT_DIGEST,
+        "utility_schema_version": PROVIDER_UTILITY_TEMPLATE_VERSION,
+        "utility_timeout_seconds": UTILITY_TIMEOUT_SECONDS,
+        "knowledge_corpus_digest": corpus_digest(),
+        "selector_digest": _selector_digest(),
+        "treatment_identity": _treatment_identity(),
+        "preflight_relevance_selected_candidate_ids": selected_sets,
+    }
+    infrastructure_delta = {
+        "runner_version": RUNNER_VERSION,
+        "child_process_per_run": True,
+        "trace_canary": True,
+        "environment_drift_guard": True,
+        "python_install_scope": "run_local",
+        "malformed_diagnostics": True,
+    }
     return {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
+        "runner_version": RUNNER_VERSION,
+        "campaign_purpose": "non_claim_eligible_infrastructure_behavioral_rerun",
+        "behavioral_input_digest": canonical_digest(behavioral),
+        "infrastructure_delta_digest": canonical_digest(infrastructure_delta),
         "base_commit_sha": base_sha,
         "campaign_seed": CAMPAIGN_SEED,
         "primary_comparison": PRIMARY_COMPARISON,
@@ -282,7 +318,7 @@ def prepare_campaign(repository: Path, output_root: Path, reviewer_id: str) -> t
         selected_sets=audit["relevance_selected_candidate_ids"],
     )
     semantic_digest = canonical_digest(semantic)
-    campaign_id = f"jev4-{semantic_digest[:16]}"
+    campaign_id = f"jev4r-{semantic_digest[:16]}"
     manifest = {
         **to_primitive(semantic),
         "campaign_id": campaign_id,
@@ -459,16 +495,20 @@ def load_manifest(root: Path) -> dict[str, Any]:
     if digest != canonical_digest(value):
         raise ValueError("JEV.4 manifest digest mismatch")
     value["manifest_digest"] = digest
-    if value.get("schema") != SCHEMA or value.get("schema_version") != SCHEMA_VERSION:
+    version = value.get("schema_version")
+    if (value.get("schema"), version) not in {
+        (LEGACY_SCHEMA, LEGACY_SCHEMA_VERSION),
+        (SCHEMA, SCHEMA_VERSION),
+    }:
         raise ValueError("unsupported JEV.4 manifest")
-    semantic = {key: value[key] for key in _semantic_payload_keys()}
+    semantic = {key: value[key] for key in _semantic_payload_keys(int(version))}
     if value["campaign_semantic_digest"] != canonical_digest(semantic):
         raise ValueError("JEV.4 semantic digest mismatch")
     return value
 
 
-def _semantic_payload_keys() -> tuple[str, ...]:
-    return (
+def _semantic_payload_keys(version: int = SCHEMA_VERSION) -> tuple[str, ...]:
+    common = (
         "schema", "schema_version", "base_commit_sha", "campaign_seed", "primary_comparison",
         "task_order", "task_prompt_digests", "verifier_digests", "reference_fixture_digests",
         "contract_audit_digest", "provider_id", "actual_model_id", "provider_model_config_digest",
@@ -477,43 +517,145 @@ def _semantic_payload_keys() -> tuple[str, ...]:
         "selector_digest", "treatment_identity", "planned_runs",
         "preflight_relevance_selected_candidate_ids", "replacement_policy",
     )
+    if version == LEGACY_SCHEMA_VERSION:
+        return common
+    return (
+        "schema", "schema_version", "runner_version", "campaign_purpose",
+        "behavioral_input_digest", "infrastructure_delta_digest", *common[2:],
+    )
+
+
+_BEHAVIORAL_MANIFEST_KEYS = (
+    "task_order", "task_prompt_digests", "verifier_digests", "reference_fixture_digests",
+    "provider_id", "actual_model_id", "provider_model_config_digest", "utility_prompt_digest",
+    "utility_schema_version", "utility_timeout_seconds", "knowledge_corpus_digest",
+    "selector_digest", "treatment_identity", "preflight_relevance_selected_candidate_ids",
+)
+
+
+def assert_infrastructure_only_rerun(source: dict[str, Any], candidate: dict[str, Any]) -> None:
+    changed = tuple(key for key in _BEHAVIORAL_MANIFEST_KEYS if source.get(key) != candidate.get(key))
+    if changed:
+        raise ValueError(f"JEV.4R behavioral inputs changed: {','.join(changed)}")
+    if candidate.get("runner_version") != RUNNER_VERSION:
+        raise ValueError("JEV.4R runner version is not current")
 
 
 def run_campaign(repository: Path, root: Path, reviewer_id: str, *, execute_live: bool) -> tuple[str, ...]:
     if not execute_live:
         raise PermissionError("JEV.4 live execution requires explicit --execute-live")
     manifest = load_manifest(root)
+    if manifest["schema_version"] != SCHEMA_VERSION:
+        raise ValueError("historical JEV.4 campaigns are immutable and cannot use the JEV.4R runner")
     run_dir = root / "runs"
     if run_dir.exists() and tuple(run_dir.glob("*.json")):
         raise FileExistsError("JEV.4 is one-shot; existing run records forbid resume or replacement")
     completed: list[str] = []
     for planned in manifest["planned_runs"]:
-        record = execute_one(repository, root, manifest, planned, reviewer_id)
+        roots = AgentRunRoots.create(root, planned["run_id"], planned["order"])
+        roots.prepare_non_worktree_roots()
+        before = environment_fingerprint()
+        completed_process = subprocess.run(
+            [
+                sys.executable, "-m",
+                "benchmarks.picobench.packs.knowledge_evolution_live.jev4_pilot",
+                "_run-one", "--repository", str(repository), "--campaign-root", str(root),
+                "--run-id", planned["run_id"], "--reviewer-id", reviewer_id, "--execute-live",
+            ],
+            cwd=repository,
+            env=roots.child_environment(),
+            check=False,
+        )
+        after = environment_fingerprint()
+        if roots.artifact.exists():
+            record = _store(root).read_json(roots.artifact)
+        else:
+            record = _infra_record(manifest, planned, "benchmark_host_failure")
+        record.pop("integrity_digest", None)
+        record["environment_fingerprint_before"] = before
+        record["environment_fingerprint_after"] = after
+        record["environment_drift_detected"] = before["fingerprint_digest"] != after["fingerprint_digest"]
+        if record["environment_drift_detected"]:
+            record.update(
+                run_validity="infra_invalid",
+                infra_invalid_reason="environment_drift",
+                verified_success=False,
+            )
+        elif completed_process.returncode != 0:
+            record.update(
+                run_validity="infra_invalid",
+                infra_invalid_reason="benchmark_host_failure",
+                verified_success=False,
+            )
+        record["integrity_digest"] = canonical_digest(record)
+        _write_run(root, record)
         completed.append(record["run_id"])
         if record["run_validity"] == "infra_invalid":
             raise RuntimeError("JEV.4 stopped after INFRA_INVALID; replacement runs are forbidden")
     return tuple(completed)
 
 
-def execute_one(repository: Path, root: Path, manifest: dict[str, Any], planned: dict[str, Any], reviewer_id: str) -> dict[str, Any]:
+def execute_one(
+    repository: Path,
+    root: Path,
+    manifest: dict[str, Any],
+    planned: dict[str, Any],
+    reviewer_id: str,
+    *,
+    persist: bool = True,
+) -> dict[str, Any]:
     run_id = planned["run_id"]
     run_path = root / "runs" / f"{run_id}.json"
     if run_path.exists():
         raise FileExistsError(f"immutable JEV.4 run already exists: {run_id}")
-    short = f"r{planned['order']:02d}"
-    worktree, state = root / "w" / short, root / "s" / short
+    roots = AgentRunRoots.create(root, run_id, planned["order"])
+    roots.prepare_non_worktree_roots()
+    worktree, state = roots.worktree, roots.state
+    other_trace_roots = tuple(
+        path for path in (root / "s").glob("r*") if path.resolve() != roots.trace.resolve()
+    )
+    canary = verify_trace_canary(
+        roots.trace,
+        canary_id=f"{run_id}-trace-canary",
+        other_trace_roots=other_trace_roots,
+    )
+    if not canary["passed"]:
+        record = _infra_record(manifest, planned, "trace_canary_failure")
+        record.update(
+            isolation_roots=roots.public_identity(),
+            trace_canary=canary,
+            child_process_id=os.getpid(),
+        )
+        record["integrity_digest"] = canonical_digest({key: value for key, value in record.items() if key != "integrity_digest"})
+        if persist:
+            _write_run(root, record)
+        return record
     try:
         _git(repository, "worktree", "add", "--detach", str(worktree), manifest["base_commit_sha"])
     except (OSError, RuntimeError):
         record = _infra_record(manifest, planned, "worktree_setup_failure")
-        _write_run(root, record)
+        record.update(
+            isolation_roots=roots.public_identity(),
+            trace_canary=canary,
+            child_process_id=os.getpid(),
+        )
+        record["integrity_digest"] = canonical_digest({key: value for key, value in record.items() if key != "integrity_digest"})
+        if persist:
+            _write_run(root, record)
         return record
     try:
         try:
             record = asyncio.run(_execute_turn(root, manifest, planned, worktree, state, reviewer_id))
         except Exception:  # noqa: BLE001 - immutable host-failure boundary
             record = _infra_record(manifest, planned, "benchmark_host_failure")
-        _write_run(root, record)
+        record.update(
+            isolation_roots=roots.public_identity(),
+            trace_canary=canary,
+            child_process_id=os.getpid(),
+        )
+        record["integrity_digest"] = canonical_digest({key: value for key, value in record.items() if key != "integrity_digest"})
+        if persist:
+            _write_run(root, record)
         return record
     finally:
         if worktree.exists():
@@ -560,8 +702,6 @@ async def _execute_turn(root: Path, manifest: dict[str, Any], planned: dict[str,
     if arm is not Arm.NO_REUSE:
         prepare_approved_corpus(state_root=state, workspace=worktree, reviewer_id=reviewer_id)
 
-    old_trace = os.environ.get("PICO_TRACING_DIR")
-    os.environ["PICO_TRACING_DIR"] = str(state)
     started_at = datetime.now(timezone.utc).isoformat()
     turn_id = f"{planned['run_id']}-turn"
     runtime_outcome = "timeout"
@@ -589,10 +729,6 @@ async def _execute_turn(root: Path, manifest: dict[str, Any], planned: dict[str,
             runtime_outcome = observation.runtime_state.value
     finally:
         await host.close()
-        if old_trace is None:
-            os.environ.pop("PICO_TRACING_DIR", None)
-        else:
-            os.environ["PICO_TRACING_DIR"] = old_trace
     terminal_at = datetime.now(timezone.utc).isoformat()
     task = task_by_id(planned["task_id"])
     verified = verify_workspace(task, worktree, python_executable=sys.executable)
@@ -664,6 +800,12 @@ def _utility_projection(refs: dict[str, object]) -> dict[str, Any]:
         "output_tokens": refs["utility_output_tokens"],
         "provider_latency_ms": refs["utility_provider_latency_ms"],
         "total_latency_ms": refs["utility_latency_ms"],
+        "finish_reasons": refs.get("utility_finish_reasons", ()),
+        "malformed_categories": refs.get("utility_malformed_categories", ()),
+        "response_character_counts": refs.get("utility_response_character_counts", ()),
+        "response_digests": refs.get("utility_response_digests", ()),
+        "top_level_shapes": refs.get("utility_top_level_shapes", ()),
+        "parse_stages": refs.get("utility_parse_stages", ()),
     }
 
 
@@ -789,6 +931,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--execute-live", action="store_true")
     reduce = commands.add_parser("reduce")
     reduce.add_argument("--campaign-root", type=Path, required=True)
+    internal = commands.add_parser("_run-one")
+    internal.add_argument("--repository", type=Path, required=True)
+    internal.add_argument("--campaign-root", type=Path, required=True)
+    internal.add_argument("--run-id", required=True)
+    internal.add_argument("--reviewer-id", required=True)
+    internal.add_argument("--execute-live", action="store_true")
     return parser
 
 
@@ -805,6 +953,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                             execute_live=args.execute_live)
         print(canonical_json({"completed_agent_runs": runs}))
         return 0
+    if args.command == "_run-one":
+        if not args.execute_live:
+            raise PermissionError("JEV.4R child execution requires explicit --execute-live")
+        root = args.campaign_root.resolve()
+        manifest = load_manifest(root)
+        planned = next(
+            (item for item in manifest["planned_runs"] if item["run_id"] == args.run_id),
+            None,
+        )
+        if planned is None:
+            raise ValueError(f"unknown JEV.4R run: {args.run_id}")
+        record = execute_one(
+            args.repository.resolve(), root, manifest, planned, args.reviewer_id,
+            persist=False,
+        )
+        roots = AgentRunRoots.create(root, planned["run_id"], planned["order"])
+        _store(root).write_summary(roots.artifact, record)
+        return 0
     print(json.dumps(reduce_campaign(args.campaign_root.resolve()), indent=2, sort_keys=True))
     return 0
 
@@ -816,5 +982,5 @@ if __name__ == "__main__":
 __all__ = [
     "Arm", "CAMPAIGN_SEED", "CONTRACT_AUDIT", "PRIMARY_COMPARISON", "SCHEMA",
     "TASKS", "UTILITY_TIMEOUT_SECONDS", "make_plan", "prepare_campaign", "preflight",
-    "reduce_campaign", "run_campaign", "verify_workspace",
+    "assert_infrastructure_only_rerun", "reduce_campaign", "run_campaign", "verify_workspace",
 ]

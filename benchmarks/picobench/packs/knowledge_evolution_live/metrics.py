@@ -124,6 +124,30 @@ def extract_utility_observability(events) -> dict[str, object]:
         ),
         "utility_candidate_count": sum(len(item.get("input_candidate_ids", ())) for item in receipts),
         "utility_decisions": decisions,
+        "utility_finish_reasons": tuple(
+            str(item["utility_finish_reason"])
+            for item in receipts if item.get("utility_finish_reason")
+        ),
+        "utility_malformed_categories": tuple(
+            str(item["utility_malformed_category"])
+            for item in receipts if item.get("utility_malformed_category")
+        ),
+        "utility_response_character_counts": tuple(
+            int(item["utility_response_character_count"])
+            for item in receipts if isinstance(item.get("utility_response_character_count"), int)
+        ),
+        "utility_response_digests": tuple(
+            str(item["utility_response_digest"])
+            for item in receipts if item.get("utility_response_digest")
+        ),
+        "utility_top_level_shapes": tuple(
+            str(item["utility_top_level_shape"])
+            for item in receipts if item.get("utility_top_level_shape")
+        ),
+        "utility_parse_stages": tuple(
+            str(item["utility_parse_stage"])
+            for item in receipts if item.get("utility_parse_stage")
+        ),
     }
 
 

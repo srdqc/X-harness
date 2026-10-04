@@ -6,6 +6,7 @@ import json
 import math
 import time
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from pico.decision_plane.types import DecisionOutcome
@@ -33,6 +34,52 @@ Do not propose code, tools, patches, task solutions, or reasoning. Return only t
 PROVIDER_UTILITY_PROMPT_DIGEST = canonical_digest(
     {"version": PROVIDER_UTILITY_TEMPLATE_VERSION, "instruction": PROVIDER_UTILITY_INSTRUCTION}
 )
+
+
+class UtilityFinishReason(StrEnum):
+    STOP = "STOP"
+    LENGTH = "LENGTH"
+    CONTENT_FILTER = "CONTENT_FILTER"
+    TOOL_CALL = "TOOL_CALL"
+    UNKNOWN = "UNKNOWN"
+
+
+class UtilityMalformedCategory(StrEnum):
+    NON_JSON = "NON_JSON"
+    JSON_SYNTAX_ERROR = "JSON_SYNTAX_ERROR"
+    TRUNCATED_OUTPUT = "TRUNCATED_OUTPUT"
+    SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
+    MISSING_ALIAS = "MISSING_ALIAS"
+    DUPLICATE_ALIAS = "DUPLICATE_ALIAS"
+    UNKNOWN_ALIAS = "UNKNOWN_ALIAS"
+    INVALID_CHOICE = "INVALID_CHOICE"
+    INVALID_CONFIDENCE = "INVALID_CONFIDENCE"
+    EXTRA_FIELDS = "EXTRA_FIELDS"
+    EMPTY_CONTENT = "EMPTY_CONTENT"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class _ParseFailure:
+    reason: str
+    category: UtilityMalformedCategory
+    stage: str
+    top_level_shape: str | None = None
+
+
+def normalize_finish_reason(value: object) -> UtilityFinishReason:
+    if not isinstance(value, str):
+        return UtilityFinishReason.UNKNOWN
+    normalized = value.casefold().replace("-", "_")
+    if normalized in {"stop", "end_turn", "complete", "completed"}:
+        return UtilityFinishReason.STOP
+    if normalized in {"length", "max_tokens", "max_output_tokens"}:
+        return UtilityFinishReason.LENGTH
+    if normalized in {"content_filter", "content_filtered", "safety"}:
+        return UtilityFinishReason.CONTENT_FILTER
+    if normalized in {"tool_call", "tool_calls", "function_call"}:
+        return UtilityFinishReason.TOOL_CALL
+    return UtilityFinishReason.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -101,6 +148,7 @@ class ProviderUtilityBackend:
                 latency_ms=self._latency(started_ns),
             )
         metadata = self._metadata(response, attempts, self._latency(started_ns))
+        finish_reason = normalize_finish_reason(response.finish_reason)
         if response.finish_reason == "error":
             category = response.error_classification.category if response.error_classification else "provider_error"
             reason = {
@@ -111,11 +159,29 @@ class ProviderUtilityBackend:
                 "model_unavailable": "unavailable",
             }.get(category, "provider_error")
             return self._failure(request, DecisionOutcome.UNAVAILABLE, reason, metadata=metadata)
-        if response.tool_calls or not isinstance(response.content, str):
-            return self._failure(request, DecisionOutcome.INVALID_RESULT, "malformed_response", metadata=metadata)
-        decisions = self._parse(response.content, alias_to_id)
-        if isinstance(decisions, str):
-            return self._failure(request, DecisionOutcome.INVALID_RESULT, decisions, metadata=metadata)
+        if response.tool_calls:
+            return self._failure(
+                request, DecisionOutcome.INVALID_RESULT, "malformed_response", metadata=metadata,
+                finish_reason=UtilityFinishReason.TOOL_CALL,
+                malformed_category=UtilityMalformedCategory.SCHEMA_MISMATCH,
+                parse_stage="provider_response",
+            )
+        if not isinstance(response.content, str):
+            return self._failure(
+                request, DecisionOutcome.INVALID_RESULT, "malformed_response", metadata=metadata,
+                finish_reason=finish_reason, malformed_category=UtilityMalformedCategory.EMPTY_CONTENT,
+                parse_stage="provider_response",
+            )
+        response_character_count = len(response.content)
+        response_digest = canonical_digest(response.content)
+        decisions = self._parse(response.content, alias_to_id, finish_reason=finish_reason)
+        if isinstance(decisions, _ParseFailure):
+            return self._failure(
+                request, DecisionOutcome.INVALID_RESULT, decisions.reason, metadata=metadata,
+                finish_reason=finish_reason, malformed_category=decisions.category,
+                response_character_count=response_character_count, response_digest=response_digest,
+                top_level_shape=decisions.top_level_shape, parse_stage=decisions.stage,
+            )
         return JevUtilityBackendResponse(
             request.decision_id,
             request.request_digest,
@@ -129,6 +195,11 @@ class ProviderUtilityBackend:
             output_tokens=metadata[2],
             latency_ms=metadata[3],
             logical_call_id=metadata[4],
+            finish_reason=finish_reason.value,
+            response_character_count=response_character_count,
+            response_digest=response_digest,
+            top_level_shape="object",
+            parse_stage="complete",
         )
 
     def _messages(self, request: JevUtilityRequest, aliases: tuple[str, ...]) -> list[dict[str, str]]:
@@ -165,25 +236,43 @@ class ProviderUtilityBackend:
         ]
 
     @staticmethod
-    def _parse(content: str, alias_to_id: dict[str, str]) -> tuple[JevUtilityAdvice, ...] | str:
+    def _parse(
+        content: str,
+        alias_to_id: dict[str, str],
+        *,
+        finish_reason: UtilityFinishReason = UtilityFinishReason.UNKNOWN,
+    ) -> tuple[JevUtilityAdvice, ...] | _ParseFailure:
+        if not content.strip():
+            return _ParseFailure("malformed_response", UtilityMalformedCategory.EMPTY_CONTENT, "json_decode")
         try:
             payload = json.loads(content)
         except (json.JSONDecodeError, TypeError):
-            return "malformed_response"
-        if not isinstance(payload, dict) or set(payload) != {"decisions"} or not isinstance(payload["decisions"], list):
-            return "malformed_response"
+            category = (
+                UtilityMalformedCategory.TRUNCATED_OUTPUT
+                if finish_reason is UtilityFinishReason.LENGTH
+                else UtilityMalformedCategory.JSON_SYNTAX_ERROR
+            )
+            return _ParseFailure("malformed_response", category, "json_decode")
+        shape = type(payload).__name__.lower()
+        if not isinstance(payload, dict):
+            return _ParseFailure("malformed_response", UtilityMalformedCategory.SCHEMA_MISMATCH, "schema_validation", shape)
+        if set(payload) != {"decisions"}:
+            category = UtilityMalformedCategory.EXTRA_FIELDS if "decisions" in payload else UtilityMalformedCategory.SCHEMA_MISMATCH
+            return _ParseFailure("malformed_response", category, "schema_validation", "object")
+        if not isinstance(payload["decisions"], list):
+            return _ParseFailure("malformed_response", UtilityMalformedCategory.SCHEMA_MISMATCH, "schema_validation", "object")
         if len(payload["decisions"]) > len(alias_to_id):
-            return "unexpected_candidate_alias"
+            return _ParseFailure("unexpected_candidate_alias", UtilityMalformedCategory.UNKNOWN_ALIAS, "alias_validation", "object")
         parsed: list[JevUtilityAdvice] = []
         seen: set[str] = set()
         for raw in payload["decisions"]:
             if not isinstance(raw, dict) or not {"candidate", "choice"} <= set(raw) or set(raw) - {"candidate", "choice", "confidence"}:
-                return "malformed_decision"
+                return _ParseFailure("malformed_decision", UtilityMalformedCategory.EXTRA_FIELDS, "schema_validation", "object")
             alias = raw["candidate"]
             if not isinstance(alias, str) or alias not in alias_to_id:
-                return "unexpected_candidate_alias"
+                return _ParseFailure("unexpected_candidate_alias", UtilityMalformedCategory.UNKNOWN_ALIAS, "alias_validation", "object")
             if alias in seen:
-                return "duplicate_candidate_alias"
+                return _ParseFailure("duplicate_candidate_alias", UtilityMalformedCategory.DUPLICATE_ALIAS, "alias_validation", "object")
             seen.add(alias)
             choice = raw["choice"]
             try:
@@ -191,7 +280,7 @@ class ProviderUtilityBackend:
             except ValueError:
                 decision = None
             if decision is None or choice not in {"KEEP", "ABSTAIN", "UNCERTAIN"}:
-                return "invalid_choice"
+                return _ParseFailure("invalid_choice", UtilityMalformedCategory.INVALID_CHOICE, "decision_validation", "object")
             confidence = raw.get("confidence")
             if confidence is not None and (
                 isinstance(confidence, bool)
@@ -199,10 +288,10 @@ class ProviderUtilityBackend:
                 or not math.isfinite(confidence)
                 or not 0 <= confidence <= 1
             ):
-                return "invalid_confidence"
+                return _ParseFailure("invalid_confidence", UtilityMalformedCategory.INVALID_CONFIDENCE, "decision_validation", "object")
             parsed.append(JevUtilityAdvice(alias_to_id[alias], decision, confidence=confidence))
         if seen != set(alias_to_id):
-            return "missing_candidate_alias"
+            return _ParseFailure("missing_candidate_alias", UtilityMalformedCategory.MISSING_ALIAS, "alias_validation", "object")
         return tuple(parsed)
 
     @staticmethod
@@ -235,6 +324,12 @@ class ProviderUtilityBackend:
         attempts: int = 0,
         latency_ms: float | None = None,
         metadata: tuple[int, int | None, int | None, float, str | None] | None = None,
+        finish_reason: UtilityFinishReason = UtilityFinishReason.UNKNOWN,
+        malformed_category: UtilityMalformedCategory | None = None,
+        response_character_count: int | None = None,
+        response_digest: str | None = None,
+        top_level_shape: str | None = None,
+        parse_stage: str | None = None,
     ) -> JevUtilityBackendResponse:
         values = metadata or (attempts, None, None, latency_ms, None)
         return JevUtilityBackendResponse(
@@ -252,6 +347,12 @@ class ProviderUtilityBackend:
             output_tokens=values[2],
             latency_ms=values[3],
             logical_call_id=values[4],
+            finish_reason=finish_reason.value,
+            malformed_category=malformed_category.value if malformed_category else None,
+            response_character_count=response_character_count,
+            response_digest=response_digest,
+            top_level_shape=top_level_shape,
+            parse_stage=parse_stage,
         )
 
 
@@ -262,4 +363,7 @@ __all__ = [
     "PROVIDER_UTILITY_TEMPLATE_VERSION",
     "ProviderUtilityBackend",
     "ProviderUtilityConfig",
+    "UtilityFinishReason",
+    "UtilityMalformedCategory",
+    "normalize_finish_reason",
 ]

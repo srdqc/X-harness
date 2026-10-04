@@ -138,6 +138,12 @@ class JevUtilityBackendResponse:
     output_tokens: object | None = None
     latency_ms: object | None = None
     logical_call_id: object | None = None
+    finish_reason: object | None = None
+    malformed_category: object | None = None
+    response_character_count: object | None = None
+    response_digest: object | None = None
+    top_level_shape: object | None = None
+    parse_stage: object | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +188,12 @@ class JevUtilityResult:
     output_tokens: int | None = None
     latency_ms: float | None = None
     logical_call_id: str | None = None
+    finish_reason: str | None = None
+    malformed_category: str | None = None
+    response_character_count: int | None = None
+    response_digest: str | None = None
+    top_level_shape: str | None = None
+    parse_stage: str | None = None
     result_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -205,6 +217,12 @@ class JevUtilityResult:
                     "output_tokens": self.output_tokens,
                     "latency_ms": self.latency_ms,
                     "logical_call_id": self.logical_call_id,
+                    "finish_reason": self.finish_reason,
+                    "malformed_category": self.malformed_category,
+                    "response_character_count": self.response_character_count,
+                    "response_digest": self.response_digest,
+                    "top_level_shape": self.top_level_shape,
+                    "parse_stage": self.parse_stage,
                 }
             ),
         )
@@ -309,11 +327,18 @@ class JevUtilityDecisionAdapter:
             output_tokens=metadata[6],
             latency_ms=metadata[7],
             logical_call_id=metadata[8],
+            finish_reason=metadata[9],
+            malformed_category=metadata[10],
+            response_character_count=metadata[11],
+            response_digest=metadata[12],
+            top_level_shape=metadata[13],
+            parse_stage=metadata[14],
         )
 
     @staticmethod
     def _parse_backend_metadata(response: JevUtilityBackendResponse) -> tuple[
-        str | None, str | None, str | None, int, int, int | None, int | None, float | None, str | None
+        str | None, str | None, str | None, int, int, int | None, int | None, float | None, str | None,
+        str | None, str | None, int | None, str | None, str | None, str | None
     ] | str:
         identities = (response.backend_id, response.backend_model, response.backend_version)
         if any(value is not None and (not isinstance(value, str) or len(value) > 128) for value in identities):
@@ -332,6 +357,21 @@ class JevUtilityDecisionAdapter:
         logical_call_id = response.logical_call_id
         if logical_call_id is not None and (not isinstance(logical_call_id, str) or len(logical_call_id) > 128):
             return "invalid_logical_call_id"
+        bounded = (response.finish_reason, response.malformed_category, response.top_level_shape, response.parse_stage)
+        if any(value is not None and (not isinstance(value, str) or len(value) > 64) for value in bounded):
+            return "invalid_provider_diagnostics"
+        response_character_count = response.response_character_count
+        if response_character_count is not None and (
+            isinstance(response_character_count, bool)
+            or not isinstance(response_character_count, int)
+            or response_character_count < 0
+        ):
+            return "invalid_provider_diagnostics"
+        response_digest = response.response_digest
+        if response_digest is not None and (
+            not isinstance(response_digest, str) or len(response_digest) != 64
+        ):
+            return "invalid_provider_diagnostics"
         return (
             response.backend_id,
             response.backend_model,
@@ -342,6 +382,12 @@ class JevUtilityDecisionAdapter:
             response.output_tokens,
             float(latency) if latency is not None else None,
             logical_call_id,
+            response.finish_reason,
+            response.malformed_category,
+            response_character_count,
+            response_digest,
+            response.top_level_shape,
+            response.parse_stage,
         )
 
     @staticmethod
@@ -376,9 +422,13 @@ class JevUtilityDecisionAdapter:
         outcome: DecisionOutcome,
         reason: str,
         *,
-        metadata: tuple[str | None, str | None, str | None, int, int, int | None, int | None, float | None, str | None] | None = None,
+        metadata: tuple[
+            str | None, str | None, str | None, int, int, int | None, int | None,
+            float | None, str | None, str | None, str | None, int | None,
+            str | None, str | None, str | None,
+        ] | None = None,
     ) -> JevUtilityResult:
-        values = metadata or (None, None, None, 0, 0, None, None, None, None)
+        values = metadata or (None, None, None, 0, 0, None, None, None, None, None, None, None, None, None, None)
         return JevUtilityResult(
             request.decision_id,
             request.request_digest,
@@ -394,6 +444,12 @@ class JevUtilityDecisionAdapter:
             output_tokens=values[6],
             latency_ms=values[7],
             logical_call_id=values[8],
+            finish_reason=values[9],
+            malformed_category=values[10],
+            response_character_count=values[11],
+            response_digest=values[12],
+            top_level_shape=values[13],
+            parse_stage=values[14],
         )
 
 
@@ -420,6 +476,12 @@ class JevUtilityDecisionReceipt:
     utility_output_tokens: int | None = None
     utility_provider_latency_ms: float | None = None
     utility_logical_call_id: str | None = None
+    utility_finish_reason: str | None = None
+    utility_malformed_category: str | None = None
+    utility_response_character_count: int | None = None
+    utility_response_digest: str | None = None
+    utility_top_level_shape: str | None = None
+    utility_parse_stage: str | None = None
     selector_version: int = 1
     receipt_version: int = 1
     schema: str = JEV_UTILITY_RECEIPT_SCHEMA
@@ -457,6 +519,26 @@ class JevUtilityDecisionReceipt:
             for value in (self.utility_input_tokens, self.utility_output_tokens)
         ):
             raise ValueError("invalid utility provider usage")
+        diagnostic_strings = (
+            self.utility_finish_reason, self.utility_malformed_category,
+            self.utility_top_level_shape, self.utility_parse_stage,
+        )
+        if any(
+            value is not None and (not isinstance(value, str) or len(value) > 64)
+            for value in diagnostic_strings
+        ):
+            raise ValueError("utility diagnostic exceeds its bound")
+        if self.utility_response_character_count is not None and (
+            isinstance(self.utility_response_character_count, bool)
+            or not isinstance(self.utility_response_character_count, int)
+            or self.utility_response_character_count < 0
+        ):
+            raise ValueError("invalid utility response character count")
+        if self.utility_response_digest is not None and (
+            not isinstance(self.utility_response_digest, str)
+            or len(self.utility_response_digest) != 64
+        ):
+            raise ValueError("invalid utility response digest")
 
     def metadata(self) -> Mapping[str, Any]:
         backend_kind, _, provider_id = self.backend_id.partition(":")
@@ -487,6 +569,12 @@ class JevUtilityDecisionReceipt:
                 "utility_output_tokens": self.utility_output_tokens,
                 "utility_provider_latency_ms": self.utility_provider_latency_ms,
                 "utility_logical_call_id": self.utility_logical_call_id,
+                "utility_finish_reason": self.utility_finish_reason,
+                "utility_malformed_category": self.utility_malformed_category,
+                "utility_response_character_count": self.utility_response_character_count,
+                "utility_response_digest": self.utility_response_digest,
+                "utility_top_level_shape": self.utility_top_level_shape,
+                "utility_parse_stage": self.utility_parse_stage,
                 "selector_version": self.selector_version,
                 "receipt_version": self.receipt_version,
             }

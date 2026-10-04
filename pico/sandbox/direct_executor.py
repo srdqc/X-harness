@@ -36,6 +36,13 @@ _ENV_ALLOWLIST = (
     # 语言运行时（保证 Python、Node 和基于虚拟环境的工具可正常解析）
     "PYTHONPATH",
     "VIRTUAL_ENV",
+    # Live benchmark children pin Python/pip writes to run-local roots. These
+    # variables contain paths and policy flags, not credentials.
+    "PYTHONNOUSERSITE",
+    "PYTHONUSERBASE",
+    "PYTHONPYCACHEPREFIX",
+    "PIP_TARGET",
+    "PIP_CACHE_DIR",
     # TLS 信任配置和代理（使 git、curl 和 HTTPS 工具能在企业网络中工作）。
     # 这些是配置，而非高价值密钥；API 密钥、云凭据和 SSH 信息被明确排除。
     "SSL_CERT_FILE",

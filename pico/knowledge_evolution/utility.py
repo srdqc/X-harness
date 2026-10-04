@@ -178,6 +178,12 @@ class KnowledgeUtilityCoordinator:
                 utility_output_tokens=result.output_tokens,
                 utility_provider_latency_ms=result.latency_ms,
                 utility_logical_call_id=result.logical_call_id,
+                utility_finish_reason=result.finish_reason,
+                utility_malformed_category=result.malformed_category,
+                utility_response_character_count=result.response_character_count,
+                utility_response_digest=result.response_digest,
+                utility_top_level_shape=result.top_level_shape,
+                utility_parse_stage=result.parse_stage,
             )
         )
         for token, values in pending.groups.items():
