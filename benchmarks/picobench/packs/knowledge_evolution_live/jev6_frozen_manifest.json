@@ -1,0 +1,76 @@
+{
+  "schema": "pico.jev6-heldout-freeze.v1",
+  "suite_name": "JEV.6 held-out Provider Utility benchmark",
+  "suite_version": "jev6-held-out-v1",
+  "base_commit": "8adee66f691d183695734a4373c62da1b514235a",
+  "task_count": 8,
+  "category_counts": {
+    "navigation_retrieval": 2,
+    "implementation": 2,
+    "debugging_validation": 2,
+    "integration_api_composition": 2
+  },
+  "arms": [
+    "task_relevance_v1",
+    "task_relevance_v1_provider_utility"
+  ],
+  "repetitions": 3,
+  "planned_live_runs": 48,
+  "provider_id": "deepseek",
+  "model_id": "deepseek/deepseek-v4-flash",
+  "utility_timeout_seconds": 15.0,
+  "utility_max_output_tokens": 1024,
+  "mechanical_solvability": {
+    "passed": 8,
+    "total": 8,
+    "semantic_digest": "3648ff2aeee3dab81d632ee9364635d7a7518e6bacdf9ab2b3c82f27a3e32f19"
+  },
+  "contract_audit": {
+    "explicitly_supported": 8,
+    "total": 8
+  },
+  "selector_audit": {
+    "semantic_digest": "c0952ea4173b6b0aa95694a26451bd4b22c5836b3c4c736df8473605f72d43b3",
+    "selected_counts": {
+      "jev6-nav-01-trace-event-reader": 1,
+      "jev6-nav-02-skill-variants": 2,
+      "jev6-impl-01-safe-segment-bound": 0,
+      "jev6-impl-02-delivery-result-flags": 0,
+      "jev6-debug-01-bm25-parameters": 0,
+      "jev6-debug-02-decision-receipt-identity": 2,
+      "jev6-int-01-public-turn-events": 1,
+      "jev6-int-02-resolve-available-skill": 1
+    },
+    "selected_candidate_ids": {
+      "jev6-nav-01-trace-event-reader": ["immutable-record-conventions"],
+      "jev6-nav-02-skill-variants": ["portable-artifact-paths", "scoped-skill-flow"],
+      "jev6-impl-01-safe-segment-bound": [],
+      "jev6-impl-02-delivery-result-flags": [],
+      "jev6-debug-01-bm25-parameters": [],
+      "jev6-debug-02-decision-receipt-identity": ["fail-closed-recovery", "phase-test-registration"],
+      "jev6-int-01-public-turn-events": ["fail-closed-recovery"],
+      "jev6-int-02-resolve-available-skill": ["scoped-skill-flow"]
+    },
+    "zero_selection_tasks": 3,
+    "one_selection_tasks": 3,
+    "many_selection_tasks": 2
+  },
+  "anti_tuning_digests": {
+    "suite": "f5a5d3b13aa10cb3eb8ca65fb93f82c421ef35a606ca28b464744a01d800571b",
+    "task_set": "33de14564fa7fa96fb46a229b599df18d44649e38c203f1fe310d5e1a658da20",
+    "verifier_set": "cccfdd1229f0163c01d49c85b2d75861063ea3d9bc65e75c622710743a0a485c",
+    "fixtures": "a91c26428dc71a2cddbeeafcb8bca135bb76b254d895b6f7ac9ab92f79b147b8",
+    "contract_audit": "e3ad5325af375f5d774dcec0534af248f6382beb3217f150d348fba46a1fa3ac",
+    "selector_audit": "8f599915a77abac26b8eeb1ad5968522891529222596be8d796a509978cdf3c2",
+    "corpus": "39b04fca4f6aa9e54568594b1c18dfe9f71c2292c643469197a96c8977368fbf",
+    "selector_config": "eb4cfa4573a814b1d10f3849c9cc7280dbf06df4be54c84ea99bed461af9af40",
+    "utility_prompt": "4751ef29849a16aaa4fedfaeb1fc5957e12bcf31a67bd3977367cd37b47404d9",
+    "utility_inference_policy": "930f37a1561f57d62b40c461ae8ae78bcb61fdad13aacf67dfe6133e18a915ae",
+    "provider_model": "ff5bcecaf3b7f5d676bd1f39ff85f9f2dc7b3adeccb5a22d0e3a8c9deb6b82d6",
+    "run_order": "8952d8549a042e82d4e289068b2fc4299f666568326f4d364bbc9a7c3ea7d525",
+    "classification_policy": "e39cfce61b74c144cb0a3f255737b2ee0cc98ffa8c4ca9997b4e6262a13abd12",
+    "treatment_config": "d88f351277e35963bd511672b4053a3592c1b710264bcc9d9b90d625927bec81"
+  },
+  "provider_calls": 0,
+  "live_outcomes_present": false
+}

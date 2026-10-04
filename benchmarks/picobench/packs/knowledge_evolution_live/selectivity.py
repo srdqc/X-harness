@@ -83,8 +83,13 @@ def evaluate_selectivity(
                     max_candidates=len(CORPUS),
                     selection_mode=mode,
                 )
+                prompt = (
+                    prompt_by_task[task_id]
+                    if task_id in prompt_by_task
+                    else task_by_id(task_id).prompt
+                )
                 items, _ = retriever.retrieve(
-                    prompt_by_task.get(task_id, task_by_id(task_id).prompt),
+                    prompt,
                     retrieval_id=f"offline-{mode.value}-{task_id}-{index}",
                     turn_id=f"offline-{mode.value}-{task_id}",
                     candidate_types=candidate_types,
