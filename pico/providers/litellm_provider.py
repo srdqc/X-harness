@@ -394,6 +394,7 @@ class LiteLLMProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """通过 LiteLLM 发送 Single Chat Completion，并返回统一 LLMResponse。
 
@@ -455,6 +456,10 @@ class LiteLLMProvider(LLMProvider):
 
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["drop_params"] = True
+
+        if response_format is not None:
+            kwargs["response_format"] = response_format
             kwargs["drop_params"] = True
 
         if tools:

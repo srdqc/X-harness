@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -41,7 +41,33 @@ class UtilityFinishReason(StrEnum):
     LENGTH = "LENGTH"
     CONTENT_FILTER = "CONTENT_FILTER"
     TOOL_CALL = "TOOL_CALL"
+    ERROR = "ERROR"
     UNKNOWN = "UNKNOWN"
+
+
+class UtilityPayloadOutcome(StrEnum):
+    VALID_TYPED_JSON = "VALID_TYPED_JSON"
+    EMPTY_CONTENT = "EMPTY_CONTENT"
+    NON_JSON = "NON_JSON"
+    JSON_SYNTAX_ERROR = "JSON_SYNTAX_ERROR"
+    SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
+    MISSING_ALIAS = "MISSING_ALIAS"
+    DUPLICATE_ALIAS = "DUPLICATE_ALIAS"
+    UNKNOWN_ALIAS = "UNKNOWN_ALIAS"
+    INVALID_CHOICE = "INVALID_CHOICE"
+    INVALID_CONFIDENCE = "INVALID_CONFIDENCE"
+    EXTRA_FIELDS = "EXTRA_FIELDS"
+    UNKNOWN = "UNKNOWN"
+
+
+class UtilityReasoningMode(StrEnum):
+    DISABLED = "disabled"
+    PROVIDER_DEFAULT = "provider_default"
+
+
+class UtilityStructuredOutputMode(StrEnum):
+    JSON_OBJECT = "json_object"
+    NONE = "none"
 
 
 class UtilityMalformedCategory(StrEnum):
@@ -79,7 +105,36 @@ def normalize_finish_reason(value: object) -> UtilityFinishReason:
         return UtilityFinishReason.CONTENT_FILTER
     if normalized in {"tool_call", "tool_calls", "function_call"}:
         return UtilityFinishReason.TOOL_CALL
+    if normalized == "error":
+        return UtilityFinishReason.ERROR
     return UtilityFinishReason.UNKNOWN
+
+
+@dataclass(frozen=True)
+class UtilityInferencePolicy:
+    """Generic, utility-only generation controls; adapters may drop unsupported options."""
+
+    reasoning_mode: UtilityReasoningMode = UtilityReasoningMode.DISABLED
+    structured_output_mode: UtilityStructuredOutputMode = UtilityStructuredOutputMode.JSON_OBJECT
+    max_output_tokens: int = 1024
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reasoning_mode, UtilityReasoningMode):
+            raise ValueError("reasoning_mode must be a UtilityReasoningMode")
+        if not isinstance(self.structured_output_mode, UtilityStructuredOutputMode):
+            raise ValueError("structured_output_mode must be a UtilityStructuredOutputMode")
+        if isinstance(self.max_output_tokens, bool) or not 64 <= self.max_output_tokens <= 4096:
+            raise ValueError("max_output_tokens must be between 64 and 4096")
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        return "none" if self.reasoning_mode is UtilityReasoningMode.DISABLED else None
+
+    @property
+    def response_format(self) -> dict[str, str] | None:
+        if self.structured_output_mode is UtilityStructuredOutputMode.JSON_OBJECT:
+            return {"type": "json_object"}
+        return None
 
 
 @dataclass(frozen=True)
@@ -88,6 +143,7 @@ class ProviderUtilityConfig:
     model_id: str | None = None
     max_candidates: int = 16
     max_tokens: int = 1024
+    inference_policy: UtilityInferencePolicy = field(default_factory=UtilityInferencePolicy)
 
     def __post_init__(self) -> None:
         if not self.provider_id or len(self.provider_id) > 128:
@@ -98,6 +154,12 @@ class ProviderUtilityConfig:
             raise ValueError("max_candidates must be between 1 and 64")
         if isinstance(self.max_tokens, bool) or not 64 <= self.max_tokens <= 4096:
             raise ValueError("max_tokens must be between 64 and 4096")
+        if not isinstance(self.inference_policy, UtilityInferencePolicy):
+            raise ValueError("inference_policy must be a UtilityInferencePolicy")
+
+    @property
+    def effective_inference_policy(self) -> UtilityInferencePolicy:
+        return replace(self.inference_policy, max_output_tokens=self.max_tokens)
 
 
 class ProviderUtilityBackend:
@@ -112,6 +174,7 @@ class ProviderUtilityBackend:
         self.backend_id = f"provider:{self.config.provider_id}"
         self.model_id = self.config.model_id or provider.get_default_model()
         self.prompt_digest = PROVIDER_UTILITY_PROMPT_DIGEST
+        self.inference_policy = self.config.effective_inference_policy
 
     async def decide_knowledge_utility(self, request: JevUtilityRequest) -> JevUtilityBackendResponse:
         if len(request.candidates) > self.config.max_candidates:
@@ -131,10 +194,11 @@ class ProviderUtilityBackend:
                 messages=messages,
                 tools=None,
                 model=self.model_id,
-                max_tokens=self.config.max_tokens,
+                max_tokens=self.inference_policy.max_output_tokens,
                 temperature=0.0,
-                reasoning_effort=None,
+                reasoning_effort=self.inference_policy.reasoning_effort,
                 tool_choice=None,
+                response_format=self.inference_policy.response_format,
                 fallback_models=None,
                 attempt_started=attempt_started,
                 call_role="utility",
@@ -149,6 +213,7 @@ class ProviderUtilityBackend:
             )
         metadata = self._metadata(response, attempts, self._latency(started_ns))
         finish_reason = normalize_finish_reason(response.finish_reason)
+        diagnostics = self._diagnostics(response, finish_reason)
         if response.finish_reason == "error":
             category = response.error_classification.category if response.error_classification else "provider_error"
             reason = {
@@ -158,19 +223,24 @@ class ProviderUtilityBackend:
                 "server": "unavailable",
                 "model_unavailable": "unavailable",
             }.get(category, "provider_error")
-            return self._failure(request, DecisionOutcome.UNAVAILABLE, reason, metadata=metadata)
+            return self._failure(
+                request, DecisionOutcome.UNAVAILABLE, reason, metadata=metadata,
+                finish_reason=UtilityFinishReason.ERROR, diagnostics=diagnostics,
+            )
         if response.tool_calls:
             return self._failure(
                 request, DecisionOutcome.INVALID_RESULT, "malformed_response", metadata=metadata,
                 finish_reason=UtilityFinishReason.TOOL_CALL,
                 malformed_category=UtilityMalformedCategory.SCHEMA_MISMATCH,
-                parse_stage="provider_response",
+                payload_outcome=UtilityPayloadOutcome.SCHEMA_MISMATCH,
+                parse_stage="provider_response", diagnostics=diagnostics,
             )
         if not isinstance(response.content, str):
             return self._failure(
                 request, DecisionOutcome.INVALID_RESULT, "malformed_response", metadata=metadata,
                 finish_reason=finish_reason, malformed_category=UtilityMalformedCategory.EMPTY_CONTENT,
-                parse_stage="provider_response",
+                payload_outcome=UtilityPayloadOutcome.EMPTY_CONTENT,
+                parse_stage="provider_response", diagnostics=diagnostics,
             )
         response_character_count = len(response.content)
         response_digest = canonical_digest(response.content)
@@ -179,8 +249,10 @@ class ProviderUtilityBackend:
             return self._failure(
                 request, DecisionOutcome.INVALID_RESULT, decisions.reason, metadata=metadata,
                 finish_reason=finish_reason, malformed_category=decisions.category,
+                payload_outcome=self._payload_outcome(decisions.category),
                 response_character_count=response_character_count, response_digest=response_digest,
                 top_level_shape=decisions.top_level_shape, parse_stage=decisions.stage,
+                diagnostics=diagnostics,
             )
         return JevUtilityBackendResponse(
             request.decision_id,
@@ -196,10 +268,12 @@ class ProviderUtilityBackend:
             latency_ms=metadata[3],
             logical_call_id=metadata[4],
             finish_reason=finish_reason.value,
+            payload_outcome=UtilityPayloadOutcome.VALID_TYPED_JSON.value,
             response_character_count=response_character_count,
             response_digest=response_digest,
             top_level_shape="object",
             parse_stage="complete",
+            **diagnostics,
         )
 
     def _messages(self, request: JevUtilityRequest, aliases: tuple[str, ...]) -> list[dict[str, str]]:
@@ -250,7 +324,11 @@ class ProviderUtilityBackend:
             category = (
                 UtilityMalformedCategory.TRUNCATED_OUTPUT
                 if finish_reason is UtilityFinishReason.LENGTH
-                else UtilityMalformedCategory.JSON_SYNTAX_ERROR
+                else (
+                    UtilityMalformedCategory.JSON_SYNTAX_ERROR
+                    if content.lstrip().startswith("{")
+                    else UtilityMalformedCategory.NON_JSON
+                )
             )
             return _ParseFailure("malformed_response", category, "json_decode")
         shape = type(payload).__name__.lower()
@@ -315,6 +393,47 @@ class ProviderUtilityBackend:
             response.logical_call_id,
         )
 
+    def _diagnostics(
+        self, response: LLMResponse, finish_reason: UtilityFinishReason
+    ) -> dict[str, object]:
+        reasoning_tokens = self._tokens(response.usage, "reasoning_tokens")
+        output_tokens = self._tokens(response.usage, "output_tokens", "completion_tokens")
+        visible_output_tokens = (
+            max(output_tokens - reasoning_tokens, 0)
+            if output_tokens is not None and reasoning_tokens is not None
+            else None
+        )
+        reasoning_content = response.reasoning_content
+        reasoning_present = isinstance(reasoning_content, str) and bool(reasoning_content)
+        reasoning_character_count = len(reasoning_content) if isinstance(reasoning_content, str) else None
+        if reasoning_tokens is not None and reasoning_tokens > 0 or reasoning_present:
+            effective = "reasoning_observed"
+        elif reasoning_tokens == 0:
+            effective = "no_reasoning_observed"
+        else:
+            effective = "unknown"
+        return {
+            "generation_outcome": finish_reason.value,
+            "reasoning_mode_requested": self.inference_policy.reasoning_mode.value,
+            "reasoning_mode_effective": effective,
+            "structured_output_requested": (
+                self.inference_policy.structured_output_mode.value
+            ),
+            "reasoning_tokens": reasoning_tokens,
+            "visible_output_tokens": visible_output_tokens,
+            "reasoning_content_present": reasoning_present,
+            "reasoning_character_count": reasoning_character_count,
+        }
+
+    @staticmethod
+    def _payload_outcome(category: UtilityMalformedCategory) -> UtilityPayloadOutcome:
+        if category is UtilityMalformedCategory.TRUNCATED_OUTPUT:
+            return UtilityPayloadOutcome.JSON_SYNTAX_ERROR
+        try:
+            return UtilityPayloadOutcome(category.value)
+        except ValueError:
+            return UtilityPayloadOutcome.UNKNOWN
+
     def _failure(
         self,
         request: JevUtilityRequest,
@@ -326,12 +445,24 @@ class ProviderUtilityBackend:
         metadata: tuple[int, int | None, int | None, float, str | None] | None = None,
         finish_reason: UtilityFinishReason = UtilityFinishReason.UNKNOWN,
         malformed_category: UtilityMalformedCategory | None = None,
+        payload_outcome: UtilityPayloadOutcome = UtilityPayloadOutcome.UNKNOWN,
         response_character_count: int | None = None,
         response_digest: str | None = None,
         top_level_shape: str | None = None,
         parse_stage: str | None = None,
+        diagnostics: dict[str, object] | None = None,
     ) -> JevUtilityBackendResponse:
         values = metadata or (attempts, None, None, latency_ms, None)
+        bounded_diagnostics = diagnostics or {
+            "generation_outcome": finish_reason.value,
+            "reasoning_mode_requested": self.inference_policy.reasoning_mode.value,
+            "reasoning_mode_effective": "unknown",
+            "structured_output_requested": self.inference_policy.structured_output_mode.value,
+            "reasoning_tokens": None,
+            "visible_output_tokens": None,
+            "reasoning_content_present": None,
+            "reasoning_character_count": None,
+        }
         return JevUtilityBackendResponse(
             request.decision_id,
             request.request_digest,
@@ -341,18 +472,20 @@ class ProviderUtilityBackend:
             backend_id=self.backend_id,
             backend_model=self.model_id,
             backend_version=self.backend_version,
-            logical_calls=1 if attempts else 0,
+            logical_calls=1 if values[0] else 0,
             provider_attempts=values[0],
             input_tokens=values[1],
             output_tokens=values[2],
             latency_ms=values[3],
             logical_call_id=values[4],
             finish_reason=finish_reason.value,
+            payload_outcome=payload_outcome.value,
             malformed_category=malformed_category.value if malformed_category else None,
             response_character_count=response_character_count,
             response_digest=response_digest,
             top_level_shape=top_level_shape,
             parse_stage=parse_stage,
+            **bounded_diagnostics,
         )
 
 
@@ -363,7 +496,11 @@ __all__ = [
     "PROVIDER_UTILITY_TEMPLATE_VERSION",
     "ProviderUtilityBackend",
     "ProviderUtilityConfig",
+    "UtilityInferencePolicy",
     "UtilityFinishReason",
     "UtilityMalformedCategory",
+    "UtilityPayloadOutcome",
+    "UtilityReasoningMode",
+    "UtilityStructuredOutputMode",
     "normalize_finish_reason",
 ]

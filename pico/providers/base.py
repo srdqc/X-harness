@@ -245,6 +245,7 @@ class LLMProvider(ABC):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """发送一次 Chat Completion Request，并返回统一 `LLMResponse`。
 
@@ -500,6 +501,7 @@ class LLMProvider(ABC):
         temperature: object,
         reasoning_effort: object,
         tool_choice: str | dict[str, Any] | None,
+        response_format: dict[str, Any] | None,
         response_observer: Callable[[LLMResponse, str | None], Awaitable[None]] | None = None,
         attempt_started: Callable[[str | None], None] | None = None,
         evidence_call: evidence.ProviderCallEvidenceContext | None = None,
@@ -546,6 +548,11 @@ class LLMProvider(ABC):
                                 "temperature": temperature,
                                 "reasoning_effort": reasoning_effort,
                                 "tool_choice": tool_choice,
+                                **(
+                                    {"response_format": response_format}
+                                    if response_format is not None
+                                    else {}
+                                ),
                             }
                         ),
                         "message_count": len(messages),
@@ -556,15 +563,18 @@ class LLMProvider(ABC):
             try:
                 if attempt_started is not None:
                     attempt_started(model)
-                response = await self.chat(
-                    messages=messages,
-                    tools=tools,
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    reasoning_effort=reasoning_effort,
-                    tool_choice=tool_choice,
-                )
+                chat_kwargs: dict[str, Any] = {
+                    "messages": messages,
+                    "tools": tools,
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "reasoning_effort": reasoning_effort,
+                    "tool_choice": tool_choice,
+                }
+                if response_format is not None:
+                    chat_kwargs["response_format"] = response_format
+                response = await self.chat(**chat_kwargs)
             except asyncio.CancelledError:
                 if evidence_call is not None:
                     evidence_call.recorder.emit(
@@ -718,6 +728,7 @@ class LLMProvider(ABC):
         temperature: object = _SENTINEL,
         reasoning_effort: object = _SENTINEL,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
         fallback_models: list[str] | None = None,
         request_transform: Callable[
             [list[dict[str, Any]], list[dict[str, Any]] | None, str | None],
@@ -766,6 +777,7 @@ class LLMProvider(ABC):
                     temperature=temperature,
                     reasoning_effort=reasoning_effort,
                     tool_choice=tool_choice,
+                    response_format=response_format,
                     response_observer=response_observer,
                     attempt_started=attempt_started,
                     evidence_call=evidence_call,

@@ -144,6 +144,43 @@ class JevUtilityBackendResponse:
     response_digest: object | None = None
     top_level_shape: object | None = None
     parse_stage: object | None = None
+    generation_outcome: object | None = None
+    payload_outcome: object | None = None
+    reasoning_mode_requested: object | None = None
+    reasoning_mode_effective: object | None = None
+    structured_output_requested: object | None = None
+    reasoning_tokens: object | None = None
+    visible_output_tokens: object | None = None
+    reasoning_content_present: object | None = None
+    reasoning_character_count: object | None = None
+
+
+@dataclass(frozen=True)
+class _BackendMetadata:
+    backend_id: str | None = None
+    backend_model: str | None = None
+    backend_version: str | None = None
+    logical_calls: int = 0
+    provider_attempts: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    latency_ms: float | None = None
+    logical_call_id: str | None = None
+    finish_reason: str | None = None
+    malformed_category: str | None = None
+    response_character_count: int | None = None
+    response_digest: str | None = None
+    top_level_shape: str | None = None
+    parse_stage: str | None = None
+    generation_outcome: str | None = None
+    payload_outcome: str | None = None
+    reasoning_mode_requested: str | None = None
+    reasoning_mode_effective: str | None = None
+    structured_output_requested: str | None = None
+    reasoning_tokens: int | None = None
+    visible_output_tokens: int | None = None
+    reasoning_content_present: bool | None = None
+    reasoning_character_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +231,15 @@ class JevUtilityResult:
     response_digest: str | None = None
     top_level_shape: str | None = None
     parse_stage: str | None = None
+    generation_outcome: str | None = None
+    payload_outcome: str | None = None
+    reasoning_mode_requested: str | None = None
+    reasoning_mode_effective: str | None = None
+    structured_output_requested: str | None = None
+    reasoning_tokens: int | None = None
+    visible_output_tokens: int | None = None
+    reasoning_content_present: bool | None = None
+    reasoning_character_count: int | None = None
     result_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -223,6 +269,15 @@ class JevUtilityResult:
                     "response_digest": self.response_digest,
                     "top_level_shape": self.top_level_shape,
                     "parse_stage": self.parse_stage,
+                    "generation_outcome": self.generation_outcome,
+                    "payload_outcome": self.payload_outcome,
+                    "reasoning_mode_requested": self.reasoning_mode_requested,
+                    "reasoning_mode_effective": self.reasoning_mode_effective,
+                    "structured_output_requested": self.structured_output_requested,
+                    "reasoning_tokens": self.reasoning_tokens,
+                    "visible_output_tokens": self.visible_output_tokens,
+                    "reasoning_content_present": self.reasoning_content_present,
+                    "reasoning_character_count": self.reasoning_character_count,
                 }
             ),
         )
@@ -318,35 +373,24 @@ class JevUtilityDecisionAdapter:
             self.kind,
             DecisionOutcome.SUCCESS,
             tuple(parsed),
-            backend_id=metadata[0],
-            backend_model=metadata[1],
-            backend_version=metadata[2],
-            logical_calls=metadata[3],
-            provider_attempts=metadata[4],
-            input_tokens=metadata[5],
-            output_tokens=metadata[6],
-            latency_ms=metadata[7],
-            logical_call_id=metadata[8],
-            finish_reason=metadata[9],
-            malformed_category=metadata[10],
-            response_character_count=metadata[11],
-            response_digest=metadata[12],
-            top_level_shape=metadata[13],
-            parse_stage=metadata[14],
+            **metadata.__dict__,
         )
 
     @staticmethod
-    def _parse_backend_metadata(response: JevUtilityBackendResponse) -> tuple[
-        str | None, str | None, str | None, int, int, int | None, int | None, float | None, str | None,
-        str | None, str | None, int | None, str | None, str | None, str | None
-    ] | str:
+    def _parse_backend_metadata(response: JevUtilityBackendResponse) -> _BackendMetadata | str:
         identities = (response.backend_id, response.backend_model, response.backend_version)
         if any(value is not None and (not isinstance(value, str) or len(value) > 128) for value in identities):
             return "invalid_backend_identity"
         counts = (response.logical_calls, response.provider_attempts)
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
             return "invalid_provider_counts"
-        tokens = (response.input_tokens, response.output_tokens)
+        tokens = (
+            response.input_tokens,
+            response.output_tokens,
+            response.reasoning_tokens,
+            response.visible_output_tokens,
+            response.reasoning_character_count,
+        )
         if any(value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0) for value in tokens):
             return "invalid_provider_usage"
         latency = response.latency_ms
@@ -357,7 +401,17 @@ class JevUtilityDecisionAdapter:
         logical_call_id = response.logical_call_id
         if logical_call_id is not None and (not isinstance(logical_call_id, str) or len(logical_call_id) > 128):
             return "invalid_logical_call_id"
-        bounded = (response.finish_reason, response.malformed_category, response.top_level_shape, response.parse_stage)
+        bounded = (
+            response.finish_reason,
+            response.malformed_category,
+            response.top_level_shape,
+            response.parse_stage,
+            response.generation_outcome,
+            response.payload_outcome,
+            response.reasoning_mode_requested,
+            response.reasoning_mode_effective,
+            response.structured_output_requested,
+        )
         if any(value is not None and (not isinstance(value, str) or len(value) > 64) for value in bounded):
             return "invalid_provider_diagnostics"
         response_character_count = response.response_character_count
@@ -372,22 +426,34 @@ class JevUtilityDecisionAdapter:
             not isinstance(response_digest, str) or len(response_digest) != 64
         ):
             return "invalid_provider_diagnostics"
-        return (
-            response.backend_id,
-            response.backend_model,
-            response.backend_version,
-            response.logical_calls,
-            response.provider_attempts,
-            response.input_tokens,
-            response.output_tokens,
-            float(latency) if latency is not None else None,
-            logical_call_id,
-            response.finish_reason,
-            response.malformed_category,
-            response_character_count,
-            response_digest,
-            response.top_level_shape,
-            response.parse_stage,
+        reasoning_content_present = response.reasoning_content_present
+        if reasoning_content_present is not None and not isinstance(reasoning_content_present, bool):
+            return "invalid_provider_diagnostics"
+        return _BackendMetadata(
+            backend_id=response.backend_id,
+            backend_model=response.backend_model,
+            backend_version=response.backend_version,
+            logical_calls=response.logical_calls,
+            provider_attempts=response.provider_attempts,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            latency_ms=float(latency) if latency is not None else None,
+            logical_call_id=logical_call_id,
+            finish_reason=response.finish_reason,
+            malformed_category=response.malformed_category,
+            response_character_count=response_character_count,
+            response_digest=response_digest,
+            top_level_shape=response.top_level_shape,
+            parse_stage=response.parse_stage,
+            generation_outcome=response.generation_outcome,
+            payload_outcome=response.payload_outcome,
+            reasoning_mode_requested=response.reasoning_mode_requested,
+            reasoning_mode_effective=response.reasoning_mode_effective,
+            structured_output_requested=response.structured_output_requested,
+            reasoning_tokens=response.reasoning_tokens,
+            visible_output_tokens=response.visible_output_tokens,
+            reasoning_content_present=reasoning_content_present,
+            reasoning_character_count=response.reasoning_character_count,
         )
 
     @staticmethod
@@ -422,34 +488,16 @@ class JevUtilityDecisionAdapter:
         outcome: DecisionOutcome,
         reason: str,
         *,
-        metadata: tuple[
-            str | None, str | None, str | None, int, int, int | None, int | None,
-            float | None, str | None, str | None, str | None, int | None,
-            str | None, str | None, str | None,
-        ] | None = None,
+        metadata: _BackendMetadata | None = None,
     ) -> JevUtilityResult:
-        values = metadata or (None, None, None, 0, 0, None, None, None, None, None, None, None, None, None, None)
+        values = metadata or _BackendMetadata()
         return JevUtilityResult(
             request.decision_id,
             request.request_digest,
             self.kind,
             outcome,
             reason=reason,
-            backend_id=values[0],
-            backend_model=values[1],
-            backend_version=values[2],
-            logical_calls=values[3],
-            provider_attempts=values[4],
-            input_tokens=values[5],
-            output_tokens=values[6],
-            latency_ms=values[7],
-            logical_call_id=values[8],
-            finish_reason=values[9],
-            malformed_category=values[10],
-            response_character_count=values[11],
-            response_digest=values[12],
-            top_level_shape=values[13],
-            parse_stage=values[14],
+            **values.__dict__,
         )
 
 
@@ -482,6 +530,15 @@ class JevUtilityDecisionReceipt:
     utility_response_digest: str | None = None
     utility_top_level_shape: str | None = None
     utility_parse_stage: str | None = None
+    utility_generation_outcome: str | None = None
+    utility_payload_outcome: str | None = None
+    utility_reasoning_mode_requested: str | None = None
+    utility_reasoning_mode_effective: str | None = None
+    utility_structured_output_requested: str | None = None
+    utility_reasoning_tokens: int | None = None
+    utility_visible_output_tokens: int | None = None
+    utility_reasoning_content_present: bool | None = None
+    utility_reasoning_character_count: int | None = None
     selector_version: int = 1
     receipt_version: int = 1
     schema: str = JEV_UTILITY_RECEIPT_SCHEMA
@@ -516,12 +573,21 @@ class JevUtilityDecisionReceipt:
             raise ValueError("invalid utility provider counts")
         if any(
             value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
-            for value in (self.utility_input_tokens, self.utility_output_tokens)
+            for value in (
+                self.utility_input_tokens,
+                self.utility_output_tokens,
+                self.utility_reasoning_tokens,
+                self.utility_visible_output_tokens,
+                self.utility_reasoning_character_count,
+            )
         ):
             raise ValueError("invalid utility provider usage")
         diagnostic_strings = (
             self.utility_finish_reason, self.utility_malformed_category,
             self.utility_top_level_shape, self.utility_parse_stage,
+            self.utility_generation_outcome, self.utility_payload_outcome,
+            self.utility_reasoning_mode_requested, self.utility_reasoning_mode_effective,
+            self.utility_structured_output_requested,
         )
         if any(
             value is not None and (not isinstance(value, str) or len(value) > 64)
@@ -539,6 +605,11 @@ class JevUtilityDecisionReceipt:
             or len(self.utility_response_digest) != 64
         ):
             raise ValueError("invalid utility response digest")
+        if (
+            self.utility_reasoning_content_present is not None
+            and not isinstance(self.utility_reasoning_content_present, bool)
+        ):
+            raise ValueError("invalid utility reasoning content indicator")
 
     def metadata(self) -> Mapping[str, Any]:
         backend_kind, _, provider_id = self.backend_id.partition(":")
@@ -575,6 +646,15 @@ class JevUtilityDecisionReceipt:
                 "utility_response_digest": self.utility_response_digest,
                 "utility_top_level_shape": self.utility_top_level_shape,
                 "utility_parse_stage": self.utility_parse_stage,
+                "utility_generation_outcome": self.utility_generation_outcome,
+                "utility_payload_outcome": self.utility_payload_outcome,
+                "utility_reasoning_mode_requested": self.utility_reasoning_mode_requested,
+                "utility_reasoning_mode_effective": self.utility_reasoning_mode_effective,
+                "utility_structured_output_requested": self.utility_structured_output_requested,
+                "utility_reasoning_tokens": self.utility_reasoning_tokens,
+                "utility_visible_output_tokens": self.utility_visible_output_tokens,
+                "utility_reasoning_content_present": self.utility_reasoning_content_present,
+                "utility_reasoning_character_count": self.utility_reasoning_character_count,
                 "selector_version": self.selector_version,
                 "receipt_version": self.receipt_version,
             }

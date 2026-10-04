@@ -1246,12 +1246,27 @@ def _utility_projection(refs: dict[str, object]) -> dict[str, Any]:
         "response_digests": refs.get("utility_response_digests", ()),
         "top_level_shapes": refs.get("utility_top_level_shapes", ()),
         "parse_stages": refs.get("utility_parse_stages", ()),
+        "generation_outcomes": refs.get("utility_generation_outcomes", ()),
+        "payload_outcomes": refs.get("utility_payload_outcomes", ()),
+        "reasoning_tokens": refs.get("utility_reasoning_tokens", ()),
+        "visible_output_tokens": refs.get("utility_visible_output_tokens", ()),
     }
 
 
 def _metric_value(metrics: dict[str, Any], name: str) -> int | float | None:
     value = metrics[name]
     return value.get("value") if isinstance(value, dict) else None
+
+
+def _utility_decision_classification(metrics: dict[str, Any]) -> tuple[bool, bool]:
+    """Return (all_abstain, unavailable) without conflating fallback with a decision."""
+    selected = int(metrics.get("relevance_selected_count", 0))
+    decisions = tuple(metrics.get("decisions", ()))
+    fallback = int(metrics.get("fallback_count", 0)) > 0
+    raw_abstain = int(metrics.get("raw_choice_counts", {}).get("ABSTAIN", 0))
+    all_abstain = selected > 0 and not fallback and len(decisions) == selected and raw_abstain == selected
+    unavailable = selected > 0 and fallback and not decisions
+    return all_abstain, unavailable
 
 
 def _sum_optional(left: int | float | None, right: int | float | None) -> int | float | None:
@@ -1352,8 +1367,11 @@ def reduce_campaign(root: Path) -> dict[str, Any]:
     )
     all_abstain = tuple(
         item["task_id"] for item in c_runs
-        if item.get("utility_metrics", {}).get("relevance_selected_count", 0) > 0
-        and item.get("utility_metrics", {}).get("effective_choice_counts", {}).get("KEEP", 0) == 0
+        if _utility_decision_classification(item.get("utility_metrics", {}))[0]
+    )
+    utility_decision_unavailable = tuple(
+        item["task_id"] for item in c_runs
+        if _utility_decision_classification(item.get("utility_metrics", {}))[1]
     )
     utility_removed = sum(
         len(item.get("utility_metrics", {}).get("abstained_candidate_ids", ())) for item in c_runs
@@ -1451,6 +1469,7 @@ def reduce_campaign(root: Path) -> dict[str, Any]:
         "suspected_over_abstention_tasks": tuple(over_abstention),
         "utility_removed_candidate_count": utility_removed,
         "all_abstain_tasks": all_abstain,
+        "utility_decision_unavailable_tasks": utility_decision_unavailable,
         "raw_uncertain_count": raw_uncertain,
         "precondition_ambiguous_task_received_abstain": p2_abstain,
         "fallback_count": fallbacks,

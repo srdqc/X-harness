@@ -21,6 +21,7 @@ from pico.decision_plane.provider_utility import (
     ProviderUtilityConfig,
     UtilityFinishReason,
     UtilityMalformedCategory,
+    UtilityPayloadOutcome,
     normalize_finish_reason,
 )
 from pico.decision_plane.types import DecisionOutcome
@@ -104,6 +105,9 @@ async def test_provider_message_is_bounded_deterministic_aliased_and_tool_free()
     call = provider.calls[0]
     assert call["tools"] is None
     assert call["model"] == "deepseek/test-model"
+    assert call["reasoning_effort"] == "none"
+    assert call["response_format"] == {"type": "json_object"}
+    assert call["max_tokens"] == 1024
     assert call["messages"][0]["content"] == PROVIDER_UTILITY_INSTRUCTION
     state = json.loads(call["messages"][1]["content"])
     assert state["choices"] == ["KEEP", "ABSTAIN", "UNCERTAIN"]
@@ -208,6 +212,52 @@ async def test_truncated_output_records_bounded_diagnostics_and_falls_back_witho
     assert result.response_character_count == 57
     assert len(result.response_digest or "") == 64
     assert result.decisions == ()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_budget_exhaustion_is_two_axis_bounded_fallback() -> None:
+    provider = _Provider(
+        [LLMResponse(
+            content="",
+            finish_reason="length",
+            usage={
+                "prompt_tokens": 851,
+                "completion_tokens": 1024,
+                "reasoning_tokens": 1024,
+            },
+            reasoning_content=None,
+            model="deepseek/test-model",
+        )]
+    )
+    result, _ = await _decide(provider)
+    assert result.outcome is DecisionOutcome.INVALID_RESULT
+    assert result.generation_outcome == UtilityFinishReason.LENGTH.value
+    assert result.payload_outcome == UtilityPayloadOutcome.EMPTY_CONTENT.value
+    assert result.reasoning_mode_requested == "disabled"
+    assert result.reasoning_tokens == 1024
+    assert result.visible_output_tokens == 0
+    assert result.response_character_count == 0
+    assert result.decisions == ()
+
+
+@pytest.mark.asyncio
+async def test_disabled_reasoning_small_structured_json_is_accepted() -> None:
+    provider = _Provider(
+        [LLMResponse(
+            content=_content(("candidate_0", "KEEP", None), ("candidate_1", "ABSTAIN", None)),
+            finish_reason="stop",
+            usage={"prompt_tokens": 40, "completion_tokens": 18, "reasoning_tokens": 0},
+            model="deepseek/test-model",
+        )]
+    )
+    result, _ = await _decide(provider)
+    assert result.outcome is DecisionOutcome.SUCCESS
+    assert result.generation_outcome == UtilityFinishReason.STOP.value
+    assert result.payload_outcome == UtilityPayloadOutcome.VALID_TYPED_JSON.value
+    assert result.reasoning_mode_requested == "disabled"
+    assert result.reasoning_mode_effective == "no_reasoning_observed"
+    assert result.reasoning_tokens == 0
+    assert result.visible_output_tokens == 18
 
 
 @pytest.mark.asyncio
