@@ -140,6 +140,7 @@ class ProviderUtilityBackend:
                     "type": item.candidate_type,
                     "title": item.title,
                     "summary": item.summary,
+                    "preconditions": item.preconditions,
                     "relevance_rank": item.relevance_rank,
                     "relevance_score": item.relevance_score,
                     "applicability_digest": item.applicability_digest,

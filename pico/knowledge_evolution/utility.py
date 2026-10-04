@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from pico.decision_plane.utility import (
+    MAX_UTILITY_PRECONDITIONS_CHARS,
     MAX_UTILITY_QUERY_CHARS,
     MAX_UTILITY_SUMMARY_CHARS,
     MAX_UTILITY_TITLE_CHARS,
@@ -130,6 +131,9 @@ class KnowledgeUtilityCoordinator:
                     relevance_rank=item.rank,
                     relevance_score=item.score,
                     applicability_digest=item.applicability.applicability_digest,
+                    preconditions="\n".join(item.candidate.preconditions)[
+                        :MAX_UTILITY_PRECONDITIONS_CHARS
+                    ],
                 )
                 for item in combined
             ),

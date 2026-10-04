@@ -22,6 +22,7 @@ JEV_UTILITY_SCHEMA_VERSION = 1
 MAX_UTILITY_QUERY_CHARS = 4096
 MAX_UTILITY_TITLE_CHARS = 256
 MAX_UTILITY_SUMMARY_CHARS = 1024
+MAX_UTILITY_PRECONDITIONS_CHARS = 1024
 MAX_UTILITY_REASON_CHARS = 64
 _REASON_CODE = re.compile(r"^[a-z0-9_.-]+$")
 
@@ -41,11 +42,16 @@ class JevUtilityCandidate:
     relevance_rank: int
     relevance_score: float
     applicability_digest: str
+    preconditions: str = ""
 
     def __post_init__(self) -> None:
         if not self.candidate_id or not self.candidate_type:
             raise ValueError("utility candidate identity must be non-empty")
-        if len(self.title) > MAX_UTILITY_TITLE_CHARS or len(self.summary) > MAX_UTILITY_SUMMARY_CHARS:
+        if (
+            len(self.title) > MAX_UTILITY_TITLE_CHARS
+            or len(self.summary) > MAX_UTILITY_SUMMARY_CHARS
+            or len(self.preconditions) > MAX_UTILITY_PRECONDITIONS_CHARS
+        ):
             raise ValueError("utility candidate projection exceeds its bound")
         if self.relevance_rank < 1 or not math.isfinite(self.relevance_score):
             raise ValueError("utility relevance evidence is invalid")
@@ -61,6 +67,7 @@ class JevUtilityCandidate:
             "relevance_rank": self.relevance_rank,
             "relevance_score": self.relevance_score,
             "applicability_digest": self.applicability_digest,
+            "preconditions": self.preconditions,
         }
 
 
