@@ -15,6 +15,16 @@ from pico.tracing import evidence
 
 RUNNER_VERSION = 4
 CONFIG_BOOTSTRAP_VERSION = 1
+ENVIRONMENT_FINGERPRINT_SCHEMA = "pico.environment-fingerprint.v1"
+ENVIRONMENT_FINGERPRINT_VERSION = 1
+_FINGERPRINT_FIELDS = (
+    "python_executable_digest",
+    "python_version",
+    "sys_path_digest",
+    "distribution_digest",
+    "distribution_count",
+    "user_site_enabled",
+)
 
 
 @dataclass(frozen=True)
@@ -106,6 +116,79 @@ class AgentRunRoots:
         }
 
 
+def canonical_environment_fingerprint(value: dict[str, object]) -> dict[str, object]:
+    """Return the single JSON-safe identity used for persistence and equality."""
+
+    missing = tuple(name for name in _FINGERPRINT_FIELDS if name not in value)
+    if missing:
+        raise ValueError(f"environment fingerprint fields missing: {','.join(missing)}")
+    version = value["python_version"]
+    if (
+        not isinstance(version, (tuple, list))
+        or len(version) != 3
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in version)
+    ):
+        raise ValueError("python_version must contain three non-negative integers")
+    digests = {
+        name: value[name]
+        for name in (
+            "python_executable_digest",
+            "sys_path_digest",
+            "distribution_digest",
+        )
+    }
+    if any(
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        for digest in digests.values()
+    ):
+        raise ValueError("environment fingerprint digests must be lowercase SHA-256 values")
+    distribution_count = value["distribution_count"]
+    if (
+        isinstance(distribution_count, bool)
+        or not isinstance(distribution_count, int)
+        or distribution_count < 0
+    ):
+        raise ValueError("distribution_count must be a non-negative integer")
+    if not isinstance(value["user_site_enabled"], bool):
+        raise ValueError("user_site_enabled must be boolean")
+    payload = {
+        "schema": ENVIRONMENT_FINGERPRINT_SCHEMA,
+        "schema_version": ENVIRONMENT_FINGERPRINT_VERSION,
+        **digests,
+        "python_version": list(version),
+        "distribution_count": distribution_count,
+        "user_site_enabled": value["user_site_enabled"],
+    }
+    return {**payload, "fingerprint_digest": canonical_digest(payload)}
+
+
+def environment_fingerprints_equal(
+    left: dict[str, object], right: dict[str, object]
+) -> bool:
+    return (
+        canonical_environment_fingerprint(left)["fingerprint_digest"]
+        == canonical_environment_fingerprint(right)["fingerprint_digest"]
+    )
+
+
+def _canonical_sys_path_digest() -> str:
+    pip_target = os.environ.get("PIP_TARGET")
+    target = Path(pip_target).resolve() if pip_target else None
+    values = []
+    for raw in sys.path:
+        if not raw:
+            continue
+        resolved = Path(raw).resolve()
+        values.append(
+            "<RUN_LOCAL_PIP_TARGET>"
+            if target is not None and resolved == target
+            else str(resolved)
+        )
+    return canonical_digest(tuple(values))
+
+
 def environment_fingerprint() -> dict[str, object]:
     distributions = sorted(
         (dist.metadata.get("Name", "").casefold(), dist.version)
@@ -114,13 +197,13 @@ def environment_fingerprint() -> dict[str, object]:
     )
     payload = {
         "python_executable_digest": canonical_digest(str(Path(sys.executable).resolve())),
-        "python_version": tuple(sys.version_info[:3]),
-        "sys_path_digest": canonical_digest(tuple(str(Path(value).resolve()) for value in sys.path if value)),
+        "python_version": list(sys.version_info[:3]),
+        "sys_path_digest": _canonical_sys_path_digest(),
         "distribution_digest": canonical_digest(distributions),
         "distribution_count": len(distributions),
         "user_site_enabled": bool(site.ENABLE_USER_SITE),
     }
-    return {**payload, "fingerprint_digest": canonical_digest(payload)}
+    return canonical_environment_fingerprint(payload)
 
 
 def verify_trace_canary(
@@ -167,7 +250,11 @@ def verify_trace_canary(
 __all__ = [
     "AgentRunRoots",
     "CONFIG_BOOTSTRAP_VERSION",
+    "ENVIRONMENT_FINGERPRINT_SCHEMA",
+    "ENVIRONMENT_FINGERPRINT_VERSION",
     "RUNNER_VERSION",
+    "canonical_environment_fingerprint",
     "environment_fingerprint",
+    "environment_fingerprints_equal",
     "verify_trace_canary",
 ]

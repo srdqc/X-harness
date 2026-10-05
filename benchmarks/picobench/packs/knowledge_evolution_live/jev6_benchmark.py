@@ -55,15 +55,26 @@ from .jev6_verifiers import verify_task
 from .knowledge import prepare_approved_corpus
 from .metrics import extract_run_metrics
 from .prepare import configuration_identity, resolve_base_commit
-from .run_isolation import AgentRunRoots, environment_fingerprint, verify_trace_canary
+from .run_isolation import (
+    ENVIRONMENT_FINGERPRINT_SCHEMA,
+    ENVIRONMENT_FINGERPRINT_VERSION,
+    AgentRunRoots,
+    canonical_environment_fingerprint,
+    environment_fingerprint,
+    environment_fingerprints_equal,
+    verify_trace_canary,
+)
 from .runner import _changed_paths, _git, _workspace_patch
 from .validity import classify_run_validity
 
-SCHEMA = "pico.jev6b-confirmatory-campaign.v1"
-SCHEMA_VERSION = 1
-RUN_SCHEMA = "pico.jev6b-confirmatory-run.v1"
-REDUCER_SCHEMA = "pico.jev6b-confirmatory-summary.v1"
-REDUCER_VERSION = 1
+SCHEMA = "pico.jev6b-confirmatory-campaign.v2"
+SCHEMA_VERSION = 2
+RUN_SCHEMA = "pico.jev6b-confirmatory-run.v2"
+REDUCER_SCHEMA = "pico.jev6b-confirmatory-summary.v2"
+REDUCER_VERSION = 2
+CAMPAIGN_PREFIX = "jev6b2"
+INVALID_PREDECESSOR_ID = "jev6b-041ed8144ffddbd2"
+INVALIDITY_REASON = "environment_fingerprint_representation_mismatch"
 FROZEN_MANIFEST = Path(__file__).with_name("jev6_frozen_manifest.json")
 HISTORICAL_CAMPAIGNS = (
     "jev4-9168e909e0c47dfb",
@@ -71,6 +82,7 @@ HISTORICAL_CAMPAIGNS = (
     "jev4r2-868dd3997095b407",
     "jev4r3-384e7aefbe9cca17",
     "jev5a-00e65591d2467ac3",
+    INVALID_PREDECESSOR_ID,
 )
 FROZEN_SOURCE_FILES = (
     "jev6_suite.py",
@@ -125,21 +137,6 @@ def _task_by_id(task_id: str):
     return next(task for task in TASKS if task.task_id == task_id)
 
 
-def _stable_environment_identity(value: dict[str, Any]) -> dict[str, Any]:
-    identity = {
-        key: value[key]
-        for key in (
-            "python_executable_digest",
-            "distribution_digest",
-            "distribution_count",
-            "user_site_enabled",
-        )
-    }
-    # JSON round trips tuples as lists; normalize before bootstrap/run comparison.
-    identity["python_version"] = list(value["python_version"])
-    return identity
-
-
 def verify_frozen_suite(repository: Path) -> dict[str, Any]:
     """Recompute every JEV.6A anti-tuning digest without changing frozen files."""
     frozen_bytes = FROZEN_MANIFEST.read_bytes()
@@ -192,17 +189,45 @@ def verify_frozen_suite(repository: Path) -> dict[str, Any]:
 
 def verify_historical_task_blindness(repository: Path) -> dict[str, Any]:
     task_ids = {task.task_id for task in TASKS}
-    exposures: list[tuple[str, str]] = []
+    observed_records: list[dict[str, Any]] = []
+    exposures: list[dict[str, str]] = []
     for path in (repository / ".p3r").glob("*/runs/*.json"):
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if value.get("task_id") in task_ids:
-            exposures.append((path.as_posix(), str(value["task_id"])))
+        if value.get("task_id") not in task_ids:
+            continue
+        agent_turn_started = bool(
+            value.get("turn_id")
+            or value.get("mandatory_evidence", {}).get("complete")
+            or value.get("main_agent_metrics")
+            or value.get("patch_artifact_ref")
+        )
+        provider_calls = value.get("main_agent_metrics", {}).get(
+            "provider_logical_calls", {}
+        ).get("value", 0)
+        exposed = bool(agent_turn_started or provider_calls)
+        row = {
+            "campaign_id": str(value.get("campaign_id", path.parents[1].name)),
+            "task_id": str(value["task_id"]),
+            "run_id": str(value.get("run_id", path.stem)),
+            "agent_turn_started": agent_turn_started,
+            "provider_calls": int(provider_calls or 0),
+            "live_task_exposed": exposed,
+        }
+        observed_records.append(row)
+        if exposed:
+            exposures.append({key: str(item) for key, item in row.items()})
     if exposures:
         raise ValueError("JEV.6 held-out task has prior live Agent exposure")
-    return {"passed": True, "prior_live_agent_exposures": (), "scanned_task_ids": tuple(sorted(task_ids))}
+    return {
+        "passed": True,
+        "live_task_exposure_count": 0,
+        "prior_live_agent_exposures": (),
+        "observed_pre_turn_records": tuple(observed_records),
+        "scanned_task_ids": tuple(sorted(task_ids)),
+    }
 
 
 def _config_identity(config_path: Path) -> dict[str, Any]:
@@ -219,6 +244,24 @@ def _campaign_semantic(freeze: dict[str, Any], config: dict[str, Any]) -> dict[s
         "reducer_schema": REDUCER_SCHEMA,
         "reducer_version": REDUCER_VERSION,
         "campaign_purpose": "claim_eligible_confirmatory_heldout_provider_utility",
+        "campaign_generation": "JEV.6B2",
+        "invalid_predecessor_campaign_id": INVALID_PREDECESSOR_ID,
+        "invalid_predecessor_reason": INVALIDITY_REASON,
+        "claim_eligible": True,
+        "claim_eligibility_reason": (
+            "frozen_before_execution;predecessor_exposed_zero_tasks;"
+            "behavioral_delta_none;infrastructure_canonicalization_only"
+        ),
+        "behavioral_delta": "NONE",
+        "environment_fingerprint_schema": ENVIRONMENT_FINGERPRINT_SCHEMA,
+        "environment_fingerprint_version": ENVIRONMENT_FINGERPRINT_VERSION,
+        "infrastructure_delta_digest": canonical_digest(
+            {
+                "change": "canonical_environment_fingerprint_v1",
+                "behavioral_delta": "NONE",
+                "invalid_predecessor": INVALID_PREDECESSOR_ID,
+            }
+        ),
         "suite_name": SUITE_NAME,
         "suite_version": SUITE_VERSION,
         "base_commit_sha": BASE_COMMIT,
@@ -230,6 +273,7 @@ def _campaign_semantic(freeze: dict[str, Any], config: dict[str, Any]) -> dict[s
         "config_identity_digest": config["config_identity_digest"],
         "config_source_digest": config["config_source_digest"],
         "provider_model_config_digest": config["provider_model_config_digest"],
+        "offline_rehearsal_digest": config.get("offline_rehearsal_digest"),
         "budget": asdict(AGENT_BUDGET),
         "planned_runs": tuple(asdict(item) for item in RUN_ORDER),
         "run_order_digest": RUN_ORDER_DIGEST,
@@ -247,6 +291,8 @@ def prepare_campaign(
     reviewer_id: str,
     *,
     config_path: Path | None = None,
+    rehearsal_path: Path | None = None,
+    rehearsal_mode: bool = False,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     from pico.config.loader import get_config_path
 
@@ -257,9 +303,20 @@ def prepare_campaign(
     blindness = verify_historical_task_blindness(repository)
     config_path = (config_path or get_config_path()).resolve()
     config = _config_identity(config_path)
+    rehearsal = None
+    if not rehearsal_mode:
+        if rehearsal_path is None or not rehearsal_path.is_file():
+            raise ValueError("JEV.6B2 requires a passed offline run-start rehearsal")
+        rehearsal = json.loads(rehearsal_path.read_text(encoding="utf-8"))
+        rehearsal_digest = rehearsal.pop("integrity_digest", None)
+        if rehearsal_digest != canonical_digest(rehearsal) or not rehearsal.get("passed"):
+            raise ValueError("JEV.6B2 rehearsal artifact is invalid")
+        if any(rehearsal.get(name) != 0 for name in ("provider_calls", "agent_turns", "network_calls")):
+            raise ValueError("JEV.6B2 rehearsal performed forbidden live activity")
+        config["offline_rehearsal_digest"] = rehearsal_digest
     semantic = _campaign_semantic(freeze, config)
     semantic_digest = canonical_digest(semantic)
-    campaign_id = f"jev6b-{semantic_digest[:16]}"
+    campaign_id = f"{CAMPAIGN_PREFIX}-{semantic_digest[:16]}"
     root = output_root / campaign_id
     if root.exists():
         raise FileExistsError(f"JEV.6B campaign already exists: {root}")
@@ -272,6 +329,7 @@ def prepare_campaign(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "historical_artifact_digests_before": historical_artifact_digests(repository),
         "frozen_source_digests_before": frozen_source_digests(),
+        "offline_rehearsal": rehearsal,
     }
     manifest["manifest_digest"] = canonical_digest(manifest)
     _store(root).freeze_manifest(manifest)
@@ -286,7 +344,13 @@ def prepare_campaign(
         "config_identity_verified": bootstrap.get("config_identity_digest") == config["config_identity_digest"],
         "config_source_immutable": bootstrap.get("config_source_unchanged") is True,
         "trace_canary_verified": bootstrap.get("trace_canary", {}).get("passed") is True,
-        "environment_fingerprint_recorded": bool(bootstrap.get("stable_environment_identity")),
+        "canonical_environment_fingerprint": (
+            bootstrap.get("canonical_environment_fingerprint", {}).get("schema")
+            == ENVIRONMENT_FINGERPRINT_SCHEMA
+        ),
+        "secret_leak_free": bootstrap.get("secret_leak_free") is True,
+        "heldout_live_exposure_zero": blindness["live_task_exposure_count"] == 0,
+        "offline_run_start_rehearsal": rehearsal_mode or bool(rehearsal and rehearsal["passed"]),
         "no_live_activity": all(bootstrap.get(name) == 0 for name in ("provider_calls", "agent_turns", "network_calls")),
     }
     readiness = {
@@ -329,6 +393,7 @@ def load_manifest(root: Path) -> dict[str, Any]:
             "config_identity_digest": value["config_identity_digest"],
             "config_source_digest": value["config_source_digest"],
             "provider_model_config_digest": value["provider_model_config_digest"],
+            "offline_rehearsal_digest": value.get("offline_rehearsal_digest"),
         },
     )
     if value["campaign_semantic_digest"] != canonical_digest(semantic):
@@ -368,7 +433,7 @@ def _bootstrap_record(root: Path, config_path: Path) -> dict[str, Any]:
         "config_source_digest_after": after,
         "config_source_unchanged": before == after,
         "trace_canary": canary,
-        "stable_environment_identity": _stable_environment_identity(fingerprint),
+        "canonical_environment_fingerprint": canonical_environment_fingerprint(fingerprint),
         "failure_type": failure_type,
         "provider_calls": 0,
         "agent_turns": 0,
@@ -379,6 +444,8 @@ def _bootstrap_record(root: Path, config_path: Path) -> dict[str, Any]:
 
 
 def run_bootstrap(repository: Path, root: Path, config_path: Path) -> dict[str, Any]:
+    from pico.config.loader import load_config
+
     roots = AgentRunRoots.create(root, "config-bootstrap", 0)
     roots.prepare_non_worktree_roots()
     artifact = root / "config-bootstrap.json"
@@ -408,6 +475,18 @@ def run_bootstrap(repository: Path, root: Path, config_path: Path) -> dict[str, 
     if digest != canonical_digest(record):
         raise ValueError("JEV.6B bootstrap integrity mismatch")
     record["integrity_digest"] = digest
+    secret = load_config(config_path).get_api_key(load_manifest(root)["actual_model_id"])
+    persisted = canonical_json(
+        {"manifest": load_manifest(root), "bootstrap": record, "command": "_bootstrap"}
+    )
+    for path in roots.trace.rglob("*"):
+        if path.is_file():
+            persisted += path.read_text(encoding="utf-8", errors="replace")
+    record["secret_leak_free"] = not secret or secret not in persisted
+    record["passed"] = bool(record["passed"] and record["secret_leak_free"])
+    record.pop("integrity_digest", None)
+    record["integrity_digest"] = canonical_digest(record)
+    _store(root).write_summary(artifact, record)
     if not record["passed"]:
         raise RuntimeError("JEV.6B child bootstrap did not pass")
     return record
@@ -422,10 +501,120 @@ def _load_readiness(root: Path) -> dict[str, Any]:
     return value
 
 
+def rehearse_run_start(
+    repository: Path,
+    reviewer_id: str,
+    artifact_path: Path,
+    *,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Exercise the production child path and stop immediately before Agent Turn."""
+    from pico.config.loader import get_config_path
+
+    config_path = (config_path or get_config_path()).resolve()
+    predecessor_before = _tree_digest(repository / ".p3r" / INVALID_PREDECESSOR_ID)
+    temp_parent = repository / ".tmp"
+    temp_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="jev6b2-rehearsal-", dir=temp_parent) as temporary:
+        root, manifest, readiness = prepare_campaign(
+            repository,
+            Path(temporary),
+            reviewer_id,
+            config_path=config_path,
+            rehearsal_mode=True,
+        )
+        reloaded = load_manifest(root)
+        planned = reloaded["planned_runs"][0]
+        roots = AgentRunRoots.create(root, planned["run_id"], planned["order"])
+        roots.prepare_non_worktree_roots()
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "benchmarks.picobench.packs.knowledge_evolution_live.jev6_benchmark",
+                "_rehearse-one",
+                "--repository",
+                str(repository),
+                "--campaign-root",
+                str(root),
+                "--run-id",
+                planned["run_id"],
+                "--reviewer-id",
+                reviewer_id,
+                "--config-path",
+                str(config_path),
+            ],
+            cwd=repository,
+            env=roots.child_environment(),
+            check=False,
+        )
+        if completed.returncode != 0 or not roots.artifact.is_file():
+            raise RuntimeError("JEV.6B2 offline run-start child failed")
+        record = _store(root).read_json(roots.artifact)
+        digest = record.pop("integrity_digest", None)
+        if digest != canonical_digest(record):
+            raise ValueError("JEV.6B2 rehearsal child integrity mismatch")
+        record["integrity_digest"] = digest
+        bootstrap = _store(root).read_json(root / "config-bootstrap.json")
+        bootstrap_digest = bootstrap.pop("integrity_digest", None)
+        if bootstrap_digest != canonical_digest(bootstrap):
+            raise ValueError("JEV.6B2 rehearsal bootstrap integrity mismatch")
+        canonical_match = environment_fingerprints_equal(
+            record["environment_fingerprint"],
+            bootstrap["canonical_environment_fingerprint"],
+        )
+        checks = {
+            "freeze_verification": readiness["checks"]["freeze_verified"],
+            "heldout_exposure_zero": readiness["checks"]["heldout_live_exposure_zero"],
+            "manifest_json_round_trip": manifest["manifest_digest"] == reloaded["manifest_digest"],
+            "bootstrap": bootstrap["passed"],
+            "parent_child_config_identity": record["pre_run_checks"]["config_identity"],
+            "canonical_environment_identity": canonical_match,
+            "environment_drift_false": record["pre_run_checks"]["environment_fingerprint"],
+            "trace_canary": record["trace_canary"]["passed"],
+            "run_local_roots": record["pre_run_checks"]["run_local_evidence_root"],
+            "python_no_user_site": record["pre_run_checks"]["python_no_user_site"],
+            "mandatory_pre_run_evidence": record["mandatory_pre_run_evidence"]["complete"],
+            "live_ready_handoff": record["live_ready_handoff"],
+            "first_run_identity": planned == tuple(asdict(item) for item in RUN_ORDER)[0],
+            "secret_leak_free": bootstrap["secret_leak_free"],
+            "predecessor_immutable": predecessor_before
+            == _tree_digest(repository / ".p3r" / INVALID_PREDECESSOR_ID),
+        }
+        result = {
+            "schema": "pico.jev6b2-run-start-rehearsal.v1",
+            "campaign_generation": "JEV.6B2",
+            "passed": all(checks.values()),
+            "checks": checks,
+            "first_planned_run": planned,
+            "canonical_parent_identity": bootstrap["canonical_environment_fingerprint"],
+            "canonical_child_identity": canonical_environment_fingerprint(
+                record["environment_fingerprint"]
+            ),
+            "provider_calls": record["provider_calls"],
+            "agent_turns": record["agent_turns"],
+            "network_calls": record["network_calls"],
+            "live_task_exposure_count": readiness["historical_task_blindness"][
+                "live_task_exposure_count"
+            ],
+            "claim_eligible": all(checks.values()),
+            "invalid_predecessor_campaign_id": INVALID_PREDECESSOR_ID,
+            "behavioral_delta": "NONE",
+        }
+    if not result["passed"]:
+        raise RuntimeError("JEV.6B2 offline full run-start rehearsal failed")
+    result["integrity_digest"] = canonical_digest(result)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    if artifact_path.exists():
+        raise FileExistsError("JEV.6B2 rehearsal artifact already exists")
+    artifact_path.write_text(canonical_json(result), encoding="utf-8")
+    return result
+
+
 def _infra_record(manifest: dict[str, Any], planned: dict[str, Any], reason: str) -> dict[str, Any]:
     record = {
         "schema": RUN_SCHEMA,
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "campaign_id": manifest["campaign_id"],
         **planned,
         "run_validity": "infra_invalid",
@@ -639,7 +828,7 @@ async def _execute_turn(
     combined = _combined_cost(main, utility)
     record = {
         "schema": RUN_SCHEMA,
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "campaign_id": manifest["campaign_id"],
         **planned,
         "workspace_identity": f"git:{BASE_COMMIT}:{planned['run_id']}",
@@ -685,6 +874,7 @@ def execute_one(
     reviewer_id: str,
     *,
     config_path: Path,
+    stop_before_agent_turn: bool = False,
 ) -> dict[str, Any]:
     run_id = planned["run_id"]
     roots = AgentRunRoots.create(root, run_id, planned["order"])
@@ -698,7 +888,9 @@ def execute_one(
     if bootstrap_digest != canonical_digest(bootstrap):
         raise ValueError("JEV.6B bootstrap integrity mismatch")
     fingerprint = environment_fingerprint()
-    env_match = _stable_environment_identity(fingerprint) == bootstrap["stable_environment_identity"]
+    env_match = environment_fingerprints_equal(
+        fingerprint, bootstrap["canonical_environment_fingerprint"]
+    )
     canary = verify_trace_canary(
         roots.trace,
         canary_id=f"{manifest['campaign_id']}:{run_id}:agent-canary",
@@ -714,6 +906,15 @@ def execute_one(
         "run_local_evidence_root": str(Path(os.environ.get("PICO_HOME", "")).resolve()).startswith(str(roots.state.resolve())),
         "python_no_user_site": os.environ.get("PYTHONNOUSERSITE") == "1",
     }
+    mandatory_pre_run = {
+        "complete": all(prechecks.values()),
+        "config_identity_digest": config.get("config_identity_digest"),
+        "environment_fingerprint_digest": canonical_environment_fingerprint(fingerprint)[
+            "fingerprint_digest"
+        ],
+        "trace_canary_event_count": canary["event_count"],
+        "run_root_identity_digest": canonical_digest(roots.public_identity()),
+    }
     if not all(prechecks.values()):
         record = _infra_record(manifest, planned, "pre_run_canary_failure")
         record.update(
@@ -722,6 +923,7 @@ def execute_one(
             isolation_roots=roots.public_identity(),
             child_process_id=os.getpid(),
             environment_fingerprint=fingerprint,
+            mandatory_pre_run_evidence=mandatory_pre_run,
         )
         record["integrity_digest"] = canonical_digest(
             {key: value for key, value in record.items() if key != "integrity_digest"}
@@ -734,9 +936,34 @@ def execute_one(
         record = _infra_record(manifest, planned, "worktree_setup_failure")
     else:
         try:
-            record = asyncio.run(
-                _execute_turn(root, manifest, planned, roots.worktree, roots.state, reviewer_id)
-            )
+            if stop_before_agent_turn:
+                record = {
+                    "schema": "pico.jev6b2-run-start-rehearsal.v1",
+                    "schema_version": 1,
+                    "campaign_id": manifest["campaign_id"],
+                    **planned,
+                    "run_validity": "valid",
+                    "infra_invalid_reason": None,
+                    "run_outcome": "LIVE_READY_HANDOFF",
+                    "verified_success": False,
+                    "verifier_findings": (),
+                    "main_agent_metrics": {},
+                    "utility_metrics": {},
+                    "combined_provider_cost": {},
+                    "changed_paths": (),
+                    "typesafe_enabled": False,
+                    "provider_id": config["provider_id"],
+                    "model_id": config["model_id"],
+                    "live_ready_handoff": True,
+                    "agent_turns": 0,
+                    "provider_calls": 0,
+                    "network_calls": 0,
+                    "mandatory_pre_run_evidence": mandatory_pre_run,
+                }
+            else:
+                record = asyncio.run(
+                    _execute_turn(root, manifest, planned, roots.worktree, roots.state, reviewer_id)
+                )
         except Exception as exc:  # noqa: BLE001 - immutable host boundary
             record = _infra_record(manifest, planned, "benchmark_host_failure")
             record["bounded_host_failure_type"] = type(exc).__name__
@@ -749,6 +976,7 @@ def execute_one(
         isolation_roots=roots.public_identity(),
         child_process_id=os.getpid(),
         environment_fingerprint=fingerprint,
+        mandatory_pre_run_evidence=mandatory_pre_run,
     )
     record["integrity_digest"] = canonical_digest(
         {key: value for key, value in record.items() if key != "integrity_digest"}
@@ -837,7 +1065,9 @@ def run_campaign(
         record.pop("integrity_digest", None)
         record["parent_environment_before"] = parent_before
         record["parent_environment_after"] = parent_after
-        record["environment_drift_detected"] = parent_before["fingerprint_digest"] != parent_after["fingerprint_digest"]
+        record["environment_drift_detected"] = not environment_fingerprints_equal(
+            parent_before, parent_after
+        )
         record["config_source_unchanged"] = config_before == config_after == manifest["config_source_digest"]
         if process.returncode != 0:
             record.update(run_validity="infra_invalid", infra_invalid_reason="benchmark_host_failure", verified_success=False)
@@ -1110,6 +1340,13 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--repository", type=Path, default=Path.cwd())
     prepare.add_argument("--output-root", type=Path, default=Path(".p3r"))
     prepare.add_argument("--reviewer-id", required=True)
+    prepare.add_argument("--rehearsal-artifact", type=Path, required=True)
+    rehearse = commands.add_parser("rehearse")
+    rehearse.add_argument("--repository", type=Path, default=Path.cwd())
+    rehearse.add_argument("--reviewer-id", required=True)
+    rehearse.add_argument(
+        "--artifact", type=Path, default=Path(".p3r/jev6b2-prelive-rehearsal.json")
+    )
     run = commands.add_parser("run")
     run.add_argument("--repository", type=Path, default=Path.cwd())
     run.add_argument("--campaign-root", type=Path, required=True)
@@ -1125,6 +1362,12 @@ def build_parser() -> argparse.ArgumentParser:
     internal.add_argument("--reviewer-id", required=True)
     internal.add_argument("--config-path", type=Path, required=True)
     internal.add_argument("--execute-live", action="store_true")
+    rehearse_one = commands.add_parser("_rehearse-one")
+    rehearse_one.add_argument("--repository", type=Path, required=True)
+    rehearse_one.add_argument("--campaign-root", type=Path, required=True)
+    rehearse_one.add_argument("--run-id", required=True)
+    rehearse_one.add_argument("--reviewer-id", required=True)
+    rehearse_one.add_argument("--config-path", type=Path, required=True)
     bootstrap = commands.add_parser("_bootstrap")
     bootstrap.add_argument("--repository", type=Path, required=True)
     bootstrap.add_argument("--campaign-root", type=Path, required=True)
@@ -1136,9 +1379,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "prepare":
         root, manifest, readiness = prepare_campaign(
-            args.repository.resolve(), args.output_root.resolve(), args.reviewer_id
+            args.repository.resolve(), args.output_root.resolve(), args.reviewer_id,
+            rehearsal_path=args.rehearsal_artifact.resolve(),
         )
         print(canonical_json({"campaign_id": manifest["campaign_id"], "campaign_root": root, "readiness": readiness, "provider_calls": 0}))
+        return 0
+    if args.command == "rehearse":
+        result = rehearse_run_start(
+            args.repository.resolve(), args.reviewer_id, args.artifact.resolve()
+        )
+        print(canonical_json(result))
         return 0
     if args.command == "run":
         completed = run_campaign(
@@ -1171,6 +1421,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_path=args.config_path.resolve(),
         )
         return 0 if record["run_validity"] != "infra_invalid" else 2
+    if args.command == "_rehearse-one":
+        from pico.config.loader import set_config_path
+
+        set_config_path(args.config_path.resolve())
+        root = args.campaign_root.resolve()
+        manifest = load_manifest(root)
+        planned = next(item for item in manifest["planned_runs"] if item["run_id"] == args.run_id)
+        record = execute_one(
+            args.repository.resolve(),
+            root,
+            manifest,
+            planned,
+            args.reviewer_id,
+            config_path=args.config_path.resolve(),
+            stop_before_agent_turn=True,
+        )
+        return 0 if record.get("live_ready_handoff") else 2
     raise AssertionError("unreachable")
 
 

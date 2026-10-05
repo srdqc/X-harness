@@ -12,9 +12,12 @@ import pytest
 
 from benchmarks.picobench.packs.knowledge_evolution_live import jev4_pilot
 from benchmarks.picobench.packs.knowledge_evolution_live.run_isolation import (
+    ENVIRONMENT_FINGERPRINT_SCHEMA,
     RUNNER_VERSION,
     AgentRunRoots,
+    canonical_environment_fingerprint,
     environment_fingerprint,
+    environment_fingerprints_equal,
 )
 from benchmarks.picobench.packs.knowledge_evolution_live.validity import classify_run_validity
 from pico.sandbox.direct_executor import _baseline_env
@@ -308,6 +311,62 @@ def test_environment_fingerprint_detects_bounded_sys_path_drift(monkeypatch: pyt
     after = environment_fingerprint()
     assert before["fingerprint_digest"] != after["fingerprint_digest"]
     assert before["distribution_digest"] == after["distribution_digest"]
+
+
+def test_environment_fingerprint_json_round_trip_is_canonical() -> None:
+    original = environment_fingerprint()
+    reloaded = json.loads(json.dumps(original))
+    assert canonical_environment_fingerprint(original) == canonical_environment_fingerprint(reloaded)
+    assert environment_fingerprints_equal(original, reloaded)
+    assert original["schema"] == ENVIRONMENT_FINGERPRINT_SCHEMA
+    assert isinstance(original["python_version"], list)
+
+
+def test_environment_fingerprint_tuple_list_is_the_only_sequence_normalization() -> None:
+    original = environment_fingerprint()
+    tuple_version = {**original, "python_version": tuple(original["python_version"])}
+    assert environment_fingerprints_equal(original, tuple_version)
+    with pytest.raises(ValueError, match="distribution_count"):
+        canonical_environment_fingerprint({**original, "distribution_count": "121"})
+    with pytest.raises(ValueError, match="user_site_enabled"):
+        canonical_environment_fingerprint({**original, "user_site_enabled": 0})
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("python_version", [99, 1, 2]),
+        ("sys_path_digest", "1" * 64),
+        ("distribution_digest", "2" * 64),
+        ("python_executable_digest", "3" * 64),
+    ),
+)
+def test_environment_fingerprint_true_drift_remains_fail_closed(
+    field: str, replacement: object
+) -> None:
+    original = environment_fingerprint()
+    changed = {**original, field: replacement}
+    assert not environment_fingerprints_equal(original, changed)
+
+
+def test_fresh_children_share_canonical_environment_identity(tmp_path: Path) -> None:
+    code = (
+        "from benchmarks.picobench.canonical import canonical_json;"
+        "from benchmarks.picobench.packs.knowledge_evolution_live.run_isolation "
+        "import environment_fingerprint;print(canonical_json(environment_fingerprint()))"
+    )
+    values = []
+    for _ in range(2):
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path.cwd(),
+            check=True,
+            capture_output=True,
+            text=True,
+            env=AgentRunRoots.create(tmp_path, f"child-{len(values)}", len(values) + 1).child_environment(),
+        )
+        values.append(json.loads(completed.stdout))
+    assert environment_fingerprints_equal(values[0], values[1])
 
 
 def test_historical_campaign_loads_and_reduces_from_copy(tmp_path: Path) -> None:

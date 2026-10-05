@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,9 @@ from benchmarks.picobench.packs.knowledge_evolution_live.jev6_suite import (
     RUN_ORDER,
     RUN_ORDER_DIGEST,
     Arm,
+)
+from benchmarks.picobench.packs.knowledge_evolution_live.run_isolation import (
+    canonical_environment_fingerprint,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,12 +120,58 @@ def test_environment_identity_survives_json_round_trip() -> None:
     fingerprint = {
         "python_executable_digest": "a" * 64,
         "python_version": (3, 12, 14),
+        "sys_path_digest": "c" * 64,
         "distribution_digest": "b" * 64,
         "distribution_count": 121,
         "user_site_enabled": False,
     }
-    identity = benchmark._stable_environment_identity(fingerprint)
+    identity = canonical_environment_fingerprint(fingerprint)
     assert json.loads(json.dumps(identity)) == identity
+
+
+def test_invalid_predecessor_pre_turn_record_is_not_heldout_exposure(
+    tmp_path: Path,
+) -> None:
+    predecessor = ROOT / ".p3r" / benchmark.INVALID_PREDECESSOR_ID
+    copied = tmp_path / ".p3r" / benchmark.INVALID_PREDECESSOR_ID
+    shutil.copytree(predecessor / "runs", copied / "runs")
+    audit = benchmark.verify_historical_task_blindness(tmp_path)
+    predecessor_records = tuple(
+        row
+        for row in audit["observed_pre_turn_records"]
+        if row["campaign_id"] == benchmark.INVALID_PREDECESSOR_ID
+    )
+    assert audit["live_task_exposure_count"] == 0
+    assert predecessor_records
+    assert all(row["agent_turn_started"] is False for row in predecessor_records)
+    assert all(row["provider_calls"] == 0 for row in predecessor_records)
+    assert all(row["live_task_exposed"] is False for row in predecessor_records)
+
+
+def test_campaign_generation_freezes_lineage_and_infrastructure_only_delta() -> None:
+    frozen = json.loads(FROZEN.read_text(encoding="utf-8"))
+    semantic = benchmark._campaign_semantic(
+        {
+            "digests": frozen["anti_tuning_digests"],
+            "frozen_manifest_file_digest": "d" * 64,
+            "selector_audit": {
+                "task_selected_candidate_ids": frozen["selector_audit"][
+                    "selected_candidate_ids"
+                ]
+            },
+        },
+        {
+            "config_identity_digest": "a" * 64,
+            "config_source_digest": "b" * 64,
+            "provider_model_config_digest": "c" * 64,
+            "offline_rehearsal_digest": "e" * 64,
+        },
+    )
+    assert benchmark.CAMPAIGN_PREFIX == "jev6b2"
+    assert semantic["campaign_generation"] == "JEV.6B2"
+    assert semantic["invalid_predecessor_campaign_id"] == benchmark.INVALID_PREDECESSOR_ID
+    assert semantic["claim_eligible"] is True
+    assert semantic["typesafe_enabled"] is False
 
 
 def test_utility_decision_semantics_do_not_conflate_fallback_and_abstain() -> None:
