@@ -105,6 +105,7 @@
         "tests/test_jev4_agent_pilot.py",
         "tests/test_jev6_heldout_suite.py",
         "tests/test_jev6b_confirmatory.py",
+        "tests/test_jev6_candidate_identity.py",
         "tests/test_execution_receipts.py",
         "tests/test_knowledge_canonicalization.py",
         "tests/test_picobench_runtime_baseline.py",

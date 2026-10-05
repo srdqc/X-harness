@@ -9,7 +9,9 @@ from typing import Any
 from benchmarks.picobench.canonical import canonical_digest
 from pico.knowledge_evolution import (
     ApplicabilityEnvironment,
+    CandidateEvidenceIdentity,
     CandidateType,
+    KnowledgeLifecycleManager,
     KnowledgeRecordStore,
     KnowledgeRetriever,
     KnowledgeSelectionMode,
@@ -173,4 +175,127 @@ def evaluate_official_selectivity(
     )
 
 
-__all__ = ["evaluate_official_selectivity", "evaluate_selectivity"]
+def build_corpus_identity_catalog(
+    *,
+    state_root: Path,
+    workspace: Path,
+    reviewer_id: str = "human:offline",
+) -> tuple[CandidateEvidenceIdentity, ...]:
+    """Build the frozen corpus through production APIs and retain all identity layers."""
+
+    candidate_ids = prepare_approved_corpus(
+        state_root=state_root,
+        workspace=workspace,
+        reviewer_id=reviewer_id,
+    )
+    store = KnowledgeRecordStore(state_root)
+    values: list[CandidateEvidenceIdentity] = []
+    for item, candidate_id in zip(CORPUS, candidate_ids, strict=True):
+        candidate = store.read_candidate(candidate_id)
+        if candidate is None:
+            raise RuntimeError("prepared corpus candidate is missing")
+        lifecycle = KnowledgeLifecycleManager(store).rebuild(candidate_id)
+        values.append(
+            CandidateEvidenceIdentity.from_candidate(
+                candidate,
+                lifecycle_state=lifecycle.state,
+                portable_label=item.corpus_id,
+            )
+        )
+    return tuple(values)
+
+
+def evaluate_candidate_identity_audit(
+    *,
+    state_root: Path,
+    workspace: Path,
+    tasks: tuple[LiveTask, ...],
+    reviewer_id: str = "human:offline",
+) -> dict[str, Any]:
+    """Run TASK_RELEVANCE_V1 and persist ordered durable+semantic identities."""
+
+    catalog = build_corpus_identity_catalog(
+        state_root=state_root,
+        workspace=workspace,
+        reviewer_id=reviewer_id,
+    )
+    by_id = {item.candidate_id: item for item in catalog}
+    store = KnowledgeRecordStore(state_root)
+    scope = RepositoryScopeResolver(workspace, state_root).resolve().identity
+    if scope is None:
+        raise RuntimeError("candidate identity audit requires repository scope")
+    task_results: dict[str, Any] = {}
+    for task in tasks:
+        selected: list[CandidateEvidenceIdentity] = []
+        evidence: list[dict[str, Any]] = []
+        turn_id = f"identity-audit-{task.task_id}"
+        for index, candidate_types in enumerate(
+            (
+                (CandidateType.MEMORY_FACT, CandidateType.EXPERIENCE),
+                (CandidateType.SKILL_CANDIDATE,),
+            )
+        ):
+            retrieval_id = f"identity-audit-{task.task_id}-{index}"
+            retriever = KnowledgeRetriever(
+                store,
+                ApplicabilityEnvironment(
+                    scope.repository_scope_id,
+                    workspace,
+                    available_tools=("read_file",),
+                ),
+                max_candidates=len(CORPUS),
+                selection_mode=KnowledgeSelectionMode.TASK_RELEVANCE_V1,
+            )
+            items, _ = retriever.retrieve(
+                task.prompt,
+                retrieval_id=retrieval_id,
+                turn_id=turn_id,
+                candidate_types=candidate_types,
+                created_at="2026-10-03T00:00:00Z",
+            )
+            selected.extend(by_id[item.candidate.candidate_id] for item in items)
+            receipts = store.list_relevance_selections(turn_id=turn_id)
+            for receipt in receipts:
+                if receipt.retrieval_id != retrieval_id:
+                    continue
+                evidence.append(
+                    {
+                        "candidate_id": receipt.candidate_id,
+                        "portable_label": by_id[receipt.candidate_id].portable_label,
+                        "semantic_digest": by_id[receipt.candidate_id].semantic_digest,
+                        "rank": receipt.rank,
+                        "relevance_score": receipt.relevance_score,
+                        "meaningful_overlap": receipt.meaningful_overlap,
+                        "identifier_overlap": receipt.identifier_overlap,
+                        "decision": receipt.decision.value,
+                        "reason": receipt.reason.value,
+                        "selector_config_digest": receipt.selector_config_digest,
+                    }
+                )
+        task_results[task.task_id] = {
+            "ordered_selected_identities": tuple(item.to_dict() for item in selected),
+            "selected_candidate_ids": tuple(item.candidate_id for item in selected),
+            "selected_portable_labels": tuple(
+                item.portable_label for item in selected
+            ),
+            "selection_evidence": tuple(evidence),
+        }
+    payload = {
+        "schema": "pico.jev6-selector-identity-audit.v1",
+        "schema_version": 1,
+        "historical_corpus_digest": corpus_digest(),
+        "canonical_corpus_identity_digest": canonical_digest(
+            tuple(item.to_dict() for item in catalog)
+        ),
+        "selector_version": 1,
+        "tasks": task_results,
+    }
+    return {**payload, "semantic_digest": canonical_digest(payload)}
+
+
+__all__ = [
+    "build_corpus_identity_catalog",
+    "evaluate_candidate_identity_audit",
+    "evaluate_official_selectivity",
+    "evaluate_selectivity",
+]

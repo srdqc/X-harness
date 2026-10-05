@@ -35,6 +35,12 @@ from .extraction import (
     build_extraction_context,
     extract_candidates,
 )
+from .identity import (
+    CANDIDATE_EVIDENCE_IDENTITY_SCHEMA,
+    CANDIDATE_EVIDENCE_IDENTITY_VERSION,
+    CandidateEvidenceIdentity,
+    ordered_candidate_evidence_equal,
+)
 from .index import CandidateComparison, CandidateIndex, CandidateRelation
 from .lifecycle import (
     LEGAL_TRANSITIONS,
@@ -119,11 +125,14 @@ __all__ = [
     "ApplicabilityStatus",
     "CandidateEligibilityInput",
     "CandidateEligibilityResult",
+    "CandidateEvidenceIdentity",
     "CandidateExtractionOutcome",
     "CandidateComparison",
     "CandidateIndex",
     "CandidateRelation",
     "CandidateType",
+    "CANDIDATE_EVIDENCE_IDENTITY_SCHEMA",
+    "CANDIDATE_EVIDENCE_IDENTITY_VERSION",
     "CandidateValidationResult",
     "CanonicalProposal",
     "ContentClass",
@@ -191,6 +200,7 @@ __all__ = [
     "materialized_skill_root",
     "normalize_git_remote",
     "normalize_project_key",
+    "ordered_candidate_evidence_equal",
     "persist_usage",
     "select_relevant_candidates",
     "CandidateRelevanceDocument",

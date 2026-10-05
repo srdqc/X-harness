@@ -15,7 +15,7 @@ from benchmarks.picobench.canonical import canonical_digest
 from .jev6_fixtures import apply_reference, reference_digest
 from .jev6_suite import BASE_COMMIT, TASKS
 from .jev6_verifiers import verify_task
-from .selectivity import evaluate_selectivity
+from .selectivity import evaluate_candidate_identity_audit, evaluate_selectivity
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,19 @@ def evaluate_selector_audit(*, state_root: Path, workspace: Path) -> dict[str, A
         "selection_distribution_policy": "reported_as_observed_without_prompt_rewriting",
     }
     return {**result, "semantic_digest": canonical_digest(result)}
+
+
+def evaluate_selector_identity_audit(
+    *, state_root: Path, workspace: Path
+) -> dict[str, Any]:
+    """Canonical v1 evidence for a future suite freeze; JEV.6A stays immutable."""
+
+    return evaluate_candidate_identity_audit(
+        state_root=state_root,
+        workspace=workspace,
+        tasks=TASKS,
+        reviewer_id="human:jev6-offline",
+    )
 
 
 def _git(repository: Path, *args: str) -> None:
@@ -130,6 +143,7 @@ __all__ = [
     "SolvabilityResult",
     "audit_mechanical_solvability",
     "evaluate_selector_audit",
+    "evaluate_selector_identity_audit",
     "historical_campaign_classifications",
     "solvability_payload",
 ]

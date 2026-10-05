@@ -27,7 +27,11 @@ from benchmarks.picobench.canonical import canonical_digest, canonical_json, to_
 from benchmarks.picobench.host import RecordingOutlet, RuntimeTrialHost
 from benchmarks.picobench.schema import ExperimentRef
 from pico.config.paths import RuntimePaths
-from pico.knowledge_evolution import KnowledgeSelectionMode
+from pico.knowledge_evolution import (
+    CandidateEvidenceIdentity,
+    KnowledgeSelectionMode,
+    ordered_candidate_evidence_equal,
+)
 from pico.spine.message import ChatType, Source
 from pico.spine.turn import Origin, TurnRequest
 from pico.tracing import evidence
@@ -985,10 +989,34 @@ def execute_one(
     return record
 
 
+def _selection_identity_matches(
+    manifest: dict[str, Any], record: dict[str, Any]
+) -> bool:
+    """Use canonical v1 evidence when present; preserve historical v1 semantics."""
+
+    frozen = manifest.get("frozen_selected_candidate_evidence")
+    if frozen is None:
+        expected = tuple(
+            manifest["frozen_selected_candidate_ids"][record["task_id"]]
+        )
+        return tuple(record.get("relevance_selected_candidate_ids", ())) == expected
+    try:
+        expected_identity = tuple(
+            CandidateEvidenceIdentity.from_dict(item)
+            for item in frozen[record["task_id"]]
+        )
+        actual_identity = tuple(
+            CandidateEvidenceIdentity.from_dict(item)
+            for item in record.get("relevance_selected_candidate_evidence", ())
+        )
+        return ordered_candidate_evidence_equal(expected_identity, actual_identity)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _selection_failure(manifest: dict[str, Any], record: dict[str, Any]) -> str | None:
     expected = tuple(manifest["frozen_selected_candidate_ids"][record["task_id"]])
-    actual = tuple(record.get("relevance_selected_candidate_ids", ()))
-    if actual != expected:
+    if not _selection_identity_matches(manifest, record):
         return "selector_drift"
     utility_calls = int(record.get("utility_metrics", {}).get("utility_logical_calls", 0))
     if record["arm"] == Arm.TASK_RELEVANCE_V1_PROVIDER_UTILITY.value:
@@ -1233,7 +1261,9 @@ def reduce_campaign(root: Path, repository: Path) -> dict[str, Any]:
     )
     fairness_checks = {
         "complete_frozen_order": tuple(item["run_id"] for item in runs) == tuple(item["run_id"] for item in manifest["planned_runs"]),
-        "selector_identity": all(tuple(item.get("relevance_selected_candidate_ids", ())) == tuple(manifest["frozen_selected_candidate_ids"][item["task_id"]]) for item in runs),
+        "selector_identity": all(
+            _selection_identity_matches(manifest, item) for item in runs
+        ),
         "provider_model_identity": all(item.get("provider_id") == PROVIDER_ID and item.get("model_id") == MODEL_ID for item in runs),
         "zero_selection_controls": all(not item.get("relevance_selected_candidate_ids") and int(item.get("utility_metrics", {}).get("utility_logical_calls", 0)) == 0 for item in c_runs if item["task_id"] in zero_ids),
     }
