@@ -1,0 +1,30 @@
+{
+  "schema": "pico.jev6-heldout-exposure-snapshot.v3",
+  "schema_version": 3,
+  "suite_version": "jev6-held-out-v3",
+  "source_ledger": "jev6_v3_exposure_ledger.json",
+  "source_ledger_digest": "27f118eccc605a1fb194827f025e15208b25d09ca23c3b2bbc6af5acb2ab15e5",
+  "tasks": {
+    "jev6-nav-01-trace-event-reader": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6v2-nav-02-plugin-contributions": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6-impl-01-safe-segment-bound": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6-impl-02-delivery-result-flags": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6-debug-01-bm25-parameters": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6-debug-02-decision-receipt-identity": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6-int-01-public-turn-events": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6v3-int-02-provider-resolution": {"live_agent_exposed": false, "source": "new_task_declaration"}
+  },
+  "retired_history": {
+    "jev6-nav-02-skill-variants": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6b2-ec0eb2cafd43defe",
+      "run_id": "jev6-nav-02-skill-variants-task_relevance_v1-rep1"
+    },
+    "jev6-int-02-resolve-available-skill": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6v2b-9627a434d427637a",
+      "run_id": "jev6-int-02-resolve-available-skill-task_relevance_v1-rep1"
+    }
+  },
+  "all_v3_tasks_unexposed": true
+}

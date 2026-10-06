@@ -1,0 +1,31 @@
+{
+  "schema": "pico.jev6-heldout-exposure-ledger.v2",
+  "schema_version": 2,
+  "predecessor_ledger": "jev6_exposure_ledger.json",
+  "predecessor_ledger_sha256": "7f078f480a23aa9bdd3e1b588292be2b20ee12d8171cbdc8c2e5276365e1b437",
+  "tasks": {
+    "jev6-nav-01-trace-event-reader": {"live_agent_exposed": false},
+    "jev6-nav-02-skill-variants": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6b2-ec0eb2cafd43defe",
+      "run_id": "jev6-nav-02-skill-variants-task_relevance_v1-rep1"
+    },
+    "jev6v2-nav-02-plugin-contributions": {"live_agent_exposed": false},
+    "jev6-impl-01-safe-segment-bound": {"live_agent_exposed": false},
+    "jev6-impl-02-delivery-result-flags": {"live_agent_exposed": false},
+    "jev6-debug-01-bm25-parameters": {"live_agent_exposed": false},
+    "jev6-debug-02-decision-receipt-identity": {"live_agent_exposed": false},
+    "jev6-int-01-public-turn-events": {"live_agent_exposed": false},
+    "jev6-int-02-resolve-available-skill": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6v2b-9627a434d427637a",
+      "run_id": "jev6-int-02-resolve-available-skill-task_relevance_v1-rep1"
+    },
+    "jev6v3-int-02-provider-resolution": {
+      "live_agent_exposed": false,
+      "source": "new_task_declaration"
+    }
+  },
+  "pristine_confirmatory_reuse_allowed": false,
+  "reason": "JEV.6V2B exposed int-02 during an invalid run; exposure remains permanent."
+}
