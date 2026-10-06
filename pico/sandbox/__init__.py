@@ -15,13 +15,17 @@ Privileges，不能把统一接口误认为已经建立隔离边界。
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from loguru import logger
-
-from pico.sandbox.config import SandboxConfig
 from pico.sandbox.direct_executor import DirectExecutor
 from pico.sandbox.interfaces import ExecResult, SandboxExecutor, SandboxInitError
+
+if TYPE_CHECKING:
+    from pico.sandbox.config import SandboxConfig
+
+logger = logging.getLogger(__name__)
 
 # 每个进程只警告一次：进程生命周期内会创建多个执行器（AgentLoop 及各子 Agent），
 # 但“未使用沙箱”的风险提示只需输出一次。
@@ -35,6 +39,15 @@ __all__ = [
     "DirectExecutor",
     "build_executor",
 ]
+
+
+def __getattr__(name: str):
+    """Keep the public config export lazy for minimal sandbox-only runtimes."""
+    if name == "SandboxConfig":
+        from pico.sandbox.config import SandboxConfig
+
+        return SandboxConfig
+    raise AttributeError(name)
 
 
 def build_executor(
@@ -80,6 +93,8 @@ def build_executor(
             ) from exc
         return BoxliteExecutor(
             image=sandbox_cfg.image,
+            image_search_registry=sandbox_cfg.image_search_registry,
+            runtime_home=getattr(sandbox_cfg, "runtime_home", None),
             workspace=workspace,
             cpus=sandbox_cfg.cpus,
             memory_mib=sandbox_cfg.memory_mib,

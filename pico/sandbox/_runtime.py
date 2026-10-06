@@ -16,23 +16,40 @@ Real BoxLite。Helper 只创建 Runtime，不启动具体 VM。
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import boxlite as _boxlite_t
 
-_runtime_cache: dict[tuple[int, str], Any] = {}
+_runtime_cache: dict[tuple[int, str, str | None], Any] = {}
 
 
-def get_boxlite_runtime() -> "_boxlite_t.Boxlite":
+def get_boxlite_runtime(
+    image_search_registry: str | None = None,
+    *,
+    home_dir: str | Path | None = None,
+) -> "_boxlite_t.Boxlite":
     import boxlite
 
-    from pico.config.paths import get_sandbox_dir
+    if home_dir is None:
+        from pico.config.paths import get_sandbox_dir
 
-    home = str(get_sandbox_dir("boxlite"))
-    key = (id(boxlite.Boxlite), home)
+        resolved_home = get_sandbox_dir("boxlite")
+    else:
+        resolved_home = Path(home_dir).expanduser().resolve()
+        resolved_home.mkdir(parents=True, exist_ok=True)
+    home = str(resolved_home)
+    key = (id(boxlite.Boxlite), home, image_search_registry)
     rt = _runtime_cache.get(key)
     if rt is None:
-        rt = boxlite.Boxlite(boxlite.Options(home_dir=home))
+        registries = (
+            [boxlite.ImageRegistry(image_search_registry, search=True)]
+            if image_search_registry is not None
+            else []
+        )
+        rt = boxlite.Boxlite(
+            boxlite.Options(home_dir=home, image_registries=registries)
+        )
         _runtime_cache[key] = rt
     return rt

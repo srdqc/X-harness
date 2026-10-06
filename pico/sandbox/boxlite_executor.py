@@ -42,6 +42,8 @@ class BoxliteExecutor(SandboxExecutor):
         self,
         image: str,
         workspace: Path,
+        image_search_registry: str | None = None,
+        runtime_home: Path | None = None,
         cpus: int = 2,
         memory_mib: int = 2048,
         disk_size_gb: int | None = None,
@@ -53,6 +55,8 @@ class BoxliteExecutor(SandboxExecutor):
         owned_ids: set[str] | None = None,
     ):
         self._image = image
+        self._image_search_registry = image_search_registry
+        self._runtime_home = runtime_home
         self._workspace = workspace
         self._cpus = cpus
         self._memory_mib = memory_mib
@@ -130,8 +134,6 @@ class BoxliteExecutor(SandboxExecutor):
         """
         import boxlite
 
-        from pico.sandbox._runtime import get_boxlite_runtime
-
         async def _do_pull() -> None:
             # 使用 Pico 的运行时，让镜像进入工作 Box 读取的同一缓存；
             # 否则 SimpleBox 会默认使用 ~/.boxlite。
@@ -139,7 +141,7 @@ class BoxliteExecutor(SandboxExecutor):
                 image=self._image,
                 cpus=1,
                 memory_mib=256,
-                runtime=get_boxlite_runtime(),
+                runtime=self._get_runtime(),
             ) as pull_box:
                 result = await pull_box.exec("sh", "-c", "echo ok", timeout=15)
                 if result.exit_code != 0 or result.stdout.strip() != "ok":
@@ -251,11 +253,14 @@ class BoxliteExecutor(SandboxExecutor):
                 {"host": str(self._workspace), "guest": self.WORKSPACE_MOUNT, "readonly": False},
                 *[{"host": e[0], "guest": e[1], "readonly": e[2] == "ro"} for e in self._extra_volumes],
             ]
-            # boxlite 0.8.2 中 network 是字符串字段，allow_net 是独立的列表字段；
-            # 该版本不存在 NetworkSpec
+            # BoxLite 0.9.5 requires a NetworkSpec; older supported test doubles
+            # and SDKs accept the historical string representation.
             extra_kwargs: dict = {}
             if self._allow_net is False:
-                extra_kwargs["network"] = "none"
+                network_spec = getattr(boxlite, "NetworkSpec", None)
+                extra_kwargs["network"] = (
+                    network_spec("disabled") if network_spec is not None else "none"
+                )
             elif isinstance(self._allow_net, list):
                 extra_kwargs["allow_net"] = self._allow_net
             # 其余情况下 allow_net 为 True，完全开放网络，无需额外参数
@@ -268,9 +273,7 @@ class BoxliteExecutor(SandboxExecutor):
                 volumes=volumes,
                 **extra_kwargs,
             )
-            from pico.sandbox._runtime import get_boxlite_runtime
-
-            runtime = get_boxlite_runtime()
+            runtime = self._get_runtime()
             self._box = await runtime.create(options)
             # 在 start() 之前注册清理回调，这样 start() 内部失败时仍会销毁 Box，
             # 避免泄漏部分启动的虚拟机。
@@ -285,12 +288,11 @@ class BoxliteExecutor(SandboxExecutor):
         if self._box is not None:
             box_id = self._box.id
             try:
-                from pico.sandbox._runtime import get_boxlite_runtime
-
                 await self._box.stop()
                 try:
                     # Box 在 0.8.2 中没有 remove()，需通过运行时删除
-                    await get_boxlite_runtime().remove(box_id)
+                    runtime = self._get_runtime()
+                    await runtime.remove(box_id)
                 except Exception:
                     pass  # stop() 后 Box 可能已经被删除
             except Exception as exc:
@@ -301,6 +303,18 @@ class BoxliteExecutor(SandboxExecutor):
                 if self._owned_ids is not None:
                     self._owned_ids.discard(box_id)
                 self._box = None
+
+    def _get_runtime(self) -> Any:
+        from pico.sandbox._runtime import get_boxlite_runtime
+
+        if self._runtime_home is not None:
+            return get_boxlite_runtime(
+                self._image_search_registry,
+                home_dir=self._runtime_home,
+            )
+        if self._image_search_registry is not None:
+            return get_boxlite_runtime(self._image_search_registry)
+        return get_boxlite_runtime()
 
     @staticmethod
     async def _collect(stream: AsyncIterator[str]) -> str:

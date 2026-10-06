@@ -6,6 +6,7 @@ All tests run without boxlite installed and without KVM/Hypervisor access.
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -420,6 +421,36 @@ class TestBoxliteCollect:
     async def test_mixed_lines(self):
         result = await self._collect(["hello\n", "world"])
         assert result == "hello\nworld\n"
+
+
+class TestBoxliteNetworkConfig:
+    async def test_boxlite_095_uses_native_disabled_network_spec(
+        self, tmp_path, monkeypatch
+    ):
+        executor = BoxliteExecutor(
+            image="ubuntu:22.04",
+            workspace=tmp_path,
+            allow_net=False,
+        )
+        fake_box = MagicMock(id="vm-network-disabled")
+        fake_box.start = AsyncMock()
+        fake_box.stop = AsyncMock()
+        fake_runtime = MagicMock()
+        fake_runtime.create = AsyncMock(return_value=fake_box)
+        fake_runtime.remove = AsyncMock()
+
+        from pico.sandbox import _runtime as rt_mod
+
+        monkeypatch.setattr(rt_mod, "get_boxlite_runtime", lambda: fake_runtime)
+        fake_boxlite = MagicMock()
+        disabled = object()
+        fake_boxlite.NetworkSpec.return_value = disabled
+        monkeypatch.setitem(sys.modules, "boxlite", fake_boxlite)
+
+        await executor._ensure_box()
+        assert fake_boxlite.NetworkSpec.call_args.args == ("disabled",)
+        assert fake_boxlite.BoxOptions.call_args.kwargs["network"] is disabled
+        await executor.stop()
 
 
 # ---------------------------------------------------------------------------

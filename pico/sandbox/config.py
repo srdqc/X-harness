@@ -54,6 +54,8 @@ class SandboxConfig(BaseModel):
     # "boxlite" → 强制使用 boxlite；同时执行可用性探测，不可用时报错
     backend: Literal["none", "auto", "boxlite"] = "none"
     image: str = "ubuntu:22.04"
+    image_search_registry: str | None = None
+    """Optional OCI search-registry host used only by the BoxLite runtime."""
     cpus: int = 2
     memory_mib: int = 2048
     disk_size_gb: int | None = None  # None 表示使用 boxlite 默认的临时磁盘
@@ -80,6 +82,18 @@ class SandboxConfig(BaseModel):
                 "Use allow_net: false to disable networking entirely."
             )
         return v
+
+    @field_validator("image_search_registry")
+    @classmethod
+    def _validate_image_search_registry(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        normalized = v.strip()
+        if not normalized or "://" in normalized or any(char.isspace() for char in normalized):
+            raise ValueError(
+                "imageSearchRegistry must be a non-empty registry host without a URL scheme"
+            )
+        return normalized
 
     @field_validator("extra_volumes")
     @classmethod
