@@ -32,6 +32,41 @@ def repeated_repository_reads(paths: tuple[str, ...]) -> tuple[int, int, int]:
     return len(counts), len(normalized), sum(max(count - 1, 0) for count in counts.values())
 
 
+def _ordered_selected_candidate_ids(store, retrieval_ids, selections) -> tuple[str, ...]:
+    """Preserve the durable retrieval sequence when projecting selected IDs."""
+
+    selected_ids = {
+        item.candidate_id
+        for item in selections
+        if item.decision.value == "select"
+    }
+    receipts = tuple(
+        receipt
+        for retrieval_id in retrieval_ids
+        if (receipt := store.read_retrieval(retrieval_id)) is not None
+    )
+    receipts = tuple(
+        sorted(
+            receipts,
+            key=lambda item: (
+                datetime.fromisoformat(item.created_at.replace("Z", "+00:00")),
+                item.retrieval_id,
+            ),
+        )
+    )
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for receipt in receipts:
+        for candidate_id in receipt.selected_candidate_ids:
+            if candidate_id in selected_ids and candidate_id not in seen:
+                ordered.append(candidate_id)
+                seen.add(candidate_id)
+    # Retain complete evidence for historical/incomplete stores while keeping
+    # the fallback deterministic. Current runtime selections have a receipt.
+    ordered.extend(sorted(selected_ids - seen))
+    return tuple(ordered)
+
+
 def extract_utility_observability(events) -> dict[str, object]:
     """Project additive Jev utility receipts without changing historical runs."""
 
@@ -148,6 +183,22 @@ def extract_utility_observability(events) -> dict[str, object]:
             str(item["utility_parse_stage"])
             for item in receipts if item.get("utility_parse_stage")
         ),
+        "utility_generation_outcomes": tuple(
+            str(item["utility_generation_outcome"])
+            for item in receipts if item.get("utility_generation_outcome")
+        ),
+        "utility_payload_outcomes": tuple(
+            str(item["utility_payload_outcome"])
+            for item in receipts if item.get("utility_payload_outcome")
+        ),
+        "utility_reasoning_tokens": tuple(
+            int(item["utility_reasoning_tokens"])
+            for item in receipts if isinstance(item.get("utility_reasoning_tokens"), int)
+        ),
+        "utility_visible_output_tokens": tuple(
+            int(item["utility_visible_output_tokens"])
+            for item in receipts if isinstance(item.get("utility_visible_output_tokens"), int)
+        ),
     }
 
 
@@ -224,6 +275,11 @@ def extract_run_metrics(
             {item.retrieval_id for item in usages}
             | {item.retrieval_id for item in selections}
         )
+    )
+    relevance_selected_candidate_ids = _ordered_selected_candidate_ids(
+        store,
+        retrieval_ids,
+        selections,
     )
     candidate_ids = tuple(sorted({item.candidate_id for item in usages}))
     retrieved_ids: set[str] = set()
@@ -352,15 +408,7 @@ def extract_run_metrics(
             else evidence_paths
         ),
         "relevance_selection_refs": tuple(item.selection_id for item in selections),
-        "relevance_selected_candidate_ids": tuple(
-            sorted(
-                {
-                    item.candidate_id
-                    for item in selections
-                    if item.decision.value == "select"
-                }
-            )
-        ),
+        "relevance_selected_candidate_ids": relevance_selected_candidate_ids,
         "relevance_abstained_candidate_ids": tuple(
             sorted(
                 {

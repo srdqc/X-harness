@@ -78,8 +78,13 @@ from pico.agent.tools.registry import normalize_repository_read_path
 from pico.knowledge_evolution import (
     CandidateType,
     KnowledgeRecordStore,
+    KnowledgeRelevanceSelection,
+    KnowledgeRetrievalReceipt,
+    KnowledgeSelectionMode,
     KnowledgeUsageMode,
     KnowledgeUsageReceipt,
+    RelevanceDecision,
+    RelevanceReason,
 )
 from pico.tracing import evidence
 from pico.tracing.store import TraceStore
@@ -416,6 +421,74 @@ def test_structured_metric_extraction_counts_calls_attempts_tools_reads_usage(tm
     assert refs["usage_refs"] == ("usage-1",)
     assert refs["referenced_ids"] == ("candidate-1",)
     assert refs["repository_read_paths"] == ("pico/a.py", "pico/a.py", "pico/b.py")
+
+
+def test_selected_candidate_metrics_preserve_retrieval_order(tmp_path: Path) -> None:
+    turn_id = "turn-selection-order"
+    recorder = evidence.TurnEvidenceRecorder(
+        turn_id=turn_id,
+        conversation_id="p3r:test",
+        trace_id="trace-selection-order",
+        root_span_id="span-selection-order",
+        writer=TraceStore(tmp_path).append_event,
+    )
+    recorder.emit(evidence.TURN_STARTED)
+    recorder.emit(evidence.TURN_TERMINAL, metadata={"outcome": "completed"})
+    store = KnowledgeRecordStore(tmp_path)
+    scope_digest = "a" * 64
+    query_digest = "b" * 64
+    selector_digest = "c" * 64
+    candidates = (
+        ("candidate-z", "retrieval-first", "2026-10-07T00:00:00.000001Z"),
+        ("candidate-a", "retrieval-second", "2026-10-07T00:00:00.000002Z"),
+    )
+    for rank, (candidate_id, retrieval_id, created_at) in enumerate(candidates, start=1):
+        store.write_retrieval(
+            KnowledgeRetrievalReceipt.create(
+                retrieval_id=retrieval_id,
+                turn_id=turn_id,
+                repository_scope_id=scope_digest,
+                query_digest=query_digest,
+                candidate_set_digest="d" * 64,
+                ranked_candidate_ids=(candidate_id,),
+                selected_candidate_ids=(candidate_id,),
+                suppressed=(),
+                applicable_count=1,
+                suppressed_count=0,
+                latency_ms=1.0,
+                created_at=created_at,
+                retrieval_policy="fixture",
+                retrieval_version=1,
+            )
+        )
+        store.write_relevance_selection(
+            KnowledgeRelevanceSelection.create(
+                selection_id=f"selection-{rank}",
+                retrieval_id=retrieval_id,
+                turn_id=turn_id,
+                repository_scope_id=scope_digest,
+                selection_mode=KnowledgeSelectionMode.TASK_RELEVANCE_V1,
+                query_digest=query_digest,
+                candidate_id=candidate_id,
+                candidate_type=CandidateType.EXPERIENCE,
+                rank=1,
+                relevance_score=1.0,
+                meaningful_overlap=("validation",),
+                identifier_overlap=(),
+                decision=RelevanceDecision.SELECT,
+                reason=RelevanceReason.SELECT_RELEVANT,
+                selector_version=1,
+                selector_config_digest=selector_digest,
+            )
+        )
+
+    _, refs = extract_run_metrics(
+        trace_root=tmp_path,
+        turn_id=turn_id,
+        knowledge_state_root=tmp_path,
+    )
+
+    assert refs["relevance_selected_candidate_ids"] == ("candidate-z", "candidate-a")
 
 
 def test_first_edit_iteration_is_derived_from_durable_tool_receipt(tmp_path: Path) -> None:
