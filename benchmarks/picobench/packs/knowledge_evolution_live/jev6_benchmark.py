@@ -124,6 +124,8 @@ PRE_RUN_SANDBOX_SMOKE: Callable[..., dict[str, Any]] | None = None
 RESUME_SAFE_CAMPAIGN = False
 PERSIST_LIVE_EXPOSURE = False
 LIVE_EXPOSURE_SCHEMA = "pico.jev6-live-exposure-ledger.v1"
+RUNTIME_SANDBOX_CONFIG: Any | None = None
+SANDBOX_SOURCE_IDENTITY: dict[str, Any] | None = None
 
 
 def _store(root: Path) -> ArtifactStore:
@@ -279,7 +281,8 @@ def _bounded_child_environment_identity(
 
     from pico.config.loader import load_config
 
-    sandbox = load_config(config_path).tools.sandbox
+    provider_config = load_config(config_path)
+    sandbox = RUNTIME_SANDBOX_CONFIG or provider_config.tools.sandbox
     try:
         boxlite_version = importlib.metadata.version("boxlite")
     except importlib.metadata.PackageNotFoundError:
@@ -305,7 +308,27 @@ def _bounded_child_environment_identity(
         "sandbox_backend": sandbox.backend,
         "allow_net": sandbox.allow_net,
         "extra_volumes": list(sandbox.extra_volumes),
+        "sandbox_runtime_home": (
+            str(sandbox.runtime_home)
+            if getattr(sandbox, "runtime_home", None) is not None
+            else None
+        ),
+        "provider_source_identity": {
+            "config_path": str(config_path.resolve()),
+            "config_source_digest": _config_source_digest(config_path),
+        },
+        "sandbox_source_identity": SANDBOX_SOURCE_IDENTITY,
     }
+
+
+def _with_runtime_sandbox(config: Any) -> Any:
+    """Overlay only the explicitly injected typed sandbox config in memory."""
+
+    if RUNTIME_SANDBOX_CONFIG is None:
+        return config
+    runtime_config = config.model_copy(deep=True)
+    runtime_config.tools.sandbox = RUNTIME_SANDBOX_CONFIG.model_copy(deep=True)
+    return runtime_config
 
 
 def _sanitized_process_tail(value: str | None, *, limit: int = 2000) -> str:
@@ -1095,6 +1118,7 @@ async def _execute_turn(
         or identity["provider_digest"] != manifest["provider_model_config_digest"]
     ):
         raise RuntimeError("configured Runtime/Provider differs from frozen JEV.6 campaign")
+    config = _with_runtime_sandbox(config)
     arm = Arm(planned["arm"])
     pico_config = load_pico_config()
     context = pico_config.context.model_dump(mode="python")

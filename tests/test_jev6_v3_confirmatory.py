@@ -32,6 +32,12 @@ print(json.dumps({
     "suite": runner.SUITE_VERSION,
     "runs": len(runner.RUN_ORDER),
     "sandbox": runner.PRE_RUN_SANDBOX_SMOKE is not None,
+    "sandbox_backend": runner.RUNTIME_SANDBOX_CONFIG.backend,
+    "sandbox_allow_net": runner.RUNTIME_SANDBOX_CONFIG.allow_net,
+    "sandbox_extra_volumes": runner.RUNTIME_SANDBOX_CONFIG.extra_volumes,
+    "sandbox_registry": runner.RUNTIME_SANDBOX_CONFIG.image_search_registry,
+    "sandbox_runtime_home": runner.RUNTIME_SANDBOX_CONFIG.runtime_home.as_posix(),
+    "sandbox_source": runner.SANDBOX_SOURCE_IDENTITY["source"],
     "resume_safe": runner.RESUME_SAFE_CAMPAIGN,
     "exposure": runner.PERSIST_LIVE_EXPOSURE,
 }))
@@ -49,8 +55,53 @@ print(json.dumps({
         "suite": "jev6-held-out-v3",
         "runs": 48,
         "sandbox": True,
+        "sandbox_backend": "boxlite",
+        "sandbox_allow_net": False,
+        "sandbox_extra_volumes": [],
+        "sandbox_registry": "docker.m.daocloud.io",
+        "sandbox_runtime_home": "/tmp/pico-jev6v3-boxlite",
+        "sandbox_source": "frozen_jev6_v3_infrastructure",
         "resume_safe": True,
         "exposure": True,
+    }
+
+
+def test_v3_runtime_overlays_only_typed_frozen_sandbox_in_child_process() -> None:
+    script = """
+import json
+from pico.config.loader import get_config_path, load_config
+from benchmarks.picobench.packs.knowledge_evolution_live import jev6_v3_benchmark
+from benchmarks.picobench.packs.knowledge_evolution_live import jev6_benchmark as runner
+source = load_config(get_config_path())
+runtime = runner._with_runtime_sandbox(source)
+print(json.dumps({
+    "same_object": source is runtime,
+    "source_backend": source.tools.sandbox.backend,
+    "runtime_backend": runtime.tools.sandbox.backend,
+    "runtime_allow_net": runtime.tools.sandbox.allow_net,
+    "runtime_extra_volumes": runtime.tools.sandbox.extra_volumes,
+    "runtime_registry": runtime.tools.sandbox.image_search_registry,
+    "runtime_home": runtime.tools.sandbox.runtime_home.as_posix(),
+    "provider_blocks_unchanged": source.providers == runtime.providers,
+}))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    value = json.loads(completed.stdout)
+    assert value == {
+        "same_object": False,
+        "source_backend": "none",
+        "runtime_backend": "boxlite",
+        "runtime_allow_net": False,
+        "runtime_extra_volumes": [],
+        "runtime_registry": "docker.m.daocloud.io",
+        "runtime_home": "/tmp/pico-jev6v3-boxlite",
+        "provider_blocks_unchanged": True,
     }
 
 
@@ -191,6 +242,7 @@ def test_child_failure_forensics_distinguish_capability_stage_and_stay_zero_live
 
 def test_child_environment_identity_is_allowlisted_and_propagates_sandbox_config(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from pico.config.loader import get_config_path, load_config
 
@@ -198,6 +250,11 @@ def test_child_environment_identity_is_allowlisted_and_propagates_sandbox_config
     roots.prepare_non_worktree_roots()
     config_path = get_config_path().resolve()
     expected = load_config(config_path).tools.sandbox
+    monkeypatch.setattr(
+        jev6_benchmark,
+        "_config_source_digest",
+        lambda path: "d" * 64,
+    )
     identity = jev6_benchmark._bounded_child_environment_identity(
         config_path, roots
     )
@@ -205,6 +262,10 @@ def test_child_environment_identity_is_allowlisted_and_propagates_sandbox_config
     assert identity["sandbox_backend"] == expected.backend
     assert identity["allow_net"] == expected.allow_net
     assert identity["extra_volumes"] == expected.extra_volumes
+    assert identity["provider_source_identity"] == {
+        "config_path": str(config_path),
+        "config_source_digest": "d" * 64,
+    }
     assert "environment" not in identity
     assert "api_key" not in identity
 
