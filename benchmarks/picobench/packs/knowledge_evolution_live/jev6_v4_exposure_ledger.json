@@ -1,0 +1,55 @@
+{
+  "schema": "pico.jev6-heldout-exposure-ledger.v3",
+  "schema_version": 3,
+  "predecessor_ledger": "jev6_v3_exposure_ledger.json",
+  "predecessor_ledger_digest": "27f118eccc605a1fb194827f025e15208b25d09ca23c3b2bbc6af5acb2ab15e5",
+  "v3_invalid_campaign": "jev6v3-49a4590ca226cf75",
+  "v3_exposure_summary": {"unique_tasks": 3, "live_runs": 5},
+  "tasks": {
+    "jev6-nav-01-trace-event-reader": {"live_agent_exposed": false},
+    "jev6-nav-02-skill-variants": {
+      "live_agent_exposed": true,
+      "live_runs": ["jev6-nav-02-skill-variants-task_relevance_v1-rep1"]
+    },
+    "jev6v2-nav-02-plugin-contributions": {"live_agent_exposed": false},
+    "jev6-impl-01-safe-segment-bound": {"live_agent_exposed": false},
+    "jev6-impl-02-delivery-result-flags": {
+      "live_agent_exposed": true,
+      "live_runs": [
+        "jev6-impl-02-delivery-result-flags-task_relevance_v1-rep1",
+        "jev6-impl-02-delivery-result-flags-task_relevance_v1_provider_utility-rep1"
+      ]
+    },
+    "jev6-debug-01-bm25-parameters": {
+      "live_agent_exposed": true,
+      "live_runs": [
+        "jev6-debug-01-bm25-parameters-task_relevance_v1_provider_utility-rep1",
+        "jev6-debug-01-bm25-parameters-task_relevance_v1-rep1"
+      ]
+    },
+    "jev6-debug-02-decision-receipt-identity": {
+      "live_agent_exposed": true,
+      "live_runs": ["jev6-debug-02-decision-receipt-identity-task_relevance_v1-rep1"]
+    },
+    "jev6-int-01-public-turn-events": {"live_agent_exposed": false},
+    "jev6-int-02-resolve-available-skill": {
+      "live_agent_exposed": true,
+      "live_runs": ["jev6-int-02-resolve-available-skill-task_relevance_v1-rep1"]
+    },
+    "jev6v3-int-02-provider-resolution": {"live_agent_exposed": false},
+    "jev6v4-impl-02-replace-provider-models": {
+      "live_agent_exposed": false,
+      "source": "new_task_declaration"
+    },
+    "jev6v4-debug-01-capability-token-payload": {
+      "live_agent_exposed": false,
+      "source": "new_task_declaration"
+    },
+    "jev6v4-debug-02-portable-media-name": {
+      "live_agent_exposed": false,
+      "source": "new_task_declaration"
+    }
+  },
+  "pristine_confirmatory_reuse_allowed": false,
+  "reason": "V3 remains INVALID and its three exposed tasks are permanently retired."
+}

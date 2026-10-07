@@ -1,0 +1,46 @@
+{
+  "schema": "pico.jev6-heldout-exposure-snapshot.v4",
+  "schema_version": 4,
+  "suite_version": "jev6-held-out-v4",
+  "source_ledger": "jev6_v4_exposure_ledger.json",
+  "source_ledger_digest": "62383afa6f62fb05e586d7b9fd07135af522dbf9d759e9a999ae51bea34b00b5",
+  "tasks": {
+    "jev6-nav-01-trace-event-reader": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6v2-nav-02-plugin-contributions": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6-impl-01-safe-segment-bound": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6v4-impl-02-replace-provider-models": {"live_agent_exposed": false, "source": "new_task_declaration"},
+    "jev6v4-debug-01-capability-token-payload": {"live_agent_exposed": false, "source": "new_task_declaration"},
+    "jev6v4-debug-02-portable-media-name": {"live_agent_exposed": false, "source": "new_task_declaration"},
+    "jev6-int-01-public-turn-events": {"live_agent_exposed": false, "source": "persistent_ledger"},
+    "jev6v3-int-02-provider-resolution": {"live_agent_exposed": false, "source": "persistent_ledger"}
+  },
+  "retired_history": {
+    "jev6-nav-02-skill-variants": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6b2-ec0eb2cafd43defe",
+      "live_run_count": 1
+    },
+    "jev6-int-02-resolve-available-skill": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6v2b-9627a434d427637a",
+      "live_run_count": 1
+    },
+    "jev6-impl-02-delivery-result-flags": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6v3-49a4590ca226cf75",
+      "live_run_count": 2
+    },
+    "jev6-debug-01-bm25-parameters": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6v3-49a4590ca226cf75",
+      "live_run_count": 2
+    },
+    "jev6-debug-02-decision-receipt-identity": {
+      "live_agent_exposed": true,
+      "campaign_id": "jev6v3-49a4590ca226cf75",
+      "live_run_count": 1
+    }
+  },
+  "v3_exposure_summary": {"unique_tasks": 3, "live_runs": 5},
+  "all_v4_tasks_unexposed": true
+}

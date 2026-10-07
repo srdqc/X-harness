@@ -108,6 +108,8 @@
         "tests/test_jev6_candidate_identity.py",
         "tests/test_jev6_v2_freeze.py",
           "tests/test_jev6_v3_freeze.py",
+          "tests/test_jev6_v4_freeze.py",
+          "tests/test_jev6_v3_confirmatory.py",
           "tests/test_jev6_v2_confirmatory.py",
           "tests/test_jev6_sandbox_hardening.py",
         "tests/test_execution_receipts.py",
