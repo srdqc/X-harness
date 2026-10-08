@@ -12,7 +12,7 @@ def test_internal_document_and_private_repository_link_are_rejected(tmp_path: Pa
     onboarding = tmp_path / "docs" / "onboarding"
     onboarding.mkdir(parents=True)
     (onboarding / "README.md").write_text(
-        "https://github.com/" + "Hackerismydream/" + "myna",
+        "https://example.invalid/" + "private-repository",
         encoding="utf-8",
     )
 
@@ -33,6 +33,17 @@ def test_docs_are_limited_to_onboarding_evaluation_and_public_fixtures(tmp_path:
     assert check_public_tree(tmp_path, tracked_paths=["docs/plan/roadmap.md"]) == [
         "forbidden documentation path: docs/plan/roadmap.md"
     ]
+
+
+def test_public_release_audit_is_allowed(tmp_path: Path) -> None:
+    audit = tmp_path / "docs" / "release" / "public_release_audit.md"
+    audit.parent.mkdir(parents=True)
+    audit.write_text("# Public Release Audit\n", encoding="utf-8")
+
+    assert check_public_tree(
+        tmp_path,
+        tracked_paths=["docs/release/public_release_audit.md"],
+    ) == []
 
 
 def test_secret_bearing_file_extensions_are_rejected(tmp_path: Path) -> None:

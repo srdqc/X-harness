@@ -78,10 +78,11 @@ FORBIDDEN_TEST_MARKERS = {
     "real_vm",
 }
 FORBIDDEN_TEXT = {
-    "github.com/" + "Hackerismydream/" + "myna": "private repository reference",
-    "github.com/" + "Hackerismydream/" + "pico": "development repository reference",
-    "raw.githubusercontent.com/" + "Hackerismydream": "development installer reference",
+    "example.invalid/" + "private-repository": "private repository reference",
     "MYNA_" + "WHEEL_URL": "unpublished Memory wheel reference",
+}
+ALLOWED_RELEASE_DOCS = {
+    "docs/release/public_release_audit.md",
 }
 TEXT_SUFFIXES = {
     "",
@@ -123,6 +124,7 @@ def _documentation_allowed(path: str) -> bool:
         path.startswith("docs/onboarding/")
         or path.startswith("docs/examples/")
         or path in ALLOWED_EVALUATION_DOCS
+        or path in ALLOWED_RELEASE_DOCS
     )
 
 
@@ -132,6 +134,12 @@ def check_public_tree(root: Path, tracked_paths: Iterable[str] | None = None) ->
 
     for relative in sorted(paths):
         path = Path(relative)
+        source = root / path
+        # A pre-commit release check must evaluate the resulting tree. A tracked
+        # file deleted in the working tree is absent from that result even before
+        # the deletion is staged or committed.
+        if tracked_paths is None and not source.exists():
+            continue
         if relative in FORBIDDEN_PATHS or relative.startswith((".github/", "feishu/")):
             findings.append(f"forbidden path: {relative}")
             continue
@@ -160,7 +168,6 @@ def check_public_tree(root: Path, tracked_paths: Iterable[str] | None = None) ->
             findings.append(f"forbidden secret-bearing file: {relative}")
             continue
 
-        source = root / path
         if not source.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
             continue
         if source.stat().st_size > 1024 * 1024:

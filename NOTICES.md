@@ -1,6 +1,7 @@
 # Third-Party Notices
 
-Pico is licensed under the Apache License 2.0. It incorporates code from the
+X-harness is licensed under the Apache License 2.0. It is a secondary-development
+project based on the original Pico codebase and incorporates code from the
 following MIT-licensed projects. Their copyright notices and license texts are
 retained in `LICENSES/`.
 
@@ -19,7 +20,7 @@ retained in `LICENSES/`.
 - License: MIT — see `LICENSES/MIT-hermes-agent.txt`
 - Vendored at commit: `dd0923bb89ed2dd56f82cb63656a1323f6f42e6f` (2026-05-12)
 - Scope: the imported TUI remains under `ui-tui/`, including the vendored
-  `@hermes/ink` fork. Pico modifications include product branding, Pico
+  `@hermes/ink` fork. X-harness inherits Pico modifications including product branding, Pico
   environment variables, the JSON-RPC client and Runtime bridge, and
   repository SPDX/Copyright headers.
 
@@ -28,7 +29,7 @@ retained in `LICENSES/`.
 - Copyright (c) Vadym Demedes, Sindre Sorhus, and ink contributors
 - License: MIT — see `LICENSES/MIT-ink.txt`
 - Scope: hermes-agent ships its own fork of community ink at
-  `ui-tui/packages/hermes-ink/`. Pico inherits this
+  `ui-tui/packages/hermes-ink/`. X-harness inherits this
   vendor verbatim (package name `@hermes/ink` preserved for attribution).
   Triple attribution chain (ink contributors → Nous Research hermes-ink
   → EverMind modifications) is encoded in the 5-line SPDX header of
@@ -38,8 +39,8 @@ retained in `LICENSES/`.
 
 # External Runtime Tools (not vendored)
 
-The following tools are invoked by Pico via `subprocess` calls but are
-**not bundled or redistributed** as part of any Pico release artifact.
+The following tools are invoked by X-harness via `subprocess` calls but are
+**not bundled or redistributed** as part of any X-harness release artifact.
 Their attribution here is supply-chain hygiene, not a license requirement.
 Users install them separately through their respective package managers.
 
@@ -50,7 +51,7 @@ Users install them separately through their respective package managers.
 - Install: `npm install -g tui-use` (npm package `tui-use`)
 - Scope: invoked by `tests/tui/autotest/runner.py::Harness` for PTY-driven
   TUI subprocess control. Selected as Tier 1 backend per Day 0 spike
-  (2026-05-20) — all 5 acceptance gates S1-S5 passed. Pico does NOT
+  (2026-05-20) — all 5 acceptance gates S1-S5 passed. X-harness does NOT
   vendor, redistribute, or modify `tui-use` source.
 - If a future change vendors or modifies `tui-use`, it must add the applicable
   license text to `LICENSES/` and update this notice before release.

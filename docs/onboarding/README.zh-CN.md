@@ -1,38 +1,28 @@
-# Pico 首次使用
+# X-harness 首次使用
 
-这份指南只完成一个闭环：在你选定的 Git 仓库里安装 Pico、配置 Provider，并收到
+这份指南只完成一个闭环：在你选定的 Git 仓库里安装 X-harness、配置 Provider，并收到
 第一条真实回复。
 
 ## 1. 准备环境
 
-Pico 需要 Python 3.12。原生 TUI 使用 Node.js 22；系统缺少合适版本时，安装器
-会下载私有 Node Runtime。
-
-仓库处于 Private 阶段时，先确认当前机器已经配置 Gitee 访问凭证：
+X-harness 需要 Python 3.12 和 uv。原生 TUI 使用 Node.js 22。当前兼容 CLI 仍名为
+`pico`。在已克隆的仓库中安装：
 
 ```bash
-git clone https://gitee.com/htxoffical/pico-harness.git
-cd pico-harness
-./install.sh
+uv sync --frozen --extra dev --dev
 ```
 
-Windows PowerShell：
+如需把命令安装为独立工具，可从当前可信 Checkout 构建并安装：
 
-```powershell
-git clone https://gitee.com/htxoffical/pico-harness.git
-Set-Location pico-harness
-.\install.ps1
+```bash
+uv tool install --force ".[channels]"
 ```
 
-安装器会从 Gitee Release 解析 Pico wheel。Private Release 需要
-`PICO_GITEE_TOKEN`；如果维护者提供了固定并经过校验的 wheel，也可以设置
-`PICO_WHEEL_URL`。
-
-不要从来路不明的地址安装 wheel，也不要把 Token 写进仓库、命令截图或日志。
+不要从来路不明的地址安装 Wheel，也不要把 Token 写进仓库、命令截图或日志。
 
 ## 2. 在目标仓库中启动向导
 
-先进入 Pico 实际要工作的 Git 仓库：
+先进入 X-harness 实际要工作的 Git 仓库：
 
 ```bash
 cd /path/to/your-project

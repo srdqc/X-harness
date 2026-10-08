@@ -7,14 +7,14 @@ public media without committing binary artifacts.
 | ID | Scene | Required visible proof | Secret treatment |
 | --- | --- | --- | --- |
 | `first-turn` | `pico onboard --skip-memory` from language selection through the first reply | Provider selected, Memory explicitly disabled, and an `Agent:` reply | API key masked; disposable repository path |
-| `feishu-config` | Feishu Open Platform plus Pico CLI | long connection, `im.message.receive_v1`, published version, and redacted channel config | App Secret, Encrypt Key, Verification Token, and tenant identity redacted |
-| `feishu-live` | one inbound Feishu message and the Pico reply | accepted inbound event and reply in the same conversation | user names, open IDs, message IDs, and credentials redacted |
-| `agent-install` | released Pico installation and JSON health check | installed version plus `pico doctor --json` | Gitee Token, signed URL query strings, and local home paths redacted |
+| `feishu-config` | Feishu Open Platform plus X-harness CLI | long connection, `im.message.receive_v1`, published version, and redacted channel config | App Secret, Encrypt Key, Verification Token, and tenant identity redacted |
+| `feishu-live` | one inbound Feishu message and the X-harness reply | accepted inbound event and reply in the same conversation | user names, open IDs, message IDs, and credentials redacted |
+| `agent-install` | released X-harness installation and JSON health check | installed version plus `pico doctor --json` | credentials, signed URL query strings, and local home paths redacted |
 
 ## Capture rules
 
 - Capture the released wheel installation, not an editable developer checkout.
-- Bind every asset to a Pico tag, operating system, and capture date in the
+- Bind every asset to an X-harness tag, operating system, and capture date in the
   external asset description.
 - Use a disposable Git repository and disposable Provider or Feishu
   credentials.

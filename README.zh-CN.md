@@ -1,195 +1,142 @@
 <div align="center">
 
-# Pico
+# X-harness
 
-### 一套 Agent Runtime，跟你去每个工作入口。
-
-在终端、原生 TUI、后台 Gateway、定时任务和消息渠道中运行同一个会用工具的 Agent。
-入口可以变化，Turn、Session、Context、工具和证据模型保持一致。
+### 面向本地与异步入口的紧凑型工具调用 Agent Runtime。
 
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-Apache--2.0-0B7285)
 ![Status](https://img.shields.io/badge/Status-Alpha-F59E0B)
 
-[快速开始](#从安装到第一条真实回复) ·
-[首次使用指南](docs/onboarding/README.zh-CN.md) ·
-[飞书接入](docs/onboarding/feishu.zh-CN.md) ·
-[Agent 安装契约](docs/onboarding/agent-install.md) ·
-[English](README.md)
+[快速开始](#快速开始) · [评测](#评测) ·
+[首次使用指南](docs/onboarding/README.zh-CN.md) · [English](README.md)
 
 </div>
 
----
+## 项目解决的问题
 
-Pico 是一套紧凑的 Agent Harness。不同入口不用各自实现 Agent Loop，而是把 Turn
-提交给同一套 Runtime。Pico 负责调度、取消、Context 组装、工具执行、Session
-持久化、Tracing 和投递。外部 Memory Backend 可以接入这套 Runtime，但当前发布
-不包含外部 Memory 实现。
+Agent 的不同入口很容易各自发展出独立的执行循环、状态处理和安全规则，导致终端、
+后台任务与消息渠道行为不一致，结果也难以复现。
+
+X-harness 是基于初始开源项目 Pico 的二次开发项目。它让这些入口统一提交 Turn，
+由同一套 Runtime 负责调度、Context 组装、工具执行、
+Session 持久化、Tracing 与投递记录。CLI/TUI 是主要交互界面；Gateway 与消息渠道是
+异步控制面。
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    U["你"] --> H["CLI · TUI · Gateway · Cron · 飞书"]
-    H --> S["Spine"]
-    S --> T["Turn Runner"]
-    T --> A["Agent Loop"]
+    U["用户或自动化"] --> H["CLI · TUI · Gateway · Cron · Channels"]
+    H --> S["TurnRequest / Scheduler"]
+    S --> R["TurnRunner"]
+    R --> A["AgentLoop"]
     A <--> C["Context"]
-    A <--> M["可选 Memory"]
-    A <--> X["Tools · MCP · Sandbox"]
+    A <--> T["ToolRegistry · Policy · Sandbox"]
     A <--> P["Providers"]
-    T --> E["Session · Tracing · Delivery"]
+    R --> D["Session · Trace · Delivery"]
 ```
 
-## 从安装到第一条真实回复
+Scheduler 负责会话级顺序。Session、临时 Context、Workspace Checkpoint、Runtime
+恢复状态、Trace、Delivery 和外部副作用仍是不同状态域。因此 Turn 完成不等于投递
+成功，也不能证明外部副作用已经发生。
 
-Pico 需要 Python 3.12。原生 TUI 使用 Node.js 22；系统缺少合适版本时，安装器
-可以配置私有 Node Runtime。
+## Core Features
 
-仓库处于 Private 阶段时，先使用已经配置好的 Gitee 凭证克隆，再运行安装器：
+| 能力 | 状态 | 当前实现 |
+| --- | --- | --- |
+| 统一 Turn 路径 | Core | CLI、TUI、Gateway、Cron 和 Channels 汇入同一套调度与执行路径。 |
+| 调度与取消 | Core | 会话级顺序、Busy Policy、入口容量、取消与终态事件。 |
+| Session 与 Context | Core | 持久化对话与受预算约束的模型可见 Context；Resume 基于已持久化事实启动新 Turn。 |
+| 工具执行 | Core | Registry 查询、参数校验、策略检查、超时、并发规则与 Sandbox 由 Runtime 决定。 |
+| Selective Rewind | Experimental | 可保留分支地回退对话、Workspace 或二者；不会恢复进程、流或 Python 调用栈。 |
+| 工具渐进披露 | Experimental | Tool Search 只控制向模型展示的 Schema；`ToolRegistry` 仍是可执行工具的事实源。 |
+| Trace Replay 与验证 | Experimental | Replay 默认不产生副作用，验证逻辑位于被评测 Agent 之外。 |
+| Gateway 与 Channels | Partial | 已有异步状态、补充指令、取消和结果投递路径；真实 Provider/渠道仍需环境验证。 |
+| Memory Backend | Partial | 已有 Backend 契约，但仓库不附带外部 Memory 实现。 |
+| Evolver 与 Jev | Experimental | 仅按需启用候选评测，带确定性回退和人工激活；不能授权工具或决定终态。 |
 
-```bash
-git clone https://gitee.com/htxoffical/pico-harness.git
-cd pico-harness
-./install.sh
-```
+## Execution Flow
 
-Windows PowerShell：
+1. 入口创建 `TurnRequest`。
+2. Scheduler 应用会话顺序、容量和取消规则。
+3. Turn Runner 从持久化事实和当前输入组装 Context。
+4. 模型提出回复或工具调用。
+5. 确定性 Runtime 校验并执行获准工具。
+6. Session 事实、Trace、Runtime 证据与 Delivery 状态由各自组件记录。
+7. Evaluation 使用预定义 Verifier；模型的最终回复不是成功证明。
 
-```powershell
-git clone https://gitee.com/htxoffical/pico-harness.git
-Set-Location pico-harness
-.\install.ps1
-```
+## 快速开始
 
-安装器从 Gitee Release 解析 Pico wheel，并默认使用国内 Python 与 Node.js 镜像。
-访问 Private Release 时设置 `PICO_GITEE_TOKEN`；需要固定制品时，可以设置
-`PICO_WHEEL_URL` 指向经过信任的 wheel。
-
-| 安装控制项 | 用途 |
-| --- | --- |
-| `PICO_GITEE_TOKEN` | 读取 Private Gitee Release |
-| `PICO_WHEEL_URL` | 直接安装经过信任的 Pico wheel |
-| `PICO_PYPI_INDEX` | 覆盖 Python 包索引 |
-| `PICO_NODE_MIRROR` | 覆盖 Node.js 下载镜像 |
-| `PICO_NODE_CHECKSUM_BASE` | 覆盖 Node.js 校验清单来源 |
-| `PICO_NPM_REGISTRY` | 覆盖 npm registry |
-| `PICO_UV_INSTALL_URL` | 覆盖 uv 安装脚本地址 |
-
-进入希望 Pico 工作的仓库，再完成首次配置：
-
-```bash
-cd /path/to/your-project
-pico onboard --skip-memory
-```
-
-向导按照第一个可验证结果组织为四步：
-
-```text
-LLM 凭证 -> 明确关闭 Memory -> 第一条真实 Turn
-         -> 运行位置 -> 可选消息渠道
-```
-
-当前 Gitee 发布不包含外部 Memory 实现，因此 `--skip-memory` 是受支持的路径。
-Pico 会写入 `memory.backend = null`，不会把缺失的 Backend 伪装成健康状态。
-
-向导完成后：
-
-```bash
-pico
-pico run -m "说明这个仓库的主请求路径"
-pico doctor --probe
-```
-
-`pico doctor --probe` 会发送一次真实模型请求。静态配置检查通过，或者跳过 probe，
-都不能证明 Provider 已经返回回复。
-
-[首次使用指南](docs/onboarding/README.zh-CN.md)包含 Private Release 鉴权、
-非交互配置、精确验收命令和常见恢复路径。
-
-## Pico 负责什么
-
-| 你需要什么 | Pico 负责什么 |
-| --- | --- |
-| 一个 Agent 跨多个入口 | CLI、TUI、Gateway、Cron 和 Channels 提交同一个 Turn 契约 |
-| Context 不变成 Prompt 堆积 | 每次模型调用前检索、预算并组装 Context |
-| 有明确边界的工具 | Filesystem、Shell、Web、MCP、消息和 Subagent 共用确认与 Sandbox 控制 |
-| 可以恢复的对话 | Session 独立于当前终端进程持久化 |
-| 可以定位的结果 | Tracing、Provider 用量、投递状态和评测证据分别记录 |
-| 人工控制的改进 | Evolver 生成候选和证据，激活与回滚由操作人员明确执行 |
-
-## 接入飞书
-
-Pico 使用飞书 WebSocket 长连接，不需要公网 IP 或 Webhook 域名。
-
-```bash
-pico channels enable feishu \
-  --app-id "cli_xxxxxxxxxxxxxxxx" \
-  --app-secret "$FEISHU_APP_SECRET"
-
-cd /path/to/your-project
-pico gateway --workspace "$PWD" --verbose
-```
-
-飞书应用仍然需要机器人能力、消息权限、`im.message.receive_v1` 和已发布的应用版本。
-发送入站消息前，请先完成[飞书接入指南](docs/onboarding/feishu.zh-CN.md)。配置写入
-成功不能证明真实收发链路已经工作。
-
-## 值得记住的命令
-
-| 目标 | 命令 |
-| --- | --- |
-| 配置 Pico 并执行第一条 Turn | `pico onboard --skip-memory` |
-| 打开原生 TUI | `pico` |
-| 执行一次 Turn | `pico run -m "..."` |
-| 检查 Runtime 与 Provider | `pico doctor --probe` |
-| 查看已安装 Plugin | `pico plugins` |
-| 管理消息渠道 | `pico channels ...` |
-| 服务已启用的渠道 | `pico gateway --workspace /path/to/project` |
-| 管理定时任务 | `pico cron ...` |
-| 查看 Session 与 Tracing | `pico sessions ...` / `pico tracing` |
-| 执行人工受控的演进 | `pico evolve check\|run\|status\|finalize` |
-
-## 状态与安全
-
-| 范围 | 默认位置 |
-| --- | --- |
-| 全局配置与 Runtime 数据 | `~/.pico` |
-| 前台项目 | 当前目录 |
-| 前台项目状态 | `~/.pico/projects/<project-id>` |
-| Gateway Workspace | 显式传入 `--workspace`，否则使用 `~/.pico/workspace` |
-
-正常启动会把 Pico 状态放在仓库之外。可执行 Plugin 只从 Pico 内置目录、操作人员
-管理的 `~/.pico/plugins/` 和已安装的 `pico.plugins` entry point 中发现。
-仓库里的 `.pico/plugins/` 不会成为自动启动来源。
-
-修改 Backend 或把安装交给其他操作人员前，请先阅读
-[Memory 边界](docs/onboarding/memory.zh-CN.md)和
-[故障排查](docs/onboarding/troubleshooting.md)。
-
-## 发布仓库边界
-
-这个仓库保留可发布源码、确定性测试、经过审核的 Benchmark 代码与 Fixture、
-安装器、Onboarding 文档和法律文件。开发计划、原始运行数据、真实凭证、私有环境说明
-和未发布的外部 Memory 制品不会进入发布仓库。
-
-公开 Benchmark 结果只适用于文档中写明的冻结 Workload 与 Verifier，不能外推为
-生产 SLA。评测入口见[评测索引](docs/evaluation/README.md)和
-[`benchmarks/`](benchmarks/)。
-
-## 开发与验证
+X-harness 需要 Python 3.12 和 [uv](https://docs.astral.sh/uv/)。当前 Python 分发名和
+CLI 命令为保持代码兼容，仍分别使用 `pico-harness` 与 `pico`。在已克隆的仓库中：
 
 ```bash
 uv sync --frozen --extra dev --dev
-npm ci
-npm ci --prefix ui-tui
-make check
-make picobench-smoke
-PICO_RELEASE_OUTPUT=/absolute/empty/output make release-dist
+uv run pico onboard --skip-memory
+uv run pico run -m "说明这个仓库的主请求路径"
+uv run pico doctor --probe
 ```
 
-Pico 仍处于 pre-1.0，接口可能变化。`make check` 验证保留的发布树，不能替代真实
-Provider 或消息渠道的 Smoke Test。
+`doctor --probe` 会发起真实 Provider 请求，并可能消耗配额。未执行 Probe 时，配置校验
+通过不能证明 Provider 能返回回复。
+
+原生 TUI 还需要 Node.js 22，并使用仓库中的锁文件安装依赖：
+
+```bash
+npm ci
+npm ci --prefix ui-tui
+uv run pico --dev
+```
+
+Onboarding、Provider 配置与恢复说明见[首次使用指南](docs/onboarding/README.zh-CN.md)；
+飞书设置见独立的[渠道指南](docs/onboarding/feishu.zh-CN.md)。
+
+## 评测
+
+仓库内的 PicoBench 包含确定性 Fixture、Workload、Reducer 和 Verifier。公开测量结果只适用于
+明确命名的冻结 Workload、环境和 Verifier，不能作为生产 SLA。
+
+```bash
+python scripts/run_tests.py fast --suite p0_core
+python scripts/run_tests.py phase --phase p1c
+make picobench-smoke
+```
+
+[评测索引](docs/evaluation/README.md)列出保留的报告及其证据边界。首页不会展示缺少
+运行工件支撑的 Benchmark 数字。
+
+## Current Limitations / Roadmap
+
+- 项目处于 Alpha 阶段，1.0 前公开接口可能变化。
+- Provider、Sandbox 与渠道行为依赖本地配置；确定性测试不能替代真实 Smoke Test。
+- Resume 根据持久化证据重新开始工作，不会恢复旧 Coroutine、子进程、Provider
+  Stream、锁或程序计数器。
+- Delivery 恢复独立于 Turn 执行，不能因为投递失败而自动重跑 Turn。
+- Selective Rewind、工具渐进披露、Trace Replay、独立验证、知识演进与 Jev 仍是
+  Experimental。
+- Jev 默认关闭，只能排序或推荐；权限、安全、激活和终态始终由确定性 Runtime 决定。
+
+当前开发顺序是：确定性基线 → Selective Rewind → 工具渐进披露 → Trace Replay 与
+独立验证 → 可选决策平面实验。
+
+## 发布与安全边界
+
+仓库检查会拒绝内部计划、原始 Benchmark 输出、凭据文件和已知私有环境引用。Runtime
+状态通常位于仓库外的 `~/.pico`。不要把真实凭据写入示例、Fixture、Issue 或评测工件。
+
+## 开发验证
+
+```bash
+python scripts/run_tests.py fast --suite test_infrastructure
+make check-public-tree
+git diff --check
+```
+
+更广的阶段或发布验收应使用规范测试运行器。发布检查是确定性的，但不能证明未测试的
+外部 Provider 或渠道可用。
 
 ## 许可证
 
-Pico 使用 Apache License 2.0。第三方归属与许可证见 [LICENSE](LICENSE)、
-[NOTICES.md](NOTICES.md) 和 [LICENSES/](LICENSES/)。
+使用 Apache License 2.0。第三方归属见 [LICENSE](LICENSE)、[NOTICES.md](NOTICES.md)
+和 [LICENSES/](LICENSES/)。

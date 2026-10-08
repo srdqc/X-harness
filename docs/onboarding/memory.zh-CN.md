@@ -1,6 +1,6 @@
 # Memory 发布边界
 
-Pico 保留 Memory Backend 协议和可选适配接口，但当前 Gitee 发布不包含外部
+X-harness 保留 Memory Backend 协议和可选适配接口，但当前发布不包含外部
 Memory 实现、安装地址或配套制品。
 
 ## 当前受支持的配置
@@ -12,14 +12,14 @@ pico onboard --skip-memory
 ```
 
 有效配置是 `memory.backend = null`。这只关闭外部长期记忆，不会关闭 Local Skills、
-Session、Context、Tool 或其他 Pico Runtime 能力。
+Session、Context、Tool 或其他 X-harness Runtime 能力。
 
 向导仍会通过完整 Runtime 执行第一条 Turn。Memory 关闭不应阻止 Provider、工具或
 Session 的正常工作。
 
 ## 为什么必须显式关闭
 
-Pico 不会把缺失的 Memory Plugin 当作可用状态。如果配置选择了一个未安装的
+X-harness 不会把缺失的 Memory Plugin 当作可用状态。如果配置选择了一个未安装的
 Backend，启动与诊断会 fail closed，避免用户以为 Recall 已经生效。
 
 检查当前状态：
@@ -40,7 +40,7 @@ pico onboard --skip-memory --reset
 
 ## 外部 Memory 的信任边界
 
-源码中的 Adapter 名称、Plugin identity 校验和兼容测试，只能证明 Pico 预留了集成
+源码中的 Adapter 名称、Plugin identity 校验和兼容测试，只能证明 X-harness 预留了集成
 边界，不能证明公开用户已经获得可安装制品。
 
 在维护者发布兼容制品和安装说明前：

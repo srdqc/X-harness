@@ -6,7 +6,7 @@ requires-python = ">=3.12,<3.13"
 license =  "Apache-2.0"
 license-files = ["LICENSE", "LICENSES/*", "NOTICES.md"]
 authors = [
-    {name = "Hackerismydream"}
+    {name = "X-harness contributors"}
 ]
 keywords = ["ai", "agent", "cli", "terminal", "context-management", "skill-evolution"]
 classifiers = [

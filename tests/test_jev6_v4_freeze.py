@@ -160,7 +160,7 @@ def test_ordering_drift_regression_remains_active() -> None:
 
 
 def test_provider_and_sandbox_sources_are_separate_and_frozen() -> None:
-    assert PROVIDER_CONFIG_SOURCE == "/mnt/c/Users/srdqc/.pico/config.json"
+    assert PROVIDER_CONFIG_SOURCE == "~/.pico/config.json"
     assert SANDBOX_CONFIG_SOURCE == "frozen_jev6_v4_infrastructure"
     assert PROVIDER_CONFIG_SOURCE != SANDBOX_CONFIG_SOURCE
     assert SANDBOX_REQUIREMENT["backend"] == "boxlite"

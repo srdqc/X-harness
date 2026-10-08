@@ -1,204 +1,160 @@
 <div align="center">
 
-# Pico
+# X-harness
 
-### One Agent Runtime across every place you work.
-
-Run the same tool-using agent in your terminal, native TUI, background Gateway,
-scheduled jobs, and message channels. The entry point changes; the Turn,
-Session, Context, tools, and evidence model stay the same.
+### A compact runtime for tool-using agents across local and asynchronous surfaces.
 
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-Apache--2.0-0B7285)
 ![Status](https://img.shields.io/badge/Status-Alpha-F59E0B)
 
-[Quick start](#from-install-to-a-real-reply) ·
-[First-use guide](docs/onboarding/README.zh-CN.md) ·
-[Feishu](docs/onboarding/feishu.zh-CN.md) ·
-[Agent install contract](docs/onboarding/agent-install.md) ·
-[中文](README.zh-CN.md)
+[Quick Start](#quick-start) · [Evaluation](#evaluation) ·
+[First-use guide](docs/onboarding/README.zh-CN.md) · [中文](README.zh-CN.md)
 
 </div>
 
----
+## The problem
 
-Pico is a compact Agent Harness. Every host submits a Turn through the same
-Runtime instead of building its own agent loop. Pico owns scheduling,
-cancellation, Context assembly, tool execution, Session persistence, Tracing,
-and delivery. Optional Memory backends plug into that Runtime, but this release
-does not bundle an external Memory implementation.
+Agent entry points often grow separate execution loops, state handling, and safety
+rules. That makes terminal sessions, background jobs, and message channels behave
+differently and makes outcomes difficult to reproduce.
+
+X-harness is a secondary-development fork of the original Pico project. It
+routes those entry points through one Turn runtime. The runtime owns
+scheduling, context assembly, tool execution, session persistence, tracing, and
+delivery bookkeeping. CLI and TUI are the primary interactive surfaces;
+Gateway and channels are asynchronous control surfaces.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    U["You"] --> H["CLI · TUI · Gateway · Cron · Feishu"]
-    H --> S["Spine"]
-    S --> T["Turn Runner"]
-    T --> A["Agent Loop"]
+    U["User or automation"] --> H["CLI · TUI · Gateway · Cron · Channels"]
+    H --> S["TurnRequest / Scheduler"]
+    S --> R["TurnRunner"]
+    R --> A["AgentLoop"]
     A <--> C["Context"]
-    A <--> M["Optional Memory"]
-    A <--> X["Tools · MCP · Sandbox"]
+    A <--> T["ToolRegistry · Policy · Sandbox"]
     A <--> P["Providers"]
-    T --> E["Session · Tracing · Delivery"]
+    R --> D["Session · Trace · Delivery"]
 ```
 
-## From install to a real reply
+Conversation ordering belongs to the Scheduler. Session, temporary Context,
+Workspace checkpoints, runtime recovery state, traces, delivery state, and
+external side effects remain separate domains. A completed Turn therefore does
+not imply successful delivery or prove that an external side effect occurred.
 
-Pico requires Python 3.12. The native TUI uses Node.js 22; the installer can
-provision a private Node runtime when the system version is missing or too old.
+## Core Features
 
-While this repository is private, clone it with your configured Gitee
-credentials and run the installer from the checkout:
+| Capability | Status | What is implemented |
+| --- | --- | --- |
+| Unified Turn path | Core | CLI, TUI, Gateway, Cron, and channels converge on the same scheduling and execution path. |
+| Scheduling and cancellation | Core | Per-conversation ordering, busy-policy handling, origin capacity, cancellation, and terminal events. |
+| Sessions and context | Core | Persisted conversations plus bounded, model-visible context assembly. Resume starts a new Turn from persisted facts. |
+| Tool execution | Core | Registry lookup, argument validation, policy checks, timeouts, concurrency controls, and sandbox integration remain runtime-owned. |
+| Selective rewind | Experimental | Branch-preserving conversation, Workspace, or combined rewind. It does not revive processes, streams, or Python stacks. |
+| Progressive tool disclosure | Experimental | Tool search limits schemas shown to the model; `ToolRegistry` remains the executable source of truth. |
+| Trace replay and verification | Experimental | Replay is non-destructive by default, and verification runs outside the evaluated agent. |
+| Gateway and channels | Partial | Asynchronous status, instruction, cancellation, and result-delivery paths exist; live provider/channel setup still needs environment-specific validation. |
+| Memory backends | Partial | A backend contract exists, but this repository does not bundle an external Memory implementation. |
+| Evolver and Jev decision components | Experimental | Opt-in candidate evaluation with deterministic fallback and manual activation. These components cannot authorize tools or own terminal state. |
 
-```bash
-git clone https://gitee.com/htxoffical/pico-harness.git
-cd pico-harness
-./install.sh
-```
+## Execution Flow
 
-Windows PowerShell:
+1. A surface creates a `TurnRequest`.
+2. The Scheduler applies conversation ordering, capacity, and cancellation rules.
+3. The Turn runner assembles Context from persisted facts and current inputs.
+4. The model proposes responses or tool calls.
+5. The deterministic runtime validates and executes allowed tools.
+6. Session facts, traces, runtime evidence, and delivery state are recorded by
+   their respective owners.
+7. Evaluation uses predefined verifiers; the model's final message is not proof
+   of success.
 
-```powershell
-git clone https://gitee.com/htxoffical/pico-harness.git
-Set-Location pico-harness
-.\install.ps1
-```
+## Quick Start
 
-The installer resolves Pico from Gitee Releases and defaults to China-hosted
-Python and Node.js mirrors. A private Release requires `PICO_GITEE_TOKEN`. You
-can also set `PICO_WHEEL_URL` to a trusted wheel URL.
-
-| Installer control | Purpose |
-| --- | --- |
-| `PICO_GITEE_TOKEN` | read a private Gitee Release |
-| `PICO_WHEEL_URL` | install a trusted Pico wheel directly |
-| `PICO_PYPI_INDEX` | override the Python package index |
-| `PICO_NODE_MIRROR` | override the Node.js download mirror |
-| `PICO_NODE_CHECKSUM_BASE` | override the Node.js checksum source |
-| `PICO_NPM_REGISTRY` | override the npm registry |
-| `PICO_UV_INSTALL_URL` | override the uv installer URL |
-
-Configure Pico inside the repository where the agent will work:
-
-```bash
-cd /path/to/your-project
-pico onboard --skip-memory
-```
-
-The four-step wizard follows the first result you can verify:
-
-```text
-LLM credentials -> Memory explicitly off -> first real Turn
-                -> run location -> optional message channel
-```
-
-The current Gitee release does not contain an external Memory implementation,
-so `--skip-memory` is the supported path. Pico records
-`memory.backend = null`; it does not pretend that a missing backend is healthy.
-
-After onboarding:
-
-```bash
-pico
-pico run -m "Map the main request path in this repository"
-pico doctor --probe
-```
-
-`pico doctor --probe` sends a real model request. A static configuration check
-or a skipped probe does not prove that the Provider returned a reply.
-
-See the [first-use guide](docs/onboarding/README.zh-CN.md) for private Release
-authentication, non-interactive setup, exact acceptance checks, and recovery
-paths.
-
-## What Pico owns
-
-| What you need | What Pico does |
-| --- | --- |
-| One agent across several surfaces | CLI, TUI, Gateway, Cron, and Channels submit the same Turn contract |
-| Context that does not become a prompt dump | Context is retrieved, budgeted, and assembled before each model call |
-| Tools with explicit boundaries | Filesystem, Shell, Web, MCP, messaging, and Subagents share confirmation and Sandbox controls |
-| Recoverable conversations | Sessions persist independently from the current terminal process |
-| Debuggable outcomes | Tracing, Provider usage, delivery state, and evaluation evidence remain separate records |
-| Controlled improvement | Evolver produces candidates and evidence; activation and rollback remain explicit operator actions |
-
-## Connect Feishu
-
-Pico uses Feishu's WebSocket long connection, so you do not need a public IP or
-webhook domain.
-
-```bash
-pico channels enable feishu \
-  --app-id "cli_xxxxxxxxxxxxxxxx" \
-  --app-secret "$FEISHU_APP_SECRET"
-
-cd /path/to/your-project
-pico gateway --workspace "$PWD" --verbose
-```
-
-The Feishu app still needs bot capability, message permissions,
-`im.message.receive_v1`, and a published application version. Follow the
-[Feishu guide](docs/onboarding/feishu.zh-CN.md) before testing an inbound
-message. Saving channel configuration does not prove that live delivery works.
-
-## Commands worth remembering
-
-| Goal | Command |
-| --- | --- |
-| Configure Pico and run the first Turn | `pico onboard --skip-memory` |
-| Open the native TUI | `pico` |
-| Execute one Turn | `pico run -m "..."` |
-| Check Runtime and Provider health | `pico doctor --probe` |
-| Inspect installed Plugins | `pico plugins` |
-| Manage message channels | `pico channels ...` |
-| Serve enabled channels | `pico gateway --workspace /path/to/project` |
-| Manage scheduled work | `pico cron ...` |
-| Inspect Sessions and Tracing | `pico sessions ...` / `pico tracing` |
-| Run operator-controlled evolution | `pico evolve check\|run\|status\|finalize` |
-
-## State and security
-
-| Scope | Default location |
-| --- | --- |
-| Global configuration and Runtime data | `~/.pico` |
-| Foreground project | current directory |
-| Foreground project state | `~/.pico/projects/<project-id>` |
-| Gateway Workspace | explicit `--workspace`, otherwise `~/.pico/workspace` |
-
-Normal startup keeps Pico state outside the repository. Executable Plugins are
-loaded only from Pico's bundled set, operator-managed `~/.pico/plugins/`, and
-installed `pico.plugins` entry points. A checkout's `.pico/plugins/` directory
-is not an automatic startup source.
-
-Read the [Memory boundary](docs/onboarding/memory.zh-CN.md) and
-[troubleshooting guide](docs/onboarding/troubleshooting.md) before changing a
-backend or handing the installation to another operator.
-
-## Release repository boundary
-
-This repository contains publishable source, deterministic tests, reviewed
-benchmark code and fixtures, installers, onboarding material, and legal
-notices. It excludes development plans, raw run artifacts, credentials, private
-environment instructions, and unpublished external Memory artifacts.
-
-Public benchmark results apply only to the frozen workload and verifier named
-in their documents. They are not production SLAs. Start with the
-[evaluation index](docs/evaluation/README.md) and [`benchmarks/`](benchmarks/).
-
-## Build and verify
+X-harness requires Python 3.12 and [uv](https://docs.astral.sh/uv/). The current
+Python distribution and CLI retain their upstream-compatible names,
+`pico-harness` and `pico`. From a checkout:
 
 ```bash
 uv sync --frozen --extra dev --dev
-npm ci
-npm ci --prefix ui-tui
-make check
-make picobench-smoke
-PICO_RELEASE_OUTPUT=/absolute/empty/output make release-dist
+uv run pico onboard --skip-memory
+uv run pico run -m "Map the main request path in this repository"
+uv run pico doctor --probe
 ```
 
-Pico is pre-1.0. Interfaces can change. `make check` verifies the retained
-release tree; it does not replace a real Provider or channel smoke test.
+`doctor --probe` makes a real provider request and may consume provider quota.
+Without the probe, configuration validation does not prove that a provider can
+return a response.
+
+The native TUI additionally requires Node.js 22 and its checked-in lockfiles:
+
+```bash
+npm ci
+npm ci --prefix ui-tui
+uv run pico --dev
+```
+
+For onboarding, provider configuration, and recovery guidance, see the
+[first-use guide](docs/onboarding/README.zh-CN.md). Feishu setup is documented
+separately in the [channel guide](docs/onboarding/feishu.zh-CN.md).
+
+## Evaluation
+
+The included PicoBench framework contains deterministic fixtures, workload definitions, reducers, and
+verifiers. Published measurements are valid only for the named frozen workload,
+environment, and verifier; they are not production service-level claims.
+
+```bash
+python scripts/run_tests.py fast --suite p0_core
+python scripts/run_tests.py phase --phase p1c
+make picobench-smoke
+```
+
+The [evaluation index](docs/evaluation/README.md) links the retained reports and
+their evidence boundaries. This README intentionally presents no benchmark
+number without an accompanying run artifact.
+
+## Current Limitations / Roadmap
+
+- The project is alpha and public interfaces may change before 1.0.
+- Provider, sandbox, and channel behavior depends on local configuration; the
+  deterministic suite does not replace live smoke testing.
+- Resume reconstructs work from durable evidence. It does not resume an old
+  coroutine, subprocess, provider stream, lock, or program counter.
+- Delivery recovery is separate from Turn execution and must not rerun a Turn
+  merely because delivery failed.
+- Selective rewind, progressive disclosure, trace replay, independent
+  verification, knowledge evolution, and Jev remain experimental.
+- Jev is disabled by default and is limited to ranking or recommendation. The
+  deterministic runtime retains permission, safety, activation, and terminal
+  authority.
+
+The development order is deterministic baseline → selective rewind → tool
+progressive disclosure → trace replay and independent verification → optional
+decision-plane experiments.
+
+## Release and security boundary
+
+Repository checks reject internal planning documents, raw benchmark outputs,
+credential-bearing files, and known private-environment references. Runtime
+state normally lives under `~/.pico`, outside the current repository. Never add
+real credentials to examples, fixtures, issue reports, or benchmark artifacts.
+
+## Development
+
+```bash
+python scripts/run_tests.py fast --suite test_infrastructure
+make check-public-tree
+git diff --check
+```
+
+Use the canonical test runner for broader phase or release acceptance. Release
+checks are deterministic, but they cannot certify an untested external provider
+or channel.
 
 ## License
 
-Pico is licensed under Apache License 2.0. See [LICENSE](LICENSE),
-[NOTICES.md](NOTICES.md), and [LICENSES/](LICENSES/) for attribution.
+Apache License 2.0. See [LICENSE](LICENSE), [NOTICES.md](NOTICES.md), and
+[LICENSES/](LICENSES/) for attribution.

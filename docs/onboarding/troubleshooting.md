@@ -2,7 +2,7 @@
 
 ## `configured memory plugin is unavailable`
 
-Pico 选择了一个当前工具环境中不存在的外部 Memory Backend。
+X-harness 选择了一个当前工具环境中不存在的外部 Memory Backend。
 
 先检查安装与 Plugin 状态：
 
@@ -12,7 +12,7 @@ pico plugins
 pico doctor --json
 ```
 
-当前 Gitee 发布的受支持处理方式是显式关闭 Memory：
+当前发布的受支持处理方式是显式关闭 Memory：
 
 ```bash
 pico onboard --skip-memory --reset
@@ -20,17 +20,15 @@ pico onboard --skip-memory --reset
 
 `--reset` 会重新进入配置流程。执行前记录现有 Provider、Sandbox 和渠道选择。
 
-## 安装器无法读取 Private Release
+## 从源码安装失败
 
-确认当前账号可以访问仓库，并通过环境变量提供 Token：
+确认 Python 版本为 3.12、uv 可用，并在可信 Checkout 中执行：
 
 ```bash
-export PICO_GITEE_TOKEN="<your-gitee-token>"
-./install.sh
+uv sync --frozen --extra dev --dev
 ```
 
-不要把 Token 放进远程 URL、仓库文件或故障截图。需要固定制品时，使用维护者提供并
-经过校验的 `PICO_WHEEL_URL`。
+不要通过未验证的 Wheel URL 绕过锁文件或依赖校验。
 
 ## Provider 预检通过，第一条 Turn 失败
 
@@ -70,7 +68,7 @@ pico --check
 7. `allow-from` 包含当前用户 `open_id`，或者调试期间设置为 `['*']`。
 
 配置保存成功不等于真实收发成功。最终验收需要一个真实用户发送入站消息，并在同一
-会话里收到 Pico 回复。
+会话里收到 X-harness 回复。
 
 ## Gateway 在运行，但操作了错误仓库
 
@@ -84,7 +82,7 @@ pico gateway --workspace /absolute/path/to/project --verbose
 
 ## 向导检测到已有配置
 
-默认情况下，Pico 会保护已有配置。自动化场景可以使用 `--yes` 复用；只有明确需要
+默认情况下，X-harness 会保护已有配置。自动化场景可以使用 `--yes` 复用；只有明确需要
 重做配置时才使用 `--reset`。
 
 ```bash

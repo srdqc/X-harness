@@ -1,6 +1,8 @@
-# Pico installation contract for agents
+# X-harness installation contract for agents
 
-Use this contract when an automation agent installs Pico for a user. The agent
+Use this contract when an automation agent installs X-harness for a user. The
+installed distribution and CLI currently retain the compatible names
+`pico-harness` and `pico`. The agent
 must not infer release URLs, expose secrets, publish artifacts, reset existing
 configuration, or initialize a repository the user did not select.
 
@@ -8,7 +10,7 @@ configuration, or initialize a repository the user did not select.
 
 - Target operating system: macOS/Linux or Windows.
 - Absolute path of the target Git repository.
-- Access to the private Gitee repository, or a trusted `PICO_WHEEL_URL`.
+- A trusted checkout of this repository.
 - Provider choice and credentials supplied directly by the user.
 - Whether a real billed first Turn is allowed. Default to no without explicit
   authorization.
@@ -20,27 +22,20 @@ address from adapter names in the source tree.
 
 ## Installation
 
-For a private release, use the user's configured Gitee credentials and run the
-installer from the checkout:
+Install from the trusted checkout:
 
 ```bash
-git clone https://gitee.com/htxoffical/pico-harness.git
-cd pico-harness
-./install.sh
+uv sync --frozen --extra dev --dev
 ```
 
-Windows PowerShell:
+For an isolated command installation from the same checkout:
 
-```powershell
-git clone https://gitee.com/htxoffical/pico-harness.git
-Set-Location pico-harness
-.\install.ps1
+```bash
+uv tool install --force ".[channels]"
 ```
 
-If the installer must read a private Release, accept `PICO_GITEE_TOKEN` from
-the user's environment. Do not print it, place it in a URL, or write it to a
-file. A `PICO_WHEEL_URL` can contain signed query parameters; redact them from
-reports and captured output.
+Do not infer a package URL or install from an untrusted artifact. Never print,
+persist, or copy provider and channel credentials into reports.
 
 ## User-owned configuration boundary
 
@@ -85,7 +80,7 @@ If the user authorizes a billed live check, run one of these commands:
 
 ```bash
 pico doctor --probe
-pico run -m "Reply with: Pico is ready"
+pico run -m "Reply with: X-harness is ready"
 ```
 
 Do not call a Provider verified unless the live command returned a model reply.
@@ -104,12 +99,12 @@ pico gateway --workspace <absolute-target-repository> --verbose
 ```
 
 Do not call Feishu connected until a human sends an inbound message and receives
-the Pico reply in the same conversation. Never paste Feishu secrets into an
+the X-harness reply in the same conversation. Never paste Feishu secrets into an
 issue, pull request, chat transcript, screenshot, or committed file.
 
 ## Handoff record
 
-Report the installed Pico version, target repository path, Memory state,
+Report the installed X-harness version, target repository path, Memory state,
 whether a billed probe ran, and whether a live channel round trip ran. Redact
 credentials and signed URL query strings. If a layer was skipped, label it as
 unverified instead of inferring success from another layer.

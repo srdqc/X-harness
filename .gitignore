@@ -2,6 +2,11 @@
 .env
 *.env
 key.env
+*.key
+*.p12
+*.pem
+*.pfx
+*.secret
 
 .venv/
 venv/
@@ -32,6 +37,7 @@ ui-tui/packages/hermes-ink/dist/
 .cache/skill_index/
 .worktrees/
 logs/
+*.log
 
 benchmarks/clawbench/results/
 benchmarks/pinchbench/benchmark.log

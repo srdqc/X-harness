@@ -21,7 +21,7 @@ stable for the full run.
 
 The control is one strict global FIFO with a fixed worker limit and
 per-session serialization. If the queue head belongs to an already-running
-session, later sessions wait. The treatment is Pico's session Lane scheduler
+session, later sessions wait. The treatment is X-harness's session Lane scheduler
 with the same USER concurrency limit. Both arms receive the same ordered trace:
 a long hot-session burst interleaved with short foreground Turns from other
 sessions.

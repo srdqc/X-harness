@@ -51,7 +51,7 @@ SANDBOX_REQUIREMENT_SCHEMA = "pico.jev6-sandbox-requirement.v2"
 REAL_SANDBOX_EVIDENCE_DIGEST = (
     "c6d806ee997da76079552349470c8e52fba89f427746198ad11af07d6fee4e16"
 )
-PROVIDER_CONFIG_SOURCE = "/mnt/c/Users/srdqc/.pico/config.json"
+PROVIDER_CONFIG_SOURCE = "~/.pico/config.json"
 SANDBOX_CONFIG_SOURCE = "frozen_jev6_v4_infrastructure"
 
 RETAINED_TASK_IDS = (

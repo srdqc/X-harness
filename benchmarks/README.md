@@ -1,12 +1,12 @@
-# Pico Benchmarks
+# X-harness Benchmarks
 
 This directory holds **evaluation harnesses** that are deliberately decoupled
 from the runtime package. They are not imported by `pico/` and are
 excluded from the wheel build — keep it that way.
 
 The Markdown task cards under `pinchbench/tasks/` are executable benchmark
-fixtures, not Pico product documentation. Some intentionally probe capabilities
-removed from Pico, including image generation or remote Skill discovery. A
+fixtures, not X-harness product documentation. Some intentionally probe capabilities
+removed from X-harness, including image generation or remote Skill discovery. A
 task card's presence does not mean the current Runtime supports that Tool.
 
 Use this area for reproducible evaluation work: capability suites, agent

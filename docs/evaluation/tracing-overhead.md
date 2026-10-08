@@ -3,7 +3,7 @@
 > **Status: formal run completed on 2026-08-13.** Generated evidence remains
 > outside Git; this page records its candidate binding and digests.
 
-This PicoBench track measures the local Runtime tax of Pico's in-tree Tracing.
+This PicoBench track measures the local Runtime tax of X-harness's in-tree Tracing.
 It does not test an external Provider or claim production latency.
 
 ## Treatment and workload
@@ -28,7 +28,7 @@ arm-balance, and disabled-no-output Gates to pass. There is no preregistered
 "good overhead" threshold; the result is an estimated operational cost, not an
 optimization claim.
 
-The immutable manifest binds the Pico commit, Python and platform identity,
+The immutable manifest binds the X-harness commit, Python and platform identity,
 workload, Pair count, and bootstrap settings. Per-block receipts retain raw
 Turn latency and terminal outcomes plus SHA-256 receipts for every trace file.
 The offline verifier rebuilds `raw-outcomes.jsonl`, `aggregate.json`,

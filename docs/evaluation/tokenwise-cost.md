@@ -11,7 +11,7 @@ the shared Runtime Assembly and retained one Call Record per physical attempt.
 ## Question
 
 How much does DeepSeek's automatic disk context cache reduce the estimated API
-cost of a verified successful Pico Agent task when the request prefix remains
+cost of a verified successful X-harness Agent task when the request prefix remains
 stable?
 
 DeepSeek ignores Anthropic `cache_control` markers. TokenWise therefore does
@@ -28,7 +28,7 @@ automatic cache remains enabled in both arms.
 | Policy | Request behavior | Role |
 | --- | --- | --- |
 | `prefix_disrupted` | Change the leading system and Tool Schema bytes before every Provider call | Negative control |
-| `prefix_stable` | Preserve Pico's ordinary request prefix | Treatment |
+| `prefix_stable` | Preserve X-harness's ordinary request prefix | Treatment |
 
 The disrupted arm is an experimental counterfactual, not an earlier product
 version and not a deployable configuration. Each Trial uses a separate
@@ -98,9 +98,9 @@ chain.
 
 ## Evidence boundary
 
-The result proves that Pico's stable request prefixes benefit from DeepSeek's
+The result proves that X-harness's stable request prefixes benefit from DeepSeek's
 automatic cache under the frozen workload and that TokenWise reconstructs
-DeepSeek cache usage and estimated cost. It does not prove that Pico created
+DeepSeek cache usage and estimated cost. It does not prove that X-harness created
 DeepSeek's cache, that every production workload will achieve a 75.19% hit
 rate, or that the estimate has been reconciled against a Provider invoice.
 
@@ -154,7 +154,7 @@ uv run python -m benchmarks.picobench.tokenwise_cost_campaign \
 ```
 
 The runner reads `DEEPSEEK_API_KEY`, then falls back to
-`providers.deepseek.apiKey` in Pico's config. It never writes credentials into
+`providers.deepseek.apiKey` in X-harness's config. It never writes credentials into
 artifacts. It stops before a new call at either 1,200 Provider calls or USD 2
 of observed estimated spend.
 

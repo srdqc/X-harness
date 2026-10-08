@@ -83,7 +83,7 @@
   "provider": {
     "id": "deepseek",
     "model": "deepseek/deepseek-v4-flash",
-    "config_source": "/mnt/c/Users/srdqc/.pico/config.json"
+    "config_source": "~/.pico/config.json"
   },
   "sandbox_requirement": {
     "schema": "pico.jev6-sandbox-requirement.v2",
@@ -134,7 +134,7 @@
     "jev6-int-01-public-turn-events-task_relevance_v1_provider_utility-rep3", "jev6-int-01-public-turn-events-task_relevance_v1-rep3"
   ],
   "anti_tuning_digests": {
-    "suite": "36168139127d393b7a947e85c7397c751c133705ecaa8bbf118422f8fa9caf7f",
+    "suite": "d460e49fe0c847f10f602e602715a5fbf4487f6ab6cad0f99923ea48f47d610a",
     "task_set": "4ed2a7cb584e1d05e41947379f9403a3189dd85d99266cec919a6b0764cd699c",
     "verifier_set": "70752f131c539336cd3e5592e00224cc3549b6344e970516b56f8d2434732170",
     "fixtures": "977cd26597c774b68e8d3ffb62af923f609d431fbf0e84b1304ceb3d7d24d6fd",

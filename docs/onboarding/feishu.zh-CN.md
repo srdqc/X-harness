@@ -1,14 +1,14 @@
-# 把 Pico 接到飞书
+# 把 X-harness 接到飞书
 
-目标：在飞书里给机器人发一条消息，由正在运行的 Pico Gateway 返回真实回复。
+目标：在飞书里给机器人发一条消息，由正在运行的 X-harness Gateway 返回真实回复。
 
-Pico 使用飞书 WebSocket 长连接，不需要公网 IP 或 webhook 域名。
+X-harness 使用飞书 WebSocket 长连接，不需要公网 IP 或 webhook 域名。
 
 ## 1. 创建企业自建应用
 
 1. 打开[飞书开放平台](https://open.feishu.cn/)，创建“企业自建应用”。
 2. 在应用能力中启用“机器人”。
-3. 在“凭证与基础信息”中复制 App ID 和 App Secret。App Secret 只应输入本地 Pico 配置，不要发到群聊、Issue 或截图里。
+3. 在“凭证与基础信息”中复制 App ID 和 App Secret。App Secret 只应输入本地 X-harness 配置，不要发到群聊、Issue 或截图里。
 
 ## 2. 配置权限
 
@@ -30,7 +30,7 @@ Pico 使用飞书 WebSocket 长连接，不需要公网 IP 或 webhook 域名。
 
 对照飞书官方文档：[长连接接收事件](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case?lang=zh-CN)、[添加事件](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/subscription-event-case?lang=zh-CN)和[接收消息](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive?lang=zh-CN)。
 
-## 4. 在 Pico 中启用飞书
+## 4. 在 X-harness 中启用飞书
 
 可以在 `pico onboard` 的第 4 步填写，也可以直接运行：
 
@@ -57,7 +57,7 @@ pico channels get feishu
 
 ## 5. 启动 Gateway，发送第一条消息
 
-Gateway 只处理它启动时选定的 Workspace。先进入想让 Pico 工作的仓库：
+Gateway 只处理它启动时选定的 Workspace。先进入想让 X-harness 工作的仓库：
 
 ```bash
 cd /path/to/your-project
@@ -69,7 +69,7 @@ pico gateway --workspace "$PWD" --verbose
 - 单聊：直接给机器人发消息。
 - 群聊：默认 `group-policy=mention`，需要 @ 机器人。
 
-看到 Gateway 日志中出现 inbound accepted，并在飞书里收到回复，才算通路成功。[发送消息 API](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create) 是 Pico 回复时使用的飞书能力。
+看到 Gateway 日志中出现 inbound accepted，并在飞书里收到回复，才算通路成功。[发送消息 API](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create) 是 X-harness 回复时使用的飞书能力。
 
 ## 安全收口
 
